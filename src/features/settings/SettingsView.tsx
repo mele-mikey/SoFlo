@@ -11,16 +11,18 @@ interface SettingsViewProps {
   onSettingsChange: (settings: AppSettings) => void
   onSecurityChange: (security: SecurityStatus) => void
   onToast: (message: string, type?: 'success' | 'error') => void
+  onStartWalkthrough: () => void
 }
 
 type BusyAction = 'export' | 'import' | 'wipe' | null
 
-export function SettingsView({ settings, dataLocation, security, onSettingsChange, onSecurityChange, onToast }: SettingsViewProps) {
+export function SettingsView({ settings, dataLocation, security, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
   const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
   const [downloadingModel, setDownloadingModel] = useState(false)
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
+  const [aiInfoOpen, setAiInfoOpen] = useState(false)
 
   const update = async (partial: Partial<AppSettings>) => {
     const next = { ...settings, ...partial }
@@ -123,17 +125,18 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
       <SectionHeading icon={<Database size={18} />} title="Library data" detail="Your papers and study history stay on this computer." />
       <SettingRow title="Data location" detail={dataLocation}><span className="location-badge">{security?.configured ? 'Encrypted' : 'Local SQLite'}</span></SettingRow>
       <SettingRow title="Clear trash" detail="Recently deleted papers and sets are removed after 30 days. Clear them permanently now."><button className="button button-quiet button-small" onClick={() => setClearTrashOpen(true)}>Clear trash</button></SettingRow>
+      <SettingRow title="Guided Walkthrough" detail="Run the SoFlo introduction again without changing your library or preferences."><button className="button button-quiet button-small" onClick={onStartWalkthrough}>Start walkthrough</button></SettingRow>
     </section>
 
     <section className="settings-section ai-section">
-      <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." />
+      <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
       <SettingRow title="Local model" detail={settings.aiModelPath || "Download SoFlo's compact 3B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (settings.aiModelPath ? chooseAiModel() : downloadAiModel())}>{downloadingModel ? 'Downloading...' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
       {settings.aiEnabled && !settings.aiModelPath && <p className="ai-model-note">The model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.38" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.55" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -148,10 +151,11 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     {clearTrashOpen && <ConfirmDialog title="Clear the entire trash?" copy="This permanently deletes every paper and flashcard set in Recently deleted. This cannot be undone." confirmLabel="Clear trash" onClose={() => setClearTrashOpen(false)} onConfirm={() => void api.emptyTrash().then(() => { setClearTrashOpen(false); onToast('Trash cleared.') }).catch(() => onToast('Trash could not be cleared.', 'error'))} />}
     {wipeConfirmOpen && <ConfirmDialog eyebrow="IRREVERSIBLE ACTION" title="Wipe all local data?" copy="This permanently removes every class, paper, lecture, flashcard, schedule, setting, and saved credential on this computer. Export a .soflo file first if you may need anything later." confirmLabel="Wipe everything" busy={busy === 'wipe'} onClose={() => setWipeConfirmOpen(false)} onConfirm={() => void wipeData()} />}
     {securityDialog && <SecurityDialog security={security} type={securityDialog.type} remove={securityDialog.remove} onClose={() => setSecurityDialog(null)} onUpdated={(next) => { onSecurityChange(next); setSecurityDialog(null); onToast(next.configured ? 'Library security updated.' : 'Library encryption removed.') }} />}
+    {aiInfoOpen && <AiInfoDialog modelPath={settings.aiModelPath} onClose={() => setAiInfoOpen(false)} />}
   </main>
 }
 
-function SectionHeading({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) { return <div className="settings-section-heading">{icon}<div><h2>{title}</h2><p>{detail}</p></div></div> }
+function SectionHeading({ icon, title, detail, action }: { icon: ReactNode; title: string; detail: string; action?: ReactNode }) { return <div className="settings-section-heading">{icon}<div><h2>{title}</h2><p>{detail}</p></div>{action}</div> }
 function SettingRow({ title, detail, children }: { title: string; detail: string; children?: ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) { return <button role="switch" aria-checked={checked} className={checked ? 'toggle checked' : 'toggle'} onClick={() => onChange(!checked)}><span /></button> }
 
@@ -166,6 +170,11 @@ function ReadingSurfacePicker({ value, onChange }: { value: AppSettings['editorC
 
 function ConfirmDialog({ eyebrow, title, copy, confirmLabel, busy = false, onClose, onConfirm }: { eyebrow?: string; title: string; copy: string; confirmLabel: string; busy?: boolean; onClose: () => void; onConfirm: () => void }) {
   return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label={title}><header><div>{eyebrow && <p className="eyebrow">{eyebrow}</p>}<h2>{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>{copy}</p></div><footer><button className="button button-quiet" disabled={busy} onClick={onClose}>Cancel</button><button className="button button-danger" disabled={busy} onClick={onConfirm}>{busy ? 'Working...' : confirmLabel}</button></footer></section></div>
+}
+
+function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () => void }) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-info-dialog" role="dialog" aria-modal="true" aria-label="About SoFlo AI"><header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo sends AI prompts only to a llama.cpp server running on this computer at 127.0.0.1. Your papers and study material are not sent to SoFlo servers or Hugging Face for inference.</p></div><div className="ai-info-copy"><strong>Model download</strong><p>When you choose to download the default model, SoFlo downloads Qwen2.5-3B-Instruct GGUF from Hugging Face. That download needs an internet connection; local inference does not.</p></div><div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div><a className="text-button ai-model-link" href="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF" target="_blank" rel="noreferrer">Model information</a><button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>{detailsOpen && <dl className="ai-technical-details"><div><dt>Model</dt><dd>Qwen2.5-3B-Instruct, Q4_K_M GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}</div><footer><button className="button button-primary" onClick={onClose}>Done</button></footer></section></div>
 }
 
 function SecurityDialog({ security, type, remove, onClose, onUpdated }: { security: SecurityStatus | null; type: 'pin' | 'password'; remove: boolean; onClose: () => void; onUpdated: (status: SecurityStatus) => void }) {

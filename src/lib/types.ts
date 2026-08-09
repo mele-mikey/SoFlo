@@ -101,17 +101,49 @@ export interface FlashcardSetDetail {
   title: string
   description: string | null
   cards: Flashcard[]
+  progress: CardProgress[]
   updatedAt: string
 }
 
 export interface CardProgress {
   cardId: string
-  mastery: 'new' | 'learning' | 'familiar' | 'mastered'
+  mastery: 'new' | 'learning' | 'familiar' | 'mastered' | 'needsWork'
   correctCount: number
   incorrectCount: number
   consecutiveCorrect: number
   lastSeenAt: string | null
   dueAt: string | null
+}
+
+export interface StudySessionSummary {
+  id: string
+  setId: string | null
+  classId: string | null
+  mode: string
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface StudyInsightCard {
+  cardId: string
+  setId: string
+  term: string
+  mastery: CardProgress['mastery']
+  correctCount: number
+  incorrectCount: number
+  dueAt: string | null
+}
+
+export interface StudyInsights {
+  totalCards: number
+  newCards: number
+  learningCards: number
+  familiarCards: number
+  masteredCards: number
+  needsWorkCards: number
+  dueCards: number
+  weakCards: StudyInsightCard[]
+  strongCards: StudyInsightCard[]
 }
 
 export interface AppSettings {
@@ -123,6 +155,11 @@ export interface AppSettings {
   editorCanvas: 'paper' | 'midnight' | 'slate' | 'sepia'
   themeColor: 'purple' | 'red' | 'blue' | 'yellow'
   onboardingCompleted: boolean
+  walkthroughCompleted: boolean
+  walkthroughSkipped: boolean
+  walkthroughStep: string
+  walkthroughExampleClassId: string
+  walkthroughExampleSemesterId: string
   hideOverviewBanner: boolean
   aiEnabled: boolean
   aiModelPath: string
@@ -168,7 +205,7 @@ export type AppView =
   | { kind: 'document'; classId: string; documentId: string }
   | { kind: 'lecture'; classId: string; lectureId: string }
   | { kind: 'flashcardSet'; classId: string; setId: string }
-  | { kind: 'study'; classId: string; setId: string; mode: 'flashcards' | 'learn' | 'test' | 'match' }
+  | { kind: 'study'; classId: string; setId: string; mode: 'flashcards' | 'learn' | 'test' | 'match'; cardIds?: string[] }
   | { kind: 'archive' }
   | { kind: 'settings' }
   | { kind: 'help' }

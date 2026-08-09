@@ -39,7 +39,7 @@ export function LecturesView({ lectures, onCreate, onOpen, onDelete }: LecturesV
         <h2>Lectures</h2>
         <p>Keep a dated, searchable record of every class meeting.</p>
       </div>
-      <button className="button button-primary button-small" onClick={onCreate}><Plus size={15} /> New lecture</button>
+      {lectures.length > 0 && <button className="button button-primary button-small" onClick={onCreate}><Plus size={15} /> New lecture</button>}
     </div>
     {lectures.length ? <div className="lecture-list">{lectures.map((lecture) => <article className="lecture-row" key={lecture.id}>
       <button className="lecture-row-main" onClick={() => onOpen(lecture)}>

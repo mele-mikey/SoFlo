@@ -179,10 +179,10 @@ Function WelcomePage
   ${NSD_CreateLabel} 0 31u 100% 28u "A calmer place for class."
   Pop $1
   !insertmacro SoFloText $1 0xF4F1FA "17" "700"
-  ${NSD_CreateLabel} 0 67u 96% 46u "SoFlo keeps papers, lectures, flashcards, and your private study history on this PC. It has no account and does not download the local AI model until you choose an AI action."
+  ${NSD_CreateLabel} 0 67u 96% 46u "Everything for class, from your first lecture to your final exam."
   Pop $1
   !insertmacro SoFloText $1 0xC2BDCC "10" "400"
-  ${NSD_CreateLabel} 0 132u 96% 23u "This installer is user-wide, so a normal install does not ask for administrator permission."
+  ${NSD_CreateLabel} 0 132u 96% 23u "Installs just for this Windows account."
   Pop $1
   !insertmacro SoFloText $1 0x918A9B "9" "400"
   nsDialogs::Show
@@ -406,9 +406,6 @@ Function FinishPage
   ${NSD_CreateLabel} 0 33u 100% 24u "Your study space is installed."
   Pop $1
   !insertmacro SoFloText $1 0xF4F1FA "16" "700"
-  ${NSD_CreateLabel} 0 68u 96% 35u "Your library stays on this PC. If you chose a PIN or password in SoFlo, your data is encrypted before it is saved."
-  Pop $1
-  !insertmacro SoFloText $1 0xC2BDCC "10" "400"
   ${NSD_CreateCheckbox} 0 126u 100% 13u "Launch SoFlo now"
   Pop $FinishLaunch
   SetCtlColors $FinishLaunch 0xEDEAF4 0x1D1B24

@@ -155,6 +155,8 @@ pub struct FlashcardSetDetail {
     pub title: String,
     pub description: Option<String>,
     pub cards: Vec<Flashcard>,
+    #[serde(default)]
+    pub progress: Vec<CardProgress>,
     pub updated_at: String,
 }
 
@@ -174,6 +176,16 @@ pub struct AppSettings {
     pub theme_color: String,
     #[serde(default)]
     pub onboarding_completed: bool,
+    #[serde(default)]
+    pub walkthrough_completed: bool,
+    #[serde(default)]
+    pub walkthrough_skipped: bool,
+    #[serde(default)]
+    pub walkthrough_step: String,
+    #[serde(default)]
+    pub walkthrough_example_class_id: String,
+    #[serde(default)]
+    pub walkthrough_example_semester_id: String,
     #[serde(default)]
     pub hide_overview_banner: bool,
     #[serde(default = "default_ai_enabled")]
@@ -204,6 +216,11 @@ impl Default for AppSettings {
             editor_canvas: default_editor_canvas(),
             theme_color: default_theme_color(),
             onboarding_completed: false,
+            walkthrough_completed: false,
+            walkthrough_skipped: false,
+            walkthrough_step: String::new(),
+            walkthrough_example_class_id: String::new(),
+            walkthrough_example_semester_id: String::new(),
             hide_overview_banner: false,
             ai_enabled: true,
             ai_model_path: String::new(),
@@ -407,6 +424,64 @@ pub struct UpdateLibrarySecurityInput {
 pub struct RecordCardResponseInput {
     pub card_id: String,
     pub is_correct: bool,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub question_type: Option<String>,
+    #[serde(default)]
+    pub answer: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartStudySessionInput {
+    pub set_id: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteStudySessionInput {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudySessionSummary {
+    pub id: String,
+    pub set_id: Option<String>,
+    pub class_id: Option<String>,
+    pub mode: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyInsightCard {
+    pub card_id: String,
+    pub set_id: String,
+    pub term: String,
+    pub mastery: String,
+    pub correct_count: i32,
+    pub incorrect_count: i32,
+    pub due_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyInsights {
+    pub total_cards: i32,
+    pub new_cards: i32,
+    pub learning_cards: i32,
+    pub familiar_cards: i32,
+    pub mastered_cards: i32,
+    pub needs_work_cards: i32,
+    pub due_cards: i32,
+    pub weak_cards: Vec<StudyInsightCard>,
+    pub strong_cards: Vec<StudyInsightCard>,
 }
 
 #[derive(Debug, Deserialize)]

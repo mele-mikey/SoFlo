@@ -94,8 +94,24 @@ const PaperIndent = Extension.create({
     }
   },
 })
+const PaperMeta = Extension.create({
+  name: 'paperMeta',
+  addGlobalAttributes() {
+    return [{ types: ['doc'], attributes: {
+      headerText: { default: '' },
+      footerText: { default: '' },
+      headerPages: { default: null },
+      footerPages: { default: null },
+      repeatHeader: { default: false },
+      repeatFooter: { default: false },
+      showPageNumbers: { default: false },
+    } }]
+  },
+})
 const paperPaginationKey = new PluginKey<DecorationSet>('paperPagination')
 const paperGap = 34
+const usLetterWidthInches = 8.5
+const usLetterHeightInches = 11
 
 function derivePaperTitle(editor: Editor) {
   let firstText = ''
@@ -109,11 +125,92 @@ function derivePaperTitle(editor: Editor) {
   return (heading || firstText || 'Untitled paper').slice(0, 120)
 }
 
+type RunningField = 'page-number' | 'page-count'
+type RunningRegion = 'header' | 'footer'
+type RunningPageMap = Record<string, string>
+type ActiveRunningRegion = { region: RunningRegion; page: number; x: number; y: number } | null
+
+const runningFieldToken: Record<RunningField, string> = {
+  'page-number': '{PAGE_NUMBER}',
+  'page-count': '{PAGE_COUNT}',
+}
+
+function escapeRunningText(value: string) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+}
+
+function runningFieldElement(field: RunningField, page: number, pageCount: number) {
+  const value = field === 'page-number' ? page : pageCount
+  return `<span class="paper-running-dynamic-field" data-soflo-field="${field}" contenteditable="false">${value}</span>`
+}
+
+function renderRunningField(template: string, page: number, pageCount: number) {
+  const parts = template.split(/(\{PAGE_NUMBER\}|\{PAGE_COUNT\})/g)
+  return parts.map((part) => {
+    if (part === runningFieldToken['page-number']) return runningFieldElement('page-number', page, pageCount)
+    if (part === runningFieldToken['page-count']) return runningFieldElement('page-count', page, pageCount)
+    return escapeRunningText(part).replaceAll('\n', '<br>')
+  }).join('')
+}
+
+function serializeRunningRegion(element: HTMLElement) {
+  const clone = element.cloneNode(true) as HTMLElement
+  clone.querySelectorAll<HTMLElement>('[data-soflo-field]').forEach((field) => {
+    const type = field.dataset.sofloField as RunningField
+    field.replaceWith(globalThis.document.createTextNode(runningFieldToken[type] ?? ''))
+  })
+  return clone.textContent ?? ''
+}
+
+function setRunningFieldMarkup(element: HTMLElement, template: string, page: number, pageCount: number) {
+  element.innerHTML = renderRunningField(template, page, pageCount)
+}
+
+function refreshRunningFieldValues(element: HTMLElement, page: number, pageCount: number) {
+  element.querySelectorAll<HTMLElement>('[data-soflo-field]').forEach((field) => {
+    field.textContent = field.dataset.sofloField === 'page-count' ? String(pageCount) : String(page)
+  })
+}
+
+function parseRunningPageMap(value: unknown) {
+  if (typeof value === 'string') {
+    try { return parseRunningPageMap(JSON.parse(value)) } catch { return {} as RunningPageMap }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {} as RunningPageMap
+  return Object.fromEntries(Object.entries(value).filter(([page, text]) => /^\d+$/.test(page) && typeof text === 'string')) as RunningPageMap
+}
+
+function runningTextForPage(pages: RunningPageMap, legacyText: string, repeats: boolean, page: number) {
+  if (repeats) return pages['1'] ?? legacyText
+  return pages[String(page)] ?? (page === 1 ? legacyText : '')
+}
+
+function makeDecoratedRunningRegion(element: HTMLSpanElement, region: RunningRegion, template: string, page: number, pageCount: number) {
+  setRunningFieldMarkup(element, template, page, pageCount)
+  element.tabIndex = 0
+  element.addEventListener('dblclick', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    element.contentEditable = 'true'
+    element.classList.add('editing')
+    element.classList.remove('empty')
+    window.dispatchEvent(new CustomEvent<{ region: RunningRegion; page: number; element: HTMLElement; x: number; y: number }>('soflo:begin-running-region', { detail: { region, page, element, x: event.clientX, y: event.clientY } }))
+    element.focus()
+  })
+  element.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); element.blur() } })
+  element.addEventListener('blur', () => {
+    if (element.contentEditable !== 'true') return
+    element.contentEditable = 'false'
+    element.classList.remove('editing')
+    window.dispatchEvent(new CustomEvent<{ region: RunningRegion; page: number; value: string }>('soflo:save-running-region', { detail: { region, page, value: serializeRunningRegion(element) } }))
+  })
+}
+
 function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: unknown, offset: number) => void) => void } }; dom: HTMLElement; nodeDOM: (position: number) => Node | null | undefined }) {
   const paper = view.dom.closest<HTMLElement>('.document-page')
   if (!paper) return DecorationSet.empty
   const paperStyle = window.getComputedStyle(paper)
-  const pageHeight = paper.clientWidth * 11 / 8.5
+  const pageHeight = paper.clientWidth * usLetterHeightInches / usLetterWidthInches
   const topInset = Number.parseFloat(paperStyle.paddingTop) || 0
   const bottomInset = Number.parseFloat(paperStyle.paddingBottom) || 0
   const title = paper.querySelector<HTMLElement>('.document-title')
@@ -125,6 +222,13 @@ function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: u
   let capacity = firstCapacity
   const breaks: Decoration[] = []
   let hasPageBreak = false
+  let pageNumber = 1
+  const headerText = paper.dataset.runningHeader ?? ''
+  const footerText = paper.dataset.runningFooter ?? ''
+  const headerPages = parseRunningPageMap(paper.dataset.runningHeaderPages)
+  const footerPages = parseRunningPageMap(paper.dataset.runningFooterPages)
+  const repeatHeader = paper.dataset.repeatHeader === 'true'
+  const repeatFooter = paper.dataset.repeatFooter === 'true'
   view.state.doc.forEach((_node, offset) => {
     const nodeDom = view.nodeDOM(offset)
     if (!(nodeDom instanceof HTMLElement)) return
@@ -133,30 +237,58 @@ function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: u
     if (used > 0 && used + blockHeight > capacity) {
       const remaining = Math.max(0, capacity - used)
       const breakHeight = remaining + bottomInset + paperGap + topInset
+      const completedPage = pageNumber
+      pageNumber += 1
+      const nextPage = pageNumber
       breaks.push(Decoration.widget(offset, () => {
         const element = document.createElement('span')
         element.className = 'paper-page-break'
         element.style.height = `${breakHeight}px`
         element.style.setProperty('--paper-break-bottom', `${remaining}px`)
+        element.style.setProperty('--paper-break-gap-start', `${remaining + bottomInset}px`)
         element.style.setProperty('--paper-break-gap', `${paperGap}px`)
+        element.style.setProperty('--paper-break-bottom-inset', `${bottomInset}px`)
+        element.style.setProperty('--paper-break-top-inset', `${topInset}px`)
+        const completedFooter = runningTextForPage(footerPages, footerText, repeatFooter, completedPage)
+        const footer = document.createElement('span')
+        footer.className = `paper-running-footer paper-running-footer-later${completedFooter ? '' : ' empty'}`
+        makeDecoratedRunningRegion(footer, 'footer', completedFooter, completedPage, pageNumber)
+        element.append(footer)
+        const nextHeader = runningTextForPage(headerPages, headerText, repeatHeader, nextPage)
+        const header = document.createElement('span')
+        header.className = `paper-running-header paper-running-header-later${nextHeader ? '' : ' empty'}`
+        makeDecoratedRunningRegion(header, 'header', nextHeader, nextPage, pageNumber)
+        element.append(header)
         return element
-      }, { key: `paper-break-${offset}-${Math.round(breakHeight)}`, side: -1, ignoreSelection: true }))
+      }, { key: `paper-break-${offset}-${Math.round(breakHeight)}-${pageNumber}`, side: -1, ignoreSelection: true }))
       hasPageBreak = true
       used = 0
       capacity = laterCapacity
     }
     used += blockHeight
   })
-  // The document-page minimum height completes page one. Once content has crossed
-  // a page break, this final spacer completes the last later page to the same size.
-  const tail = Math.max(0, capacity - used)
+  paper.classList.toggle('is-multipage', hasPageBreak)
+  if (paper.dataset.pageCount !== String(pageNumber)) {
+    paper.dataset.pageCount = String(pageNumber)
+    window.dispatchEvent(new CustomEvent<number>('soflo:page-count', { detail: pageNumber }))
+  }
+  // The first sheet has its own min-height. Every later sheet needs both the unused
+  // writing area *and* the bottom margin, otherwise the last visible sheet ends a
+  // little short and appears to grow/shrink while typing.
+  const tail = Math.max(0, capacity - used) + bottomInset
   const documentSize = (view.state.doc as unknown as { content: { size: number } }).content.size
   if (hasPageBreak && tail > 0) breaks.push(Decoration.widget(documentSize, () => {
     const element = document.createElement('span')
     element.className = 'paper-page-tail'
     element.style.height = `${tail}px`
+    element.style.setProperty('--paper-tail-bottom-inset', `${bottomInset}px`)
+    const tailFooter = runningTextForPage(footerPages, footerText, repeatFooter, pageNumber)
+    const footer = document.createElement('span')
+    footer.className = `paper-running-footer paper-running-footer-tail${tailFooter ? '' : ' empty'}`
+    makeDecoratedRunningRegion(footer, 'footer', tailFooter, pageNumber, pageNumber)
+    element.append(footer)
     return element
-  }, { key: `paper-tail-${Math.round(tail)}`, side: 1, ignoreSelection: true }))
+  }, { key: `paper-tail-${Math.round(tail)}-${pageNumber}`, side: 1, ignoreSelection: true }))
   return DecorationSet.create(view.state.doc as never, breaks)
 }
 
@@ -198,6 +330,15 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
   const [pageMargin, setPageMargin] = useState<'normal' | 'narrow' | 'wide'>('normal')
   const [lineSpacing, setLineSpacing] = useState<'single' | 'docs' | 'one-half' | 'double'>('docs')
+  const [editingRegion, setEditingRegion] = useState<ActiveRunningRegion>(null)
+  const [headerText, setHeaderText] = useState('')
+  const [footerText, setFooterText] = useState('')
+  const [headerPages, setHeaderPages] = useState<RunningPageMap>({})
+  const [footerPages, setFooterPages] = useState<RunningPageMap>({})
+  const [repeatHeader, setRepeatHeader] = useState(false)
+  const [repeatFooter, setRepeatFooter] = useState(false)
+  const [showPageNumbers, setShowPageNumbers] = useState(false)
+  const [pageCount, setPageCount] = useState(1)
   const [pdfMessage, setPdfMessage] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [linkDialog, setLinkDialog] = useState<{ url: string; canRemove: boolean } | null>(null)
@@ -205,6 +346,9 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const [imageDialog, setImageDialog] = useState<{ src: string } | null>(null)
   const [tableDialog, setTableDialog] = useState<{ rows: number; cols: number; withHeaderRow: boolean } | null>(null)
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
+  const headerRef = useRef<HTMLDivElement>(null)
+  const footerRef = useRef<HTMLDivElement>(null)
+  const activeRunningElementRef = useRef<HTMLElement | null>(null)
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
@@ -224,7 +368,7 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
-      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperPagination, Color, Highlight.configure({ multicolor: true }),
+      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperMeta, PaperPagination, Color, Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
       Image.configure({ inline: false, allowBase64: true }), Table.configure({ resizable: true, allowTableNodeSelection: true }), TableRow, TableHeader, TableCell,
@@ -244,7 +388,67 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
   }, [document.id, document.content, editor])
   useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleLinkClick } }) }, [editor, spellcheck, fontSize])
-  useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin])
+  useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin, headerPages, footerPages, repeatHeader, repeatFooter])
+  useEffect(() => {
+    if (!editor) return
+    const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean }
+    const legacyHeader = attributes.headerText ?? ''
+    const legacyFooter = attributes.footerText ?? ''
+    const savedHeaderPages = parseRunningPageMap(attributes.headerPages)
+    const savedFooterPages = parseRunningPageMap(attributes.footerPages)
+    const isLegacyHeader = attributes.headerPages == null && Boolean(legacyHeader)
+    const isLegacyFooter = attributes.footerPages == null && Boolean(legacyFooter)
+    setHeaderText(legacyHeader)
+    setFooterText(legacyFooter)
+    setHeaderPages(Object.keys(savedHeaderPages).length ? savedHeaderPages : legacyHeader ? { '1': legacyHeader } : {})
+    setFooterPages(Object.keys(savedFooterPages).length ? savedFooterPages : legacyFooter ? { '1': legacyFooter } : {})
+    setRepeatHeader(Boolean(attributes.repeatHeader) || isLegacyHeader)
+    setRepeatFooter(Boolean(attributes.repeatFooter) || isLegacyFooter)
+    setShowPageNumbers(Boolean(attributes.showPageNumbers))
+  }, [document.id, editor])
+  useEffect(() => {
+    const updatePageCount = (event: Event) => setPageCount((event as CustomEvent<number>).detail || 1)
+    window.addEventListener('soflo:page-count', updatePageCount)
+    return () => window.removeEventListener('soflo:page-count', updatePageCount)
+  }, [])
+  useEffect(() => {
+    if (!editor) return
+    const beginRepeatedRegion = (event: Event) => {
+      const detail = (event as CustomEvent<{ region: RunningRegion; page: number; element: HTMLElement; x: number; y: number }>).detail
+      if (!detail) return
+      activeRunningElementRef.current = detail.element
+      setEditingRegion({ region: detail.region, page: detail.page, x: detail.x, y: detail.y })
+    }
+    const saveFromRepeatedRegion = (event: Event) => {
+      const detail = (event as CustomEvent<{ region: RunningRegion; page: number; value: string }>).detail
+      if (!detail) return
+      saveRunningRegion(detail.region, detail.page, detail.value)
+    }
+    window.addEventListener('soflo:begin-running-region', beginRepeatedRegion)
+    window.addEventListener('soflo:save-running-region', saveFromRepeatedRegion)
+    return () => { window.removeEventListener('soflo:begin-running-region', beginRepeatedRegion); window.removeEventListener('soflo:save-running-region', saveFromRepeatedRegion) }
+  }, [editor, footerPages, footerText, headerPages, headerText, repeatFooter, repeatHeader, showPageNumbers])
+  useLayoutEffect(() => {
+    const regions: Array<[HTMLDivElement | null, RunningRegion, string]> = [[headerRef.current, 'header', runningTextForPage(headerPages, headerText, repeatHeader, 1)], [footerRef.current, 'footer', runningTextForPage(footerPages, footerText, repeatFooter, 1)]]
+    regions.forEach(([element, region, value]) => {
+      if (!element) return
+      if (element.contentEditable === 'true' && editingRegion?.region === region && editingRegion.page === 1) refreshRunningFieldValues(element, 1, pageCount)
+      else setRunningFieldMarkup(element, value, 1, pageCount)
+    })
+  }, [editingRegion, footerPages, footerText, headerPages, headerText, pageCount, repeatFooter, repeatHeader])
+  useEffect(() => {
+    if (!editingRegion) return
+    const exit = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      const element = activeRunningElementRef.current ?? (editingRegion.region === 'header' ? headerRef.current : footerRef.current)
+      element?.blur()
+      setEditingRegion(null)
+      activeRunningElementRef.current = null
+    }
+    window.addEventListener('keydown', exit)
+    return () => window.removeEventListener('keydown', exit)
+  }, [editingRegion])
   useEffect(() => {
     const interceptFind = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
@@ -323,6 +527,90 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     editor.chain().focus().insertTable(table).run()
     setTableDialog(null)
   }
+  const persistRunningMeta = (nextHeaderPages: RunningPageMap, nextFooterPages: RunningPageMap, nextRepeatHeader: boolean, nextRepeatFooter: boolean) => {
+    const nextHeaderText = nextHeaderPages['1'] ?? ''
+    const nextFooterText = nextFooterPages['1'] ?? ''
+    editor.commands.updateAttributes('doc', { headerText: nextHeaderText, footerText: nextFooterText, headerPages: nextHeaderPages, footerPages: nextFooterPages, repeatHeader: nextRepeatHeader, repeatFooter: nextRepeatFooter, showPageNumbers })
+    setHeaderText(nextHeaderText); setFooterText(nextFooterText)
+    setHeaderPages(nextHeaderPages); setFooterPages(nextFooterPages)
+    setRepeatHeader(nextRepeatHeader); setRepeatFooter(nextRepeatFooter)
+  }
+  const saveRunningRegion = (region: RunningRegion, page: number, value: string) => {
+    const next = value.trim()
+    if (region === 'header') {
+      const nextPages = { ...headerPages }
+      const targetPage = repeatHeader ? '1' : String(page)
+      if (next) nextPages[targetPage] = next
+      else delete nextPages[targetPage]
+      persistRunningMeta(nextPages, footerPages, repeatHeader, repeatFooter)
+    } else {
+      const nextPages = { ...footerPages }
+      const targetPage = repeatFooter ? '1' : String(page)
+      if (next) nextPages[targetPage] = next
+      else delete nextPages[targetPage]
+      persistRunningMeta(headerPages, nextPages, repeatHeader, repeatFooter)
+    }
+    setEditingRegion(null)
+    activeRunningElementRef.current = null
+  }
+  const toggleRunningRepeat = () => {
+    if (!editingRegion) return
+    const { region, page } = editingRegion
+    const element = activeRunningElementRef.current
+    const currentValue = element ? serializeRunningRegion(element).trim() : runningTextForPage(region === 'header' ? headerPages : footerPages, region === 'header' ? headerText : footerText, region === 'header' ? repeatHeader : repeatFooter, page)
+    if (region === 'header') {
+      const nextRepeat = !repeatHeader
+      const nextPages = nextRepeat ? { '1': currentValue } : Object.fromEntries(Array.from({ length: pageCount }, (_, index) => [String(index + 1), headerPages['1'] ?? currentValue])) as RunningPageMap
+      persistRunningMeta(nextPages, footerPages, nextRepeat, repeatFooter)
+    } else {
+      const nextRepeat = !repeatFooter
+      const nextPages = nextRepeat ? { '1': currentValue } : Object.fromEntries(Array.from({ length: pageCount }, (_, index) => [String(index + 1), footerPages['1'] ?? currentValue])) as RunningPageMap
+      persistRunningMeta(headerPages, nextPages, repeatHeader, nextRepeat)
+    }
+  }
+  const insertRunningField = (field: 'page-number' | 'page-x-of-y') => {
+    const element = activeRunningElementRef.current ?? (editingRegion?.region === 'header' ? headerRef.current : footerRef.current)
+    if (!element || !editingRegion) return
+    const selection = window.getSelection()
+    const range = selection?.rangeCount && selection.getRangeAt(0)
+    const insertAtCaret = range && element.contains(range.commonAncestorContainer)
+    const fragment = globalThis.document.createDocumentFragment()
+    const addField = (type: RunningField) => {
+      const dynamicField = globalThis.document.createElement('span')
+      dynamicField.className = 'paper-running-dynamic-field'
+      dynamicField.dataset.sofloField = type
+      dynamicField.contentEditable = 'false'
+      dynamicField.textContent = type === 'page-count' ? String(pageCount) : String(editingRegion.page)
+      fragment.append(dynamicField)
+    }
+    if (field === 'page-x-of-y') {
+      fragment.append(globalThis.document.createTextNode('Page ')); addField('page-number'); fragment.append(globalThis.document.createTextNode(' of ')); addField('page-count')
+    } else addField('page-number')
+    if (insertAtCaret && range) {
+      range.deleteContents(); range.insertNode(fragment); range.collapse(false); selection?.removeAllRanges(); selection?.addRange(range)
+    } else element.append(fragment)
+    element.focus()
+  }
+  const focusBlankPaper = (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement
+    if (target.closest('.soflo-editor, .document-title, button, input, textarea, a, .paper-running-header, .paper-running-footer')) return
+    event.preventDefault()
+    editor.chain().focus('end').run()
+  }
+  const beginRunningEdit = (region: RunningRegion, page: number, element: HTMLElement, x: number, y: number) => {
+    const value = runningTextForPage(region === 'header' ? headerPages : footerPages, region === 'header' ? headerText : footerText, region === 'header' ? repeatHeader : repeatFooter, page)
+    setRunningFieldMarkup(element, value, page, pageCount)
+    element.contentEditable = 'true'
+    activeRunningElementRef.current = element
+    setEditingRegion({ region, page, x, y })
+    window.requestAnimationFrame(() => element.focus())
+  }
+  const runningRegion = (region: RunningRegion) => {
+    const value = runningTextForPage(region === 'header' ? headerPages : footerPages, region === 'header' ? headerText : footerText, region === 'header' ? repeatHeader : repeatFooter, 1)
+    const active = editingRegion?.region === region && editingRegion.page === 1
+    const Ref = region === 'header' ? headerRef : footerRef
+    return <div ref={Ref} className={`paper-running-${region}${active ? ' editing' : ''}${value || active ? '' : ' empty'}`} contentEditable={active} suppressContentEditableWarning onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); beginRunningEdit(region, 1, event.currentTarget, event.clientX, event.clientY) }} onBlur={(event) => saveRunningRegion(region, 1, serializeRunningRegion(event.currentTarget))} />
+  }
   return <main className="editor-view">
     <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
@@ -332,8 +620,9 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     <div className="editor-toolbar-wrap">
       <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
+    {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
-    <section className="editor-page-wrap"><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing}`}><EditorContent editor={editor} onContextMenu={openContextMenu} /></article></section>
+    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article></section>
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}

@@ -1,5 +1,7 @@
 # SoFlo
 
+Copyright © 2026 Mikey M. · PolyForm Noncommercial 1.0.0.
+
 I made SoFlo because I wanted one calm place to keep up with college: classes, papers, lecture notes, syllabi, flashcards, and study sessions. It is built for Windows and keeps your library on your own computer. There is no account to make and no required cloud service.
 
 ## Download and install

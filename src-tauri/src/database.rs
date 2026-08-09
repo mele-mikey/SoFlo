@@ -574,7 +574,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 5 {
+        if version >= 6 {
             return Ok(());
         }
         if version < 1 {
@@ -634,6 +634,16 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_lectures_class_date ON lectures(class_id, lecture_date DESC, created_at DESC);
                 PRAGMA user_version = 5;
+            "#).map_err(|error| error.to_string())?;
+        }
+        if version < 6 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS match_records (
+                    set_id TEXT PRIMARY KEY NOT NULL REFERENCES flashcard_sets(id) ON DELETE CASCADE,
+                    best_seconds INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                PRAGMA user_version = 6;
             "#).map_err(|error| error.to_string())?;
         }
         Ok(())

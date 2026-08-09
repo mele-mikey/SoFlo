@@ -25,12 +25,37 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 
 const AI_SERVER_PORT: u16 = 19393;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
+const DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
     model_path: String,
     last_used: Instant,
 }
 static AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
+
+fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
+    let requested = Path::new(requested_path.trim());
+    let default_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join(DEFAULT_AI_MODEL_NAME);
+    let model = if requested.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) && requested.is_file() {
+        requested.to_path_buf()
+    } else if default_path.is_file() {
+        default_path
+    } else {
+        return Err("SoFlo could not find a local AI model. Download the compact model in Settings, then try again.".into());
+    };
+    let size = fs::metadata(&model)
+        .map_err(|_| "SoFlo could not read the local AI model.".to_string())?
+        .len();
+    if size > 5_000_000_000 {
+        return Err("Choose a compact local model (4B parameters or less).".into());
+    }
+    Ok(model.to_string_lossy().to_string())
+}
 
 #[tauri::command]
 pub fn start_window_dragging(window: tauri::Window) -> CommandResult<()> {
@@ -155,16 +180,7 @@ fn refine_document_text_blocking(
     model_path: String,
     text: String,
 ) -> CommandResult<String> {
-    let model = Path::new(&model_path);
-    if model.extension().and_then(|value| value.to_str()) != Some("gguf") || !model.exists() {
-        return Err("Choose a local .gguf AI model in Settings first.".into());
-    }
-    let size = fs::metadata(model)
-        .map_err(|_| "SoFlo could not read that AI model.".to_string())?
-        .len();
-    if size > 5_000_000_000 {
-        return Err("Choose a compact local model (4B parameters or less).".into());
-    }
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
     let source = text.chars().take(80_000).collect::<String>();
     let system = "You are SoFlo's careful local document formatter. Preserve every factual detail and never invent text. Return only clean Markdown—never wrap it in ```markdown fences. For an essay or paper: preserve the MLA heading block exactly as separate normal lines (student, instructor, course, date); then use # for the one actual title; preserve the original paragraph boundaries and body text. Never turn a name, date, or ordinary sentence into a heading. For a syllabus, accuracy and readable hierarchy are critical: include every policy, deadline, contact detail, grading rule, assignment, and schedule item from the source. Use # only for its actual title, ## or ### for real section headings, bullets for lists, and tables only when the source is truly tabular. Use **bold** only for essential labels, deadlines, percentages, and warnings. Never use more than ###. Do not add commentary or explanations.";
     emit_ai_progress(&app, 6, "Starting your private local model");
@@ -229,10 +245,7 @@ fn generate_flashcards_text_blocking(
     materials: String,
     guidance: String,
 ) -> CommandResult<String> {
-    let model = Path::new(&model_path);
-    if model.extension().and_then(|value| value.to_str()) != Some("gguf") || !model.exists() {
-        return Err("Choose a local .gguf AI model in Settings first.".into());
-    }
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
     ensure_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 42, "Reading your study materials");
@@ -241,10 +254,28 @@ fn generate_flashcards_text_blocking(
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let source = materials.chars().take(120_000).collect::<String>();
+    if source.trim().is_empty() {
+        return Err("Add a topic, pasted study text, or an uploaded document before creating flashcards.".into());
+    }
+    let source_kind = if materials.trim_start().starts_with("TOPIC OR PROMPT:") {
+        "topic"
+    } else if materials.trim_start().starts_with("TEXT OR TOPIC:") {
+        "text-or-topic"
+    } else {
+        "source-material"
+    };
+    eprintln!("[SoFlo AI] flashcard generation source={} characters={}", source_kind, source.chars().count());
+    let request_instruction = if source_kind == "topic" {
+        "No source document was supplied. Use your general academic knowledge to make accurate flashcards directly about this topic or instruction."
+    } else if source_kind == "text-or-topic" {
+        "No source document was supplied. The input may be pasted study text or a study topic. Use details in the input whenever they are present; when it is a topic request, use accurate general academic knowledge."
+    } else {
+        "Use the supplied source material as the primary factual basis for the flashcards."
+    };
     let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
         "messages": [
-          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. Do not use Markdown or commentary."},
-          {"role":"user","content": format!("Create the most useful flashcards from these materials. Extra study guidance: {}\n\nMATERIALS:\n{}", guidance, source)}
+          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
+          {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
         ], "max_tokens": 8192, "temperature": 0.2
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
@@ -380,21 +411,20 @@ pub async fn download_default_ai_model(app: tauri::AppHandle, database: State<'_
     let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
     tauri::async_runtime::spawn_blocking(move || {
         const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf?download=true";
-        const MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
         let destination = if configured_model_path.trim().is_empty() {
-            app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(MODEL_NAME)
+            app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(DEFAULT_AI_MODEL_NAME)
         } else {
             let configured = Path::new(configured_model_path.trim());
             if configured.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
                 configured.to_path_buf()
             } else {
-                configured.join(MODEL_NAME)
+                configured.join(DEFAULT_AI_MODEL_NAME)
             }
         };
         let directory = destination.parent().ok_or_else(|| "SoFlo could not determine the local AI model folder.".to_string())?;
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         if destination.exists() { return Ok(destination.to_string_lossy().to_string()); }
-        let temporary = directory.join(format!("{}.download", MODEL_NAME));
+        let temporary = directory.join(format!("{}.download", DEFAULT_AI_MODEL_NAME));
         let mut response = reqwest::blocking::get(MODEL_URL).map_err(|_| "SoFlo could not start the local AI model download.".to_string())?.error_for_status().map_err(|_| "SoFlo could not download the local AI model.".to_string())?;
         let total = response.content_length().ok_or_else(|| "The AI model download did not report its size.".to_string())?;
         let mut output = fs::File::create(&temporary).map_err(|error| error.to_string())?;
@@ -568,6 +598,18 @@ fn read_card(row: &Row<'_>) -> rusqlite::Result<Flashcard> {
         is_starred: starred != 0,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+    })
+}
+
+fn read_card_progress(row: &Row<'_>) -> rusqlite::Result<CardProgress> {
+    Ok(CardProgress {
+        card_id: row.get(0)?,
+        mastery: row.get(1)?,
+        correct_count: row.get(2)?,
+        incorrect_count: row.get(3)?,
+        consecutive_correct: row.get(4)?,
+        last_seen_at: row.get(5)?,
+        due_at: row.get(6)?,
     })
 }
 
@@ -751,6 +793,35 @@ pub fn update_class(
     };
     connection.execute(&format!("UPDATE classes SET semester_id=?1, name=?2, course_code=?3, professor=?4, location=?5, schedule=?6, icon=?7, accent_color=?8, archived_at={}, updated_at=CURRENT_TIMESTAMP WHERE id=?9", archive), params![input.semester_id, input.name.trim(), input.course_code.trim(), input.professor, input.location, input.schedule, input.icon, input.accent_color, input.id]).map_err(|error| error.to_string())?;
     connection.query_row("SELECT id, semester_id, name, course_code, professor, location, schedule, icon, accent_color, position, archived_at, created_at, updated_at FROM classes WHERE id=?1", [&input.id], read_class).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_class(database: State<'_, Database>, id: String) -> CommandResult<()> {
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM test_attempts WHERE set_id IN (SELECT id FROM flashcard_sets WHERE class_id=?1)", [&id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM lectures WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM documents WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM flashcard_sets WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM document_folders WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM classes WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_semester(database: State<'_, Database>, id: String) -> CommandResult<()> {
+    let connection = database.open()?;
+    let class_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM classes WHERE semester_id=?1", [&id], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if class_count > 0 {
+        return Err("Remove the classes in this semester before removing it.".into());
+    }
+    connection
+        .execute("DELETE FROM semesters WHERE id=?1", [&id])
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1207,12 +1278,15 @@ pub fn get_flashcard_set(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let mut progress_statement = connection.prepare("SELECT card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at, due_at FROM card_progress WHERE card_id IN (SELECT id FROM flashcards WHERE set_id=?1)").map_err(|error| error.to_string())?;
+    let progress = progress_statement.query_map([&id], read_card_progress).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(FlashcardSetDetail {
         id,
         class_id,
         title,
         description,
         cards,
+        progress,
         updated_at,
     })
 }
@@ -1244,6 +1318,44 @@ pub fn set_flashcard_set_deleted(
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn flashcard_export_cell(value: &str) -> String {
+    value.replace(['\t', '\r', '\n'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn flashcard_export_filename(title: &str) -> String {
+    let name: String = title
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() || character == ' ' || character == '-' || character == '_' { character } else { '_' })
+        .collect();
+    let name = name.trim_matches([' ', '_', '-']);
+    if name.is_empty() { "SoFlo flashcards".into() } else { format!("SoFlo flashcards - {}", name) }
+}
+
+#[tauri::command]
+pub fn export_flashcard_set_text(database: State<'_, Database>, set_id: String) -> CommandResult<String> {
+    let set = get_flashcard_set(database, set_id)?;
+    let download_dir = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?)
+        .join("Downloads");
+    fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
+    let path = download_dir.join(format!("{}.txt", flashcard_export_filename(&set.title)));
+    let content = set.cards.iter().map(|card| format!("{}\t{}", flashcard_export_cell(&card.front), flashcard_export_cell(&card.back))).collect::<Vec<_>>().join("\r\n");
+    fs::write(&path, content).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn read_text_file(path: String) -> CommandResult<String> {
+    let source = PathBuf::from(path);
+    if !source.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) {
+        return Err("Choose a .txt file to import flashcards.".into());
+    }
+    fs::read_to_string(&source)
+        .map(|content| content.trim_start_matches('\u{feff}').to_string())
+        .map_err(|_| "SoFlo could not read that text file.".into())
 }
 
 #[tauri::command]
@@ -1339,7 +1451,7 @@ pub fn record_card_response(
     input: RecordCardResponseInput,
 ) -> CommandResult<CardProgress> {
     let connection = database.open()?;
-    let existing: Option<CardProgress> = connection.query_row("SELECT card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at, due_at FROM card_progress WHERE card_id=?1", [&input.card_id], |row| Ok(CardProgress { card_id: row.get(0)?, mastery: row.get(1)?, correct_count: row.get(2)?, incorrect_count: row.get(3)?, consecutive_correct: row.get(4)?, last_seen_at: row.get(5)?, due_at: row.get(6)? })).ok();
+    let existing: Option<CardProgress> = connection.query_row("SELECT card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at, due_at FROM card_progress WHERE card_id=?1", [&input.card_id], read_card_progress).ok();
     let progress = existing.unwrap_or(CardProgress {
         card_id: input.card_id.clone(),
         mastery: "new".into(),
@@ -1358,7 +1470,9 @@ pub fn record_card_response(
     } else {
         (progress.correct_count, progress.incorrect_count + 1, 0)
     };
-    let mastery = if !input.is_correct {
+    let mastery = if !input.is_correct && incorrect >= 3 && incorrect > correct {
+        "needsWork"
+    } else if !input.is_correct {
         "learning"
     } else if streak >= 5 {
         "mastered"
@@ -1367,16 +1481,55 @@ pub fn record_card_response(
     } else {
         "learning"
     };
-    connection.execute("INSERT INTO card_progress (card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at) VALUES (?1,?2,?3,?4,?5,CURRENT_TIMESTAMP) ON CONFLICT(card_id) DO UPDATE SET mastery=excluded.mastery, correct_count=excluded.correct_count, incorrect_count=excluded.incorrect_count, consecutive_correct=excluded.consecutive_correct, last_seen_at=excluded.last_seen_at", params![input.card_id, mastery, correct, incorrect, streak]).map_err(|error| error.to_string())?;
+    let review_days = if input.is_correct { match streak { 0 | 1 => 1, 2 => 3, 3 => 7, 4 => 14, 5 => 30, _ => 45 } } else { 1 };
+    // Keep this in SQLite's native timestamp form so the due-card query can compare
+    // values correctly without a timezone-string lexical mismatch.
+    let due_at = (chrono::Utc::now() + chrono::Duration::days(review_days))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    connection.execute("INSERT INTO card_progress (card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at, due_at) VALUES (?1,?2,?3,?4,?5,CURRENT_TIMESTAMP,?6) ON CONFLICT(card_id) DO UPDATE SET mastery=excluded.mastery, correct_count=excluded.correct_count, incorrect_count=excluded.incorrect_count, consecutive_correct=excluded.consecutive_correct, last_seen_at=excluded.last_seen_at, due_at=excluded.due_at", params![input.card_id, mastery, correct, incorrect, streak, due_at]).map_err(|error| error.to_string())?;
+    if let Some(session_id) = input.session_id.as_deref() {
+        connection.execute("INSERT INTO study_responses (id, session_id, card_id, question_type, is_correct, answer) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), session_id, input.card_id, input.question_type.unwrap_or_else(|| input.mode.unwrap_or_else(|| "review".into())), input.is_correct as i32, input.answer]).map_err(|error| error.to_string())?;
+    }
     Ok(CardProgress {
         card_id: progress.card_id,
         mastery: mastery.into(),
         correct_count: correct,
         incorrect_count: incorrect,
         consecutive_correct: streak,
-        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
-        due_at: None,
+        last_seen_at: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        due_at: Some(due_at),
     })
+}
+
+#[tauri::command]
+pub fn start_study_session(database: State<'_, Database>, input: StartStudySessionInput) -> CommandResult<StudySessionSummary> {
+    let connection = database.open()?;
+    let class_id: String = connection.query_row("SELECT class_id FROM flashcard_sets WHERE id=?1", [&input.set_id], |row| row.get(0)).map_err(|_| "That study set could not be found.".to_string())?;
+    let id = Uuid::new_v4().to_string();
+    connection.execute("INSERT INTO study_sessions (id, set_id, class_id, mode) VALUES (?1,?2,?3,?4)", params![id, input.set_id, class_id, input.mode]).map_err(|error| error.to_string())?;
+    connection.query_row("SELECT id, set_id, class_id, mode, started_at, completed_at FROM study_sessions WHERE id=?1", [&id], |row| Ok(StudySessionSummary { id: row.get(0)?, set_id: row.get(1)?, class_id: row.get(2)?, mode: row.get(3)?, started_at: row.get(4)?, completed_at: row.get(5)? })).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn complete_study_session(database: State<'_, Database>, input: CompleteStudySessionInput) -> CommandResult<()> {
+    database.open()?.execute("UPDATE study_sessions SET completed_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_study_insights(database: State<'_, Database>, class_id: String) -> CommandResult<StudyInsights> {
+    let connection = database.open()?;
+    let mut counts = [0_i32; 6];
+    let mut statement = connection.prepare("SELECT COALESCE(p.mastery, 'new'), COUNT(*) FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL GROUP BY COALESCE(p.mastery, 'new')").map_err(|error| error.to_string())?;
+    let rows = statement.query_map([&class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))).map_err(|error| error.to_string())?;
+    for row in rows { let (mastery, count) = row.map_err(|error| error.to_string())?; match mastery.as_str() { "learning" => counts[1] = count, "familiar" => counts[2] = count, "mastered" => counts[3] = count, "needsWork" => counts[4] = count, _ => counts[0] = count } }
+    counts[5] = connection.query_row("SELECT COUNT(*) FROM card_progress p INNER JOIN flashcards c ON c.id=p.card_id INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND datetime(p.due_at) <= CURRENT_TIMESTAMP", [&class_id], |row| row.get(0)).unwrap_or(0);
+    let mut card_statement = connection.prepare("SELECT c.id, c.set_id, c.front, COALESCE(p.mastery,'new'), COALESCE(p.correct_count,0), COALESCE(p.incorrect_count,0), p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL ORDER BY CASE COALESCE(p.mastery,'new') WHEN 'needsWork' THEN 0 WHEN 'learning' THEN 1 WHEN 'new' THEN 2 WHEN 'familiar' THEN 3 ELSE 4 END, (COALESCE(p.incorrect_count,0) - COALESCE(p.correct_count,0)) DESC, COALESCE(p.last_seen_at,'') ASC LIMIT 8").map_err(|error| error.to_string())?;
+    let weak_cards = card_statement.query_map([&class_id], |row| Ok(StudyInsightCard { card_id: row.get(0)?, set_id: row.get(1)?, term: row.get(2)?, mastery: row.get(3)?, correct_count: row.get(4)?, incorrect_count: row.get(5)?, due_at: row.get(6)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut strong_statement = connection.prepare("SELECT c.id, c.set_id, c.front, p.mastery, p.correct_count, p.incorrect_count, p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id INNER JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND p.mastery IN ('mastered', 'familiar') ORDER BY CASE p.mastery WHEN 'mastered' THEN 0 ELSE 1 END, p.consecutive_correct DESC LIMIT 3").map_err(|error| error.to_string())?;
+    let strong_cards = strong_statement.query_map([&class_id], |row| Ok(StudyInsightCard { card_id: row.get(0)?, set_id: row.get(1)?, term: row.get(2)?, mastery: row.get(3)?, correct_count: row.get(4)?, incorrect_count: row.get(5)?, due_at: row.get(6)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(StudyInsights { total_cards: counts[0] + counts[1] + counts[2] + counts[3] + counts[4], new_cards: counts[0], learning_cards: counts[1], familiar_cards: counts[2], mastered_cards: counts[3], needs_work_cards: counts[4], due_cards: counts[5], weak_cards, strong_cards })
 }
 
 #[tauri::command]
@@ -1388,6 +1541,32 @@ pub fn save_test_attempt(
     let id = Uuid::new_v4().to_string();
     connection.execute("INSERT INTO test_attempts (id, set_id, score, correct_count, question_count, answers_json) VALUES (?1,?2,?3,?4,?5,?6)", params![id, input.set_id, input.score, input.correct_count, input.question_count, input.answers_json]).map_err(|error| error.to_string())?;
     connection.query_row("SELECT id, set_id, score, correct_count, question_count, created_at FROM test_attempts WHERE id=?1", [&id], |row| Ok(TestAttemptSummary { id: row.get(0)?, set_id: row.get(1)?, score: row.get(2)?, correct_count: row.get(3)?, question_count: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_match_best_time(database: State<'_, Database>, set_id: String) -> CommandResult<Option<i32>> {
+    database
+        .open()?
+        .query_row("SELECT best_seconds FROM match_records WHERE set_id=?1", [&set_id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_match_time(database: State<'_, Database>, set_id: String, seconds: i32) -> CommandResult<i32> {
+    if seconds < 1 {
+        return Err("A Match time must be at least one second.".into());
+    }
+    let connection = database.open()?;
+    connection
+        .execute(
+            "INSERT INTO match_records (set_id, best_seconds, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP) ON CONFLICT(set_id) DO UPDATE SET best_seconds=MIN(match_records.best_seconds, excluded.best_seconds), updated_at=CASE WHEN excluded.best_seconds < match_records.best_seconds THEN CURRENT_TIMESTAMP ELSE match_records.updated_at END",
+            params![&set_id, seconds],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .query_row("SELECT best_seconds FROM match_records WHERE set_id=?1", [&set_id], |row| row.get(0))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-import { Check, CircleAlert, Download, LockKeyhole, Sparkles } from 'lucide-react'
+import { Check, CircleAlert, Download } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import sofloMark from '../../../src-tauri/icons/128x128.png'
@@ -48,10 +48,9 @@ export function InstallerApp() {
           <img className="installer-mark" src={sofloMark} alt="SoFlo" />
           <p className="installer-eyebrow">SOFLO FOR WINDOWS</p>
           <h1>A quieter place<br />for the work ahead.</h1>
-          <p className="installer-copy">Your papers, lectures, flashcards, and private study history stay together on this PC—without an account.</p>
-          <div className="installer-points"><span><LockKeyhole size={15} /> Your library stays local</span><span><Sparkles size={15} /> AI stays optional</span></div>
+          <p className="installer-copy">Everything for class, from your first lecture to your final exam.</p>
           <button className="installer-primary" onClick={() => void install()}><Download size={17} /> Install SoFlo</button>
-          <p className="installer-note">Installs just for this Windows account. No administrator access needed.</p>
+          <p className="installer-note">Installs just for this Windows account.</p>
         </>}
 
         {state === 'installing' && <>

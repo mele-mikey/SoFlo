@@ -25,10 +25,18 @@ import { SettingsView } from './features/settings/SettingsView'
 import { HelpView } from './features/help/HelpView'
 import { StudyView } from './features/study/StudyView'
 
-type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | null
+type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | null
 type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
+type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed' }
 type AiProgress = { progress: number; message: string }
+
+function aiFailureMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.trim()) return error.message
+  return 'SoFlo could not create flashcards. Please try again.'
+}
 
 function localDateKey(date = new Date()) {
   const offset = date.getTimezoneOffset() * 60_000
@@ -85,6 +93,7 @@ function App() {
   const pendingLecture = useRef<LectureDetail | null>(null)
   const lectureSaveTimer = useRef<number | null>(null)
   const [lectureToDelete, setLectureToDelete] = useState<LectureDetail | null>(null)
+  const [walkthroughOpen, setWalkthroughOpen] = useState(false)
   const closing = useRef(false)
   const aiConsentResolver = useRef<((proceed: boolean) => void) | null>(null)
 
@@ -115,6 +124,10 @@ function App() {
     } catch (error) { showToast(error instanceof Error ? error.message : 'Class materials could not be loaded.', 'error') }
   }, [showToast])
   useEffect(() => { void loadLibrary() }, [loadLibrary])
+  useEffect(() => {
+    const settings = library?.settings
+    if (settings?.onboardingCompleted && !settings.walkthroughCompleted && !settings.walkthroughSkipped && Boolean(settings.walkthroughStep)) setWalkthroughOpen(true)
+  }, [library?.settings])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<number>('ai-download-progress', (event) => setAiDownloadProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen('ai-download-finished', () => setAiDownloadProgress(null)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<AiProgress>('ai-generation-progress', (event) => setAiProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
@@ -307,21 +320,41 @@ function App() {
     if (!classId) { showToast('Open a class before creating a flashcard set.', 'error'); return }
     try { const set = await api.createSet({ classId, title: 'Untitled set' }); await loadClassContent(classId); navigate({ kind: 'flashcardSet', classId, setId: set.id }) } catch { showToast('A new flashcard set could not be created.', 'error') }
   }
-  const generateAiSet = async (targetClassId: string, sources: string[], guidance: string, title: string) => {
+  const importSet = async (targetClassId: string, title: string, text: string) => {
+    const rows = text.split(/\r?\n/).map((line) => line.split('\t')).filter(([front, back]) => front?.trim() && back?.trim())
+    if (!rows.length) throw new Error('Add one tab-separated term and definition per line.')
+    const created = await api.createSet({ classId: targetClassId, title: title.trim() || 'Imported flashcards', description: 'Imported flashcards.' })
+    await Promise.all(rows.map(([front, back], position) => api.saveCard({ setId: created.id, front: front.trim(), back: back.trim(), position, isStarred: false })))
+    await loadClassContent(targetClassId)
+    setModal(null)
+    navigate({ kind: 'flashcardSet', classId: targetClassId, setId: created.id })
+    showToast(`${rows.length} flashcards imported.`)
+  }
+  const generateAiSet = async (targetClassId: string, request: AiSetRequest) => {
     try {
-      const materials = (await Promise.all(sources.map((source) => source.toLowerCase().endsWith('.docx') ? api.importWordText(source) : api.importPdfText(source)))).join('\n\n--- NEXT DOCUMENT ---\n\n')
+      const imported = await Promise.all(request.sources.map((source) => source.toLowerCase().endsWith('.docx') ? api.importWordText(source) : api.importPdfText(source)))
+      const manual = request.pasted.trim()
+      const textOnly = !request.sources.length && Boolean(manual)
+      const materials = [request.topic.trim() && `TOPIC OR PROMPT:\n${request.topic.trim()}`, manual && `${textOnly ? 'TEXT OR TOPIC' : 'PASTED MATERIAL'}:\n${manual}`, ...imported.map((text, index) => `UPLOADED MATERIAL ${index + 1}:\n${text}`)].filter(Boolean).join('\n\n--- NEXT SOURCE ---\n\n')
+      if (!materials.trim()) throw new Error('Add a file, paste study material, or describe a topic first.')
       const modelPath = await ensureAiModel()
       if (!modelPath) throw new Error('Turn on AI in Settings to create cards with AI.')
       setAiWorking(true); setAiProgress({ progress: 3, message: 'Preparing your study materials' })
-      const raw = await api.generateFlashcardsText(modelPath, materials, guidance)
-      const match = raw.match(/\[[\s\S]*\]/)
-      const generated = JSON.parse(match?.[0] ?? raw) as { front?: string; back?: string }[]
-      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, 40)
+      const countInstruction = request.cardCount === 'auto' ? 'Choose an appropriate number of cards.' : `Make about ${request.cardCount} cards.`
+      const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${request.depth} depth. ${request.guidance.trim()}`)
+      const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+      const start = cleaned.indexOf('[')
+      const end = cleaned.lastIndexOf(']')
+      if (start < 0 || end <= start) throw new Error('SoFlo could not read the flashcards the local model returned. Try a shorter prompt or add a little more context.')
+      let generated: { front?: string; back?: string }[]
+      try { generated = JSON.parse(cleaned.slice(start, end + 1)) as { front?: string; back?: string }[] } catch { throw new Error('SoFlo could not read the flashcards the local model returned. Try again with a little more context.') }
+      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, request.cardCount === 'auto' ? 40 : request.cardCount)
       if (!cards.length) throw new Error('The local AI model did not return usable flashcards.')
-      const set = await api.createSet({ classId: targetClassId, title: title.trim() || 'AI study set', description: 'Created from your imported materials.' })
-      await Promise.all(cards.map((card, position) => api.saveCard({ setId: set.id, front: card.front!.trim(), back: card.back!.trim(), position, isStarred: false })))
+      const sourceKinds = [request.sources.length && 'uploaded material', request.pasted.trim() && 'pasted material', request.topic.trim() && 'a topic prompt'].filter(Boolean).join(', ')
+      const set = await api.createSet({ classId: targetClassId, title: request.title.trim() || 'AI study set', description: `Created from ${sourceKinds || 'study material'}.` })
+      await Promise.all(cards.map((card, position) => api.saveCard({ setId: set.id, front: card.front!.trim(), back: card.back!.trim(), notes: `AI-generated from ${sourceKinds || 'study material'}.`, position, isStarred: false })))
       await loadClassContent(targetClassId); setModal(null); navigate({ kind: 'flashcardSet', classId: targetClassId, setId: set.id }); showToast(`${cards.length} flashcards created.`)
-    } catch (error) { showToast(error instanceof Error ? error.message : 'Flashcards could not be created from those materials.', 'error') } finally { setAiWorking(false); setAiProgress(null) }
+    } catch (error) { console.error('SoFlo AI flashcard generation failed.', error); showToast(aiFailureMessage(error), 'error') } finally { setAiWorking(false); setAiProgress(null) }
   }
   const updateDocument = (partial: Partial<Pick<DocumentDetail, 'content' | 'contentPlain' | 'title'>>) => {
     setActiveDocument((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleDocumentSave(next); return next })
@@ -358,15 +391,99 @@ function App() {
   const restoreDocument = async (id: string) => { if (!classId) return; await api.setDocumentDeleted(id, false); await loadClassContent(classId); setTrashedDocuments((current) => current.filter((document) => document.id !== id)); showToast('Paper restored.') }
   const restoreSet = async (id: string) => { if (!classId) return; await api.setSetDeleted(id, false); await loadClassContent(classId); setTrashedSets((current) => current.filter((set) => set.id !== id)); showToast('Flashcard set restored.') }
   const setSettings = (settings: AppSettings) => setLibrary((current) => current ? { ...current, settings } : current)
-  const completeOnboarding = async (input: { name: string; themeColor: AppSettings['themeColor']; pin?: string; password?: string }) => {
+  const completeOnboarding = async (input: { name: string; themeColor: AppSettings['themeColor']; pin?: string; password?: string; path: 'guided' | 'explore' }) => {
     if (!library) return
-    const settings = { ...library.settings, userName: input.name, themeColor: input.themeColor, onboardingCompleted: true }
+    const settings = { ...library.settings, userName: input.name, themeColor: input.themeColor, onboardingCompleted: true, walkthroughCompleted: false, walkthroughSkipped: input.path === 'explore', walkthroughStep: input.path === 'guided' ? 'library' : '', walkthroughExampleClassId: '', walkthroughExampleSemesterId: '' }
     try {
       await api.updateSettings(settings)
       if (input.pin || input.password) setSecurity(await api.updateLibrarySecurity({ newPin: input.pin, newPassword: input.password, removePin: false, removePassword: false }))
       setSettings(settings)
-      setView({ kind: 'help' })
+      setView({ kind: 'home' })
+      setWalkthroughOpen(input.path === 'guided')
     } catch (error) { showToast(error instanceof Error ? error.message : 'Your setup could not be saved.', 'error') }
+  }
+  const startWalkthrough = async (replaceExisting = false) => {
+    if (!library) return
+    const { walkthroughExampleClassId, walkthroughExampleSemesterId } = library.settings
+    const settings = { ...library.settings, walkthroughCompleted: false, walkthroughSkipped: false, walkthroughStep: 'library', walkthroughExampleClassId: '', walkthroughExampleSemesterId: '' }
+    setSettings(settings)
+    try {
+      if (replaceExisting && walkthroughExampleClassId) await api.deleteClass(walkthroughExampleClassId)
+      if (replaceExisting && walkthroughExampleSemesterId) await api.deleteSemester(walkthroughExampleSemesterId)
+      await api.updateSettings(settings)
+      setModal(null)
+      await loadLibrary()
+      setView({ kind: 'home' })
+      setWalkthroughOpen(true)
+    } catch { setSettings(library.settings); showToast('The walkthrough could not be started.', 'error') }
+  }
+  const saveWalkthroughStep = async (step: string) => {
+    if (!library) return
+    const settings = { ...library.settings, walkthroughCompleted: false, walkthroughSkipped: false, walkthroughStep: step }
+    setSettings(settings)
+    try { await api.updateSettings(settings) } catch { showToast('Walkthrough progress could not be saved.', 'error') }
+  }
+  const ensureWalkthroughClass = async () => {
+    if (!library) return null
+    const existing = library.settings.walkthroughExampleClassId && library.classes.find((course) => course.id === library.settings.walkthroughExampleClassId)
+    if (existing) { navigate({ kind: 'class', classId: existing.id, tab: 'overview' }); return existing.id }
+    try {
+      let semesterId = library.semesters[0]?.id
+      let createdSemesterId = ''
+      if (!semesterId) {
+        const year = new Date().getFullYear()
+        const semester = await api.createSemester({ name: 'SoFlo walkthrough', term: 'Walkthrough', year })
+        semesterId = semester.id
+        createdSemesterId = semester.id
+      }
+      const course = await api.createClass({ semesterId, name: 'Introduction to Computer Science', courseCode: 'CS 101', professor: 'Professor Jordan', location: 'Science 204', schedule: 'Mon 09:00 AM-10:00 AM; Wed 09:00 AM-10:00 AM', accentColor: '#5AA6E6' })
+      const settings = { ...library.settings, walkthroughExampleClassId: course.id, walkthroughExampleSemesterId: createdSemesterId }
+      await api.updateSettings(settings)
+      setSettings(settings)
+      await loadLibrary()
+      navigate({ kind: 'class', classId: course.id, tab: 'overview' })
+      showToast('Example class created.')
+      return course.id
+    } catch (error) { showToast(error instanceof Error ? error.message : 'The example class could not be created.', 'error'); return null }
+  }
+  const buildWalkthroughBasics = async () => {
+    if (!activeSet) return false
+    try {
+      await api.setSetDeleted(activeSet.id, true)
+      const set = await api.createSet({ classId: activeSet.classId, title: 'Everyday basics', description: 'Three small cards for the SoFlo walkthrough.' })
+      const cards = [
+        ['What color is grass?', 'Green'],
+        ['What is the largest animal?', 'The blue whale'],
+        ['What planet do we live on?', 'Earth'],
+      ]
+      await Promise.all(cards.map(([front, back], position) => api.saveCard({ setId: set.id, front, back, position, isStarred: false })))
+      await loadClassContent(activeSet.classId)
+      navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: set.id })
+      return true
+    } catch (error) { showToast(error instanceof Error ? error.message : 'The walkthrough flashcards could not be prepared.', 'error'); return false }
+  }
+  const startWalkthroughFlashcards = () => { if (activeSet) navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode: 'flashcards' }) }
+  const openWalkthroughFlashcardSets = () => { if (activeLecture) navigate({ kind: 'class', classId: activeLecture.classId, tab: 'flashcards' }) }
+  const removeWalkthroughExample = async () => {
+    if (!library) return false
+    const { walkthroughExampleClassId, walkthroughExampleSemesterId } = library.settings
+    try {
+      if (walkthroughExampleClassId) await api.deleteClass(walkthroughExampleClassId)
+      if (walkthroughExampleSemesterId) await api.deleteSemester(walkthroughExampleSemesterId)
+      const settings = { ...library.settings, walkthroughExampleClassId: '', walkthroughExampleSemesterId: '' }
+      await api.updateSettings(settings)
+      setSettings(settings)
+      await loadLibrary()
+      navigate({ kind: 'home' })
+      showToast('Example walkthrough material removed.')
+      return true
+    } catch (error) { showToast(error instanceof Error ? error.message : 'The example walkthrough material could not be removed.', 'error'); return false }
+  }
+  const finishWalkthrough = async (skipped: boolean) => {
+    if (!library) return
+    const settings = { ...library.settings, walkthroughCompleted: !skipped, walkthroughSkipped: skipped, walkthroughStep: '' }
+    setSettings(settings); setWalkthroughOpen(false)
+    try { await api.updateSettings(settings) } catch { showToast('Walkthrough progress could not be saved.', 'error') }
   }
   const unlockLibrary = async (input: { pin?: string; password?: string }) => {
     const status = await api.unlockLibrary(input)
@@ -393,26 +510,29 @@ function App() {
       <section className="app-content"><button className="sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <Plus size={17} /> : <Menu size={17} />}</button>
         {view.kind === 'home' && <HomeView semesters={library.semesters} classes={library.classes} recentDocuments={recentDocuments} userName={library.settings.userName} onNewSemester={() => setModal({ type: 'semester' })} onNewClass={() => openNewClass()} onOpenClass={(targetClassId) => navigate({ kind: 'class', classId: targetClassId, tab: 'overview' })} onOpenDocument={(document) => navigate({ kind: 'document', classId: document.classId, documentId: document.id })} />}
         {view.kind === 'calendar' && <CalendarView classes={library.classes} />}
-        {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} />}
+        {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} onStartWalkthrough={() => library.settings.walkthroughExampleClassId ? setModal({ type: 'restartWalkthrough' }) : void startWalkthrough()} />}
         {view.kind === 'help' && <HelpView />}
         {view.kind === 'archive' && <ArchiveView semesters={archivedSemesters} classes={archivedClasses} onRestore={(course) => void restoreClass(course)} />}
-        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => void archiveActiveClass()} />}
+        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setId, mode: 'learn', cardIds })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => void archiveActiveClass()} />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
         {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
-        {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} /> : <LoadingView />)}
-        {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} onBack={() => navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id })} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} /> : <LoadingView />)}
+        {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
+        {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} cardIds={view.cardIds} onBack={() => { void api.getSet(activeSet.id).then(setActiveSet); navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id }) }} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
       </section>
     </div>
     <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} classes={library.classes} onNavigate={navigate} onNewNote={() => void createDocument()} onNewSet={() => void createSet()} />
     <GlobalFind open={globalFindOpen} onClose={() => setGlobalFindOpen(false)} />
     {modal?.type === 'semester' && <CreateSemesterDialog onClose={() => setModal(null)} onCreate={createSemester} />}
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
-    {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(sources, guidance, title) => void generateAiSet(modal.classId, sources, guidance, title)} />}
+    {modal?.type === 'importSet' && <ImportSetDialog onClose={() => setModal(null)} onImport={(title, text) => importSet(modal.classId, title, text)} />}
+    {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(request) => void generateAiSet(modal.classId, request)} />}
+    {modal?.type === 'restartWalkthrough' && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Restart walkthrough"><header><div><p className="eyebrow">RESTART WALKTHROUGH</p><h2>Replace the old example class?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>You kept the example class from the last walkthrough. Starting again will permanently remove that example and create a fresh one for this walkthrough. Your own classes and papers will not be changed.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => void startWalkthrough(true)}>Start walkthrough</button></footer></section></div>}
     {lectureToDelete && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Delete lecture"><header><div><p className="eyebrow">PERMANENT ACTION</p><h2>Delete this lecture?</h2></div><button className="icon-button" onClick={() => setLectureToDelete(null)} aria-label="Cancel deletion"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{lectureToDelete.title}</strong> and its notes will be permanently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setLectureToDelete(null)}>Cancel</button><button className="button button-danger" onClick={() => void deleteLecture(lectureToDelete)}>Delete lecture</button></footer></section></div>}
     {toast && <div className={`toast ${toast.type}`} role="status">{toast.type === 'success' ? <Plus size={15} /> : <X size={15} />}{toast.message}</div>}
     {aiConsentOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Use local AI?"><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>This action will use AI.</h2><p>SoFlo will download its compact local model once, then process this document only on your PC. This is your reminder—turn AI off any time in Settings.</p><div><button className="button button-quiet" onClick={() => closeAiConsent(false)}>Return</button><button className="button button-primary" onClick={() => closeAiConsent(true)}>Proceed</button></div></section></div>}
     {aiDownloadProgress !== null && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card ai-download-card" role="dialog" aria-modal="true" aria-label="Downloading local AI model"><p className="eyebrow">PREPARING LOCAL AI</p><h2>Downloading your private model</h2><p>This happens once. Keep SoFlo open while the model is saved on this PC.</p><div className="ai-download-track"><i style={{ width: `${aiDownloadProgress}%` }} /></div><strong>{aiDownloadProgress}%</strong></section></div>}
     {aiWorking && <div className="ai-consent-backdrop ai-progress-backdrop" role="presentation"><section className="ai-consent-card ai-download-card ai-progress-card" role="status" aria-live="polite"><i className="ai-progress-spinner" /><p className="eyebrow">SOFLO AI IS WORKING</p><h2>Making this editable</h2><p>{aiProgress?.message ?? 'Formatting your document on this PC.'}</p><div className="ai-download-track"><i style={{ width: `${aiProgress?.progress ?? 4}%` }} /></div><strong>{aiProgress?.progress ?? 4}% complete</strong></section></div>}
+    {walkthroughOpen && <GuidedWalkthrough initialStep={library.settings.walkthroughStep} hasExample={Boolean(library.settings.walkthroughExampleClassId)} onStep={(step) => void saveWalkthroughStep(step)} onCreateExample={ensureWalkthroughClass} onBuildBasics={buildWalkthroughBasics} onOpenFlashcardSets={openWalkthroughFlashcardSets} onStartFlashcards={startWalkthroughFlashcards} onRemoveExample={removeWalkthroughExample} onFinish={() => void finishWalkthrough(false)} onSkip={() => void finishWalkthrough(true)} />}
     {!library.settings.onboardingCompleted && <WelcomeView onComplete={completeOnboarding} />}
   </div>
 }
@@ -447,12 +567,156 @@ function GlobalFind({ open, onClose }: { open: boolean; onClose: () => void }) {
   return <div className="global-find"><Search size={15} /><input ref={input} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); next() } if (event.key === 'Escape') onClose() }} placeholder="Find in SoFlo" /><span>{query ? `${ranges.current.length} matches · Enter for next` : 'Type to highlight'}</span><button className="icon-button tiny" onClick={onClose} aria-label="Close find"><X size={15} /></button></div>
 }
 
-function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (sources: string[], guidance: string, title: string) => void }) {
+function ImportSetDialog({ onClose, onImport }: { onClose: () => void; onImport: (title: string, text: string) => Promise<void> }) {
+  const [title, setTitle] = useState('Imported flashcards')
+  const [text, setText] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const choose = async () => {
+    const source = await open({ title: 'Import flashcards', multiple: false, directory: false, filters: [{ name: 'Text files', extensions: ['txt'] }] })
+    if (!source || Array.isArray(source)) return
+    try { setText(await api.readTextFile(source)); setError(''); const name = source.split(/[\\/]/).pop()?.replace(/\.txt$/i, '').trim(); if (name && title === 'Imported flashcards') setTitle(name) } catch { setError('That text file could not be opened. You can still paste your cards below.') }
+  }
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!text.trim()) return
+    setSaving(true)
+    try { await onImport(title, text) } finally { setSaving(false) }
+  }
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Import flashcards"><header><div><p className="eyebrow">FLASHCARDS</p><h2>Import a set</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={submit}><div className="paper-dialog-content"><p>Paste one tab-separated term and definition per line, or choose a .txt file exported by SoFlo.</p>{error && <p className="form-hint">{error}</p>}<label>Set name<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Cards<textarea rows={8} value={text} onChange={(event) => setText(event.target.value)} placeholder={'Mitosis\tCell division that produces two identical cells\nMeiosis\tCell division that produces reproductive cells'} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => void choose()}>Choose .txt file</button><span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!text.trim() || saving}>{saving ? 'Importing...' : 'Import set'}</button></footer></form></section></div>
+}
+
+const walkthroughSteps = [
+  { id: 'library', title: 'Start with one class.', copy: 'Classes keep your papers, lectures, flashcards, and study progress in one place.', action: 'Create example class' },
+  { id: 'papers', title: 'Make it yours on the page.', copy: 'Open a paper, click anywhere on the page, and type a sentence. Then double-click the top or bottom margin to edit that page’s header or footer.', action: 'Create a paper' },
+  { id: 'lectures', title: 'Keep each class meeting together.', copy: 'Lectures are dated notes for a specific class session. They stay next to your papers instead of getting lost in a general notes list.', action: 'Create a lecture' },
+  { id: 'study', title: 'Turn material into review.', copy: 'A flashcard set can be studied with Flashcards, Learn, Test, or Match. Your results build the mastery view for that class.', action: 'Create a set' },
+  { id: 'finish', title: 'You are ready to explore.', copy: 'The walkthrough data is yours to keep as a reference, or you can remove the example class and continue with a clean library.', action: '' },
+] as const
+
+type SpotlightRect = { left: number; top: number; right: number; bottom: number }
+
+function useSpotlightRects(selectors: string[]) {
+  const selectorKey = selectors.join('|')
+  const [rects, setRects] = useState<SpotlightRect[]>([])
+  useEffect(() => {
+    const measure = () => {
+      const next = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)).map((element) => {
+        const rect = element.getBoundingClientRect()
+        return { left: Math.max(8, rect.left - 8), top: Math.max(50, rect.top - 8), right: Math.min(window.innerWidth - 8, rect.right + 8), bottom: Math.min(window.innerHeight - 8, rect.bottom + 8) }
+      }).filter((rect) => rect.right > rect.left && rect.bottom > rect.top))
+      setRects(next)
+    }
+    measure()
+    const timer = window.setInterval(measure, 180)
+    window.addEventListener('resize', measure)
+    window.addEventListener('scroll', measure, true)
+    return () => { window.clearInterval(timer); window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true) }
+  // The selected selector set is the input; individual callers deliberately recreate it each render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectorKey])
+  return rects
+}
+
+function SpotlightShields({ rects }: { rects: SpotlightRect[] }) {
+  if (!rects.length) return <i className="walkthrough-shade walkthrough-shade-full" />
+  const union = rects.reduce((all, rect) => ({ left: Math.min(all.left, rect.left), top: Math.min(all.top, rect.top), right: Math.max(all.right, rect.right), bottom: Math.max(all.bottom, rect.bottom) }))
+  const styles = [
+    { left: 0, top: 0, right: 0, height: union.top },
+    { left: 0, top: union.top, width: union.left, bottom: 0 },
+    { left: union.right, top: union.top, right: 0, bottom: 0 },
+    { left: union.left, top: union.bottom, right: window.innerWidth - union.right, bottom: 0 },
+  ]
+  return <>{styles.map((style, index) => <i key={index} className="walkthrough-shade" style={style} />)}{rects.map((rect, index) => <i key={`spotlight-${index}`} className="walkthrough-spotlight" style={{ left: rect.left, top: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top }} />)}</>
+}
+
+function GuidedWalkthrough({ initialStep, hasExample, onStep, onCreateExample, onBuildBasics, onOpenFlashcardSets, onStartFlashcards, onRemoveExample, onFinish, onSkip }: { initialStep: string; hasExample: boolean; onStep: (step: string) => void; onCreateExample: () => Promise<string | null>; onBuildBasics: () => Promise<boolean>; onOpenFlashcardSets: () => void; onStartFlashcards: () => void; onRemoveExample: () => Promise<boolean>; onFinish: () => void; onSkip: () => void }) {
+  const initialIndex = Math.max(0, walkthroughSteps.findIndex((item) => item.id === initialStep))
+  const [index, setIndex] = useState(initialIndex)
+  const [phase, setPhase] = useState(hasExample ? 'class-explore' : 'class-create')
+  const [busy, setBusy] = useState(false)
+  const [paperReady, setPaperReady] = useState(false)
+  const [cardStep, setCardStep] = useState(0)
+  const step = walkthroughSteps[index]
+  const move = (next: number) => { const safe = Math.max(0, Math.min(next, walkthroughSteps.length - 1)); setIndex(safe); onStep(walkthroughSteps[safe].id) }
+  useEffect(() => {
+    const protectedButtons = new Set<HTMLButtonElement>()
+    const protectArchive = () => document.querySelectorAll<HTMLButtonElement>('button[aria-label="Archive class"]').forEach((button) => { button.disabled = true; protectedButtons.add(button) })
+    protectArchive()
+    const timer = window.setInterval(protectArchive, 120)
+    return () => { window.clearInterval(timer); protectedButtons.forEach((button) => { button.disabled = false }) }
+  }, [])
+  useEffect(() => {
+    const listen = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      if (!target) return
+      if (index === 3 && phase === 'set-create' && target.closest('.new-set-menu .paper-action-menu button:not(:first-child)')) { event.preventDefault(); event.stopImmediatePropagation(); return }
+      if (index === 1 && phase === 'papers-tab' && target.closest('.class-tabs button:nth-child(2)')) setPhase('papers-new')
+      else if (index === 1 && phase === 'papers-new' && target.closest('.section-actions .button-primary')) setPhase('paper-write')
+      else if (index === 1 && phase === 'paper-back' && target.closest('.editor-breadcrumb-link')) { move(2); setPhase('lectures-tab') }
+      else if (index === 2 && phase === 'lectures-tab' && target.closest('.class-tabs button:nth-child(3)')) setPhase('lectures-new')
+      else if (index === 2 && phase === 'lectures-new' && target.closest('.lecture-empty .button-primary')) setPhase('lecture-created')
+      else if (index === 3 && phase === 'flashcards-tab' && target.closest('.class-tabs button:nth-child(5)')) setPhase('set-new')
+      else if (index === 3 && phase === 'set-new' && target.closest('.new-set-menu > .button')) setPhase('set-create')
+      else if (index === 3 && phase === 'set-create' && target.closest('.new-set-menu .paper-action-menu button:first-child')) setPhase('set-created')
+      else if (index === 3 && phase === 'basic-star' && target.closest('.editable-card:first-child .card-action:not(.delete)')) setPhase('study-start')
+      else if (index === 3 && phase === 'card-flip' && target.closest('.flashcard')) setPhase(cardStep === 0 ? 'card-next' : 'card-response')
+      else if (index === 3 && phase === 'card-next' && target.closest('.study-footer [aria-label="Next card"]')) { setCardStep((current) => current + 1); setPhase('card-flip') }
+      else if (index === 3 && phase === 'card-response' && target.closest('.response-button')) { const next = cardStep + 1; setCardStep(next); setPhase(next >= 3 ? 'review-complete' : 'card-flip') }
+    }
+    window.addEventListener('click', listen, true)
+    return () => window.removeEventListener('click', listen, true)
+  }, [cardStep, index, phase])
+  useEffect(() => {
+    if (phase !== 'paper-write') return
+    const timer = window.setInterval(() => {
+      const body = document.querySelector('.soflo-editor')?.textContent?.trim() ?? ''
+      const header = document.querySelector('.paper-running-header')?.textContent?.trim() ?? ''
+      if (body.length >= 3 && header.length >= 1) { setPaperReady(true); setPhase('paper-back') }
+    }, 250)
+    return () => window.clearInterval(timer)
+  }, [phase])
+  const runPrimary = async () => {
+    setBusy(true)
+    try {
+      if (phase === 'class-create') { if (await onCreateExample()) setPhase('class-explore') }
+      else if (phase === 'class-explore') { move(1); setPhase(document.querySelector('.class-tabs button:nth-child(2)')?.classList.contains('active') ? 'papers-new' : 'papers-tab') }
+      else if (phase === 'lecture-created') { onOpenFlashcardSets(); move(3); setPhase('set-new') }
+      else if (phase === 'set-created') { if (await onBuildBasics()) setPhase('basic-star') }
+      else if (phase === 'study-start') { onStartFlashcards(); setPhase('card-flip') }
+      else if (phase === 'review-complete') { move(4); setPhase('finish') }
+    } finally { setBusy(false) }
+  }
+  const removeAndFinish = async () => { setBusy(true); try { if (await onRemoveExample()) onFinish() } finally { setBusy(false) } }
+  const actionCopy: Record<string, string> = { 'class-create': 'Create example class', 'class-explore': 'Continue to papers', 'lecture-created': 'Continue', 'set-created': 'Prepare three practice cards', 'study-start': 'Start Flashcards', 'review-complete': 'Continue' }
+  const targetByPhase: Record<string, string> = { 'class-create': '[data-walkthrough-action]', 'class-explore': '.class-header', 'papers-tab': '.class-tabs button:nth-child(2)', 'papers-new': '.section-actions .button-primary', 'paper-write': '.document-page', 'paper-back': '.editor-breadcrumb-link', 'lectures-tab': '.class-tabs button:nth-child(3)', 'lectures-new': '.lecture-empty .button-primary', 'lecture-created': '[data-walkthrough-action]', 'flashcards-tab': '.class-tabs button:nth-child(5)', 'set-new': '.new-set-menu > .button', 'set-create': '.new-set-menu .paper-action-menu button:first-child', 'set-created': '[data-walkthrough-action]', 'basic-star': '.editable-card:first-child .card-action:not(.delete)', 'study-start': '[data-walkthrough-action]', 'card-flip': '.flashcard', 'card-next': '.study-footer [aria-label="Next card"]', 'card-response': '.response-button', 'review-complete': '[data-walkthrough-action]', finish: '[data-walkthrough-finish]' }
+  const activeSelectors = [targetByPhase[phase] ?? '[data-walkthrough-action]']
+  const spotlights = useSpotlightRects(activeSelectors)
+  useEffect(() => {
+    const blockUnguidedKeys = (event: KeyboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null
+      const inLitEditor = Boolean(phase === 'paper-write' && target?.matches('.soflo-editor, .document-title, .paper-running-header, .paper-running-footer'))
+      const isFlashcardFlip = phase === 'card-flip' && event.key === ' '
+      if (isFlashcardFlip) { setPhase(cardStep === 0 ? 'card-next' : 'card-response'); return }
+      if (!inLitEditor) { event.preventDefault(); event.stopImmediatePropagation() }
+    }
+    window.addEventListener('keydown', blockUnguidedKeys, true)
+    return () => window.removeEventListener('keydown', blockUnguidedKeys, true)
+  }, [cardStep, phase])
+  useEffect(() => { const block = (event: MouseEvent) => { event.preventDefault(); event.stopImmediatePropagation() }; window.addEventListener('contextmenu', block, true); return () => window.removeEventListener('contextmenu', block, true) }, [])
+  const isFinish = index === 4
+  const showPrimary = Boolean(actionCopy[phase])
+  const copy = phase === 'papers-tab' ? 'Click Papers in the highlighted class navigation.' : phase === 'papers-new' ? 'Use the highlighted New paper button. Import stays unavailable during the walkthrough.' : phase === 'paper-write' ? 'Type at least a few characters in the body, then double-click the top margin and add a header.' : phase === 'paper-back' ? 'Your paper is ready. Use the highlighted Papers button at the top-left to return to your class.' : phase === 'lectures-tab' ? 'Now open the highlighted Lectures tab.' : phase === 'lectures-new' ? 'Use Start your first lecture in the highlighted center panel.' : phase === 'flashcards-tab' ? 'Open the highlighted Flashcards tab.' : phase === 'set-new' ? 'Open the highlighted New set menu.' : phase === 'set-create' ? 'Choose Create — not Import or Create with AI.' : phase === 'basic-star' ? 'Star the highlighted first card so you know how to save a favorite for later.' : phase === 'card-flip' ? `Open card ${cardStep + 1} of 3 by clicking it.` : phase === 'card-next' ? 'Use the highlighted arrow to move to the next card.' : phase === 'card-response' ? 'Choose I know it or I don’t know it to mark this card.' : phase === 'review-complete' ? 'You have seen all three cards. Continue to finish the walkthrough.' : step.copy
+  return <aside className="walkthrough-layer" aria-live="polite"><SpotlightShields rects={spotlights} /><section className="walkthrough-popover" role="dialog" aria-modal="true" aria-label="Guided walkthrough"><p className="eyebrow">SOFLO WALKTHROUGH</p><span className="walkthrough-count">{index + 1} of {walkthroughSteps.length}</span><h2>{step.title}</h2><p>{copy}</p>{index === 1 && paperReady && <small>Nice — your paper and header are both in place.</small>}{showPrimary && <button data-walkthrough-action className="button button-soft walkthrough-action" disabled={busy} onClick={() => void runPrimary()}>{busy ? 'Working...' : actionCopy[phase]}</button>}{isFinish && <div className="walkthrough-finish-actions" data-walkthrough-finish><button className="button button-quiet" disabled={busy || !hasExample} onClick={onFinish}>Keep example class</button><button className="button button-primary" disabled={busy} onClick={() => void removeAndFinish()}>{busy ? 'Removing...' : 'Remove example class'}</button></div>}</section><button className="walkthrough-skip" disabled={busy} onClick={onSkip}>Skip walkthrough</button></aside>
+}
+
+function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (request: AiSetRequest) => void }) {
   const [sources, setSources] = useState<string[]>([])
-  const [guidance, setGuidance] = useState('')
+  const [pasted, setPasted] = useState('')
   const [title, setTitle] = useState('AI study set')
   const choose = async () => { const picked = await open({ title: 'Choose up to five study documents', multiple: true, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] }); if (!picked) return; const next = (Array.isArray(picked) ? picked : [picked]).slice(0, 5); setSources(next) }
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (sources.length) onCreate(sources, guidance, title) }}><div className="paper-dialog-content"><p>Add up to five PDFs or Word documents. SoFlo will process them privately on this PC and make editable front/back cards.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Choose documents ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}<label>Extra guidance <textarea rows={3} value={guidance} onChange={(event) => setGuidance(event.target.value)} placeholder="e.g. Focus on chapters 4–6 and the topics my professor called out." /></label></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!sources.length}>Create flashcards</button></footer></form></section></div>
+  const hasMaterial = Boolean(sources.length || pasted.trim())
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog ai-set-dialog-simple" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (hasMaterial) onCreate({ sources, pasted, topic: '', guidance: '', title, cardCount: 'auto', depth: 'standard' }) }}><div className="paper-dialog-content"><p>Paste notes, a study guide, or simply describe a topic. Adding files is optional.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>What do you want to study?<textarea autoFocus rows={7} value={pasted} onChange={(event) => setPasted(event.target.value)} placeholder="Paste notes here, or write something like: Create cards for introductory Java inheritance." /></label><section className="ai-source-section"><strong>Have files instead?</strong><span>Optionally add up to five PDFs or Word documents.</span><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Add files ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}</section></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!hasMaterial}>Create flashcards</button></footer></form></section></div>
 }
 
 export default App

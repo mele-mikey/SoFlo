@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary,
-  Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, TestAttemptSummary,
+  Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'create_class', 'update_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'save_test_attempt', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -19,9 +19,11 @@ export const api = {
   listSemesters: (includeArchived = false) => call<Semester[]>('list_semesters', { includeArchived }),
   createSemester: (input: { name: string; term: string; year: number }) => call<Semester>('create_semester', { input }),
   updateSemester: (input: { id: string; name: string; term: string; year: number; archived: boolean }) => call<Semester>('update_semester', { input }),
+  deleteSemester: (id: string) => call<void>('delete_semester', { id }),
   listClasses: (includeArchived = false) => call<CourseClass[]>('list_classes', { includeArchived }),
   createClass: (input: { semesterId: string; name: string; courseCode: string; professor?: string; location?: string; schedule?: string; icon?: string; accentColor?: string }) => call<CourseClass>('create_class', { input }),
   updateClass: (input: { id: string; semesterId: string; name: string; courseCode: string; professor?: string | null; location?: string | null; schedule?: string | null; icon: string; accentColor: string; archived: boolean }) => call<CourseClass>('update_class', { input }),
+  deleteClass: (id: string) => call<void>('delete_class', { id }),
   listDocuments: (classId: string, includeDeleted = false) => call<DocumentSummary[]>('list_documents', { classId, includeDeleted }),
   listRecentDocuments: () => call<DocumentSummary[]>('list_recent_documents'),
   getDocument: (id: string) => call<DocumentDetail>('get_document', { id }),
@@ -51,8 +53,15 @@ export const api = {
   saveCard: (input: { id?: string; setId: string; front: string; back: string; notes?: string | null; imagePath?: string | null; position: number; isStarred: boolean }) => call<Flashcard>('save_flashcard', { input }),
   deleteCard: (id: string) => call<void>('delete_flashcard', { id }),
   listAllCards: (classId: string) => call<Flashcard[]>('list_all_cards', { classId }),
-  recordCardResponse: (cardId: string, isCorrect: boolean) => call<CardProgress>('record_card_response', { input: { cardId, isCorrect } }),
+  recordCardResponse: (cardId: string, isCorrect: boolean, details?: { sessionId?: string; mode?: string; questionType?: string; answer?: string }) => call<CardProgress>('record_card_response', { input: { cardId, isCorrect, ...details } }),
+  startStudySession: (input: { setId: string; mode: string }) => call<StudySessionSummary>('start_study_session', { input }),
+  completeStudySession: (id: string) => call<void>('complete_study_session', { input: { id } }),
+  getStudyInsights: (classId: string) => call<StudyInsights>('get_study_insights', { classId }),
   saveTestAttempt: (input: { setId: string; score: number; correctCount: number; questionCount: number; answersJson: string }) => call<TestAttemptSummary>('save_test_attempt', { input }),
+  getMatchBestTime: (setId: string) => call<number | null>('get_match_best_time', { setId }),
+  saveMatchTime: (setId: string, seconds: number) => call<number>('save_match_time', { setId, seconds }),
+  exportFlashcardSetText: (setId: string) => call<string>('export_flashcard_set_text', { setId }),
+  readTextFile: (path: string) => call<string>('read_text_file', { path }),
   updateSettings: (settings: AppSettings) => call<AppSettings>('update_settings', { input: { settings } }),
   emptyTrash: () => call<void>('empty_trash'),
   getSecurityStatus: () => call<SecurityStatus>('get_security_status'),
