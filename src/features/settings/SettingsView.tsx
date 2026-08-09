@@ -148,7 +148,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.75" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.76" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -201,11 +201,12 @@ function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () =
         <header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header>
         <div className="paper-dialog-content">
           <div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo sends AI prompts only to a llama.cpp server running on this computer at 127.0.0.1. Your papers and study material are not sent to SoFlo servers or Hugging Face for inference.</p></div>
-          <div className="ai-info-copy"><strong>Model download</strong><p>When you download the default package, SoFlo downloads Qwen3-4B for writing tasks and a smaller Qwen3-0.6B model for fast word references. Downloads need an internet connection; local inference does not.</p></div>
+          <div className="ai-info-copy"><strong>Two local AI models</strong><p>SoFlo uses one local model for general app tasks — PDF and syllabus imports, flashcards, and AI Review — plus a separate smaller local model for quick writing tools such as word definitions and formal synonyms. Both stay on this computer.</p></div>
+          <div className="ai-info-copy"><strong>Model download</strong><p>Downloading or updating the default AI package installs both models together. Downloads need an internet connection; once installed, neither model sends your writing or study material anywhere for inference.</p></div>
           <div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div>
           <button type="button" className="text-button ai-model-link" onClick={() => setConfirmModelLinkOpen(true)}>Model information</button>
           <button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>
-          {detailsOpen && <dl className="ai-technical-details"><div><dt>Writing model</dt><dd>Qwen3-4B, Q4_K_M GGUF</dd></div><div><dt>Word reference model</dt><dd>Qwen3-0.6B, Q8_0 GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
+          {detailsOpen && <dl className="ai-technical-details"><div><dt>General SoFlo model</dt><dd>Qwen3-4B, Q4_K_M GGUF — imports, flashcards, and AI Review</dd></div><div><dt>Writing companion model</dt><dd>Qwen3-0.6B, Q8_0 GGUF — quick definitions and formal related words</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
         </div>
         <footer><button className="button button-primary" onClick={onClose}>Done</button></footer>
       </section>

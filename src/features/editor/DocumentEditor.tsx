@@ -185,6 +185,22 @@ function selectedSingleWord(editor: Editor): WordSelection | null {
   return /^\p{L}+(?:[-'’]\p{L}+)*$/u.test(selected) ? { word: selected, from, to } : null
 }
 
+function wordAtCursor(editor: Editor) {
+  const { from, to, $from } = editor.state.selection
+  if (from !== to || !$from.parent.isTextblock) return ''
+  const text = $from.parent.textContent
+  const index = $from.parentOffset
+  const before = text.slice(0, index).match(/[\p{L}'’-]+$/u)?.[0] ?? ''
+  const after = text.slice(index).match(/^[\p{L}'’-]+/u)?.[0] ?? ''
+  const word = `${before}${after}`
+  return /^\p{L}+(?:[-'’]\p{L}+)*$/u.test(word) ? word : ''
+}
+
+function selectionStaysInIssue(editor: Editor, issue: GrammarIssue) {
+  const { from, to } = editor.state.selection
+  return from >= issue.from && to <= issue.to
+}
+
 function parseWordReference(raw: string, word: string): WordReference | null {
   try {
     const candidate = JSON.parse(raw) as { word?: unknown; pronunciation?: unknown; senses?: unknown; synonyms?: unknown }
@@ -449,6 +465,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const wordReferenceRequestRef = useRef(0)
   const selectedWordReferenceRef = useRef('')
   const selectedWordRangeRef = useRef<WordSelection | null>(null)
+  const selectedGrammarIssueRef = useRef<GrammarIssue | null>(null)
   const useWordAlternativeRef = useRef<(alternative: string) => void>(() => undefined)
   const aiEnabledRef = useRef(aiEnabled)
   const defineWordRef = useRef(onDefineWord)
@@ -482,6 +499,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const issueIndex = Number(marked?.dataset.grammarIssue)
     if (Number.isInteger(issueIndex) && grammarIssues[issueIndex]) {
       event.preventDefault()
+      selectedGrammarIssueRef.current = grammarIssues[issueIndex]
       setSelectedGrammarIssue(grammarIssues[issueIndex])
       setGrammarOpen(true)
       return true
@@ -490,8 +508,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }
   const handleWordReferenceSelection = (nextEditor: Editor) => {
     const selection = selectedSingleWord(nextEditor)
-    if (!selection || !aiEnabledRef.current) {
-      if (!selection) {
+    const currentWord = selection?.word ?? wordAtCursor(nextEditor)
+    if (!aiEnabledRef.current) {
+      if (selectedWordReferenceRef.current) {
         selectedWordReferenceRef.current = ''
         selectedWordRangeRef.current = null
         setWordReference(null)
@@ -500,8 +519,18 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       }
       return
     }
+    if (selectedWordReferenceRef.current) {
+      if (currentWord && selectedWordReferenceRef.current.toLocaleLowerCase() === currentWord.toLocaleLowerCase()) return
+      wordReferenceRequestRef.current += 1
+      selectedWordReferenceRef.current = ''
+      selectedWordRangeRef.current = null
+      setWordReference(null)
+      setWordReferenceLoading(false)
+      setWordReferenceError('')
+      return
+    }
+    if (!selection) return
     const { word } = selection
-    if (selectedWordReferenceRef.current.toLocaleLowerCase() === word.toLocaleLowerCase()) return
     selectedWordReferenceRef.current = word
     selectedWordRangeRef.current = selection
     const request = ++wordReferenceRequestRef.current
@@ -541,7 +570,15 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       grammarLastInputAt.current = now
       onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
     },
-    onSelectionUpdate: ({ editor: nextEditor }) => handleWordReferenceSelection(nextEditor),
+    onSelectionUpdate: ({ editor: nextEditor }) => {
+      const activeIssue = selectedGrammarIssueRef.current
+      if (activeIssue && !selectionStaysInIssue(nextEditor, activeIssue)) {
+        selectedGrammarIssueRef.current = null
+        setGrammarOpen(false)
+        setSelectedGrammarIssue(null)
+      }
+      handleWordReferenceSelection(nextEditor)
+    },
   })
   const currentId = useRef(document.id)
   useEffect(() => {
@@ -560,6 +597,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
+  useEffect(() => { selectedGrammarIssueRef.current = selectedGrammarIssue }, [selectedGrammarIssue])
   useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(nativeSpellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleEditorClick } }) }, [editor, fontSize, grammarIssues, nativeSpellcheck])
   useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin, headerPages, footerPages, repeatHeader, repeatFooter])
   useEffect(() => {
@@ -727,22 +765,32 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     else {
       setGrammarReviewing(true)
       setGrammarMessage('')
-      setGrammarDecorations([])
       editor.view.dom.classList.add('ai-grammar-scanning')
     }
     try {
       const issues = extractGrammarIssues(await onGrammarReview(editor.getText(), quick), editor, !quick)
-      setGrammarIssues(issues)
-      setGrammarDecorations(issues)
+      if (quick) {
+        setGrammarIssues(issues)
+        setGrammarDecorations(issues)
+      } else if (issues.length) {
+        // A deeper review adds formal-writing guidance without throwing away the
+        // quiet spelling checks that were already visible in the document.
+        const combined = [...grammarIssues.filter((issue) => issue.kind === 'mechanic')]
+        for (const issue of issues) {
+          if (!combined.some((current) => current.from === issue.from && current.to === issue.to && current.kind === issue.kind)) combined.push(issue)
+        }
+        setGrammarIssues(combined)
+        setGrammarDecorations(combined)
+      } else {
+        setGrammarMessage('AI Review returned no usable suggestions, so your current spelling and grammar checks were kept in place.')
+      }
       if (!quick) {
         setGrammarOpen(false)
         setSelectedGrammarIssue(null)
       }
     } catch (error) {
       if (!quick) {
-        setGrammarIssues([])
-        setGrammarDecorations([])
-        setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review.')
+        setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review. Your current checks are still available.')
       }
     } finally {
       if (quick) setPassiveGrammarReviewing(false)
@@ -939,7 +987,7 @@ function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, gramma
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
     <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF text</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
     <Divider />
-    <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled}><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'Deep formal review'}</button></ToolbarMenu>
+    <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled}><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button className="ai-review-action" disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="Paragraph"><button onClick={() => editor.chain().focus().setParagraph().run()}><Pilcrow size={15} />Paragraph</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}>Heading 1</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}>Heading 2</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}>Heading 3</button></ToolbarMenu>
     <Divider />
