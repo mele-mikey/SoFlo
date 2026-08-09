@@ -77,6 +77,7 @@ export const api = {
   importSofloDataAndRestart: (source: string) => call<void>('import_soflo_data_and_restart', { source }),
   wipeSofloDataAndRestart: () => call<void>('wipe_soflo_data_and_restart'),
   importPdfText: (path: string) => call<string>('import_pdf_text', { path }),
+  importSyllabusPdfText: (path: string) => call<string>('import_syllabus_pdf_text', { path }),
   importWordText: (path: string) => call<string>('import_word_text', { path }),
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),

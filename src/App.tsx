@@ -312,7 +312,7 @@ function App() {
     const source = await open({ title: 'Import class syllabus', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
     if (!source || Array.isArray(source)) return
     try {
-      const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importPdfText(source)
+      const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importSyllabusPdfText(source)
       const imported = await formatImportedText(text, source, 'syllabus')
       if (syllabus) await api.setDocumentDeleted(syllabus.id, true)
       const created = await api.createDocument({ classId, title: imported.title || 'Class syllabus' })

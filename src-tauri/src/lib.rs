@@ -43,6 +43,7 @@ pub fn run() {
             commands::run_installer_worker,
             commands::launch_installed_soflo_and_close,
             commands::import_pdf_text,
+            commands::import_syllabus_pdf_text,
             commands::import_word_text,
             commands::refine_document_text,
             commands::generate_flashcards_text,

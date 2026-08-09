@@ -1,5 +1,5 @@
 import { Archive, BookOpen, Copy, FilePlus2, FileText, FileUp, GraduationCap, LayoutList, MoreHorizontal, NotebookPen, Plus, RotateCcw, Sparkles, Star, Trash2, X } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { AppView, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetSummary, LectureSummary, StudyInsights } from '../../lib/types'
 import { api } from '../../lib/api'
 import { formatDate } from '../../lib/format'
@@ -11,12 +11,51 @@ const tabs: { key: ClassViewProps['tab']; label: string; icon: typeof LayoutList
 
 export function ClassView(p: ClassViewProps) { return <main className="class-view"><header className="class-header content-view"><div className="class-title-line"><span className="large-class-icon" style={{ background: p.course.accentColor }}><GraduationCap size={21} /></span><div><p className="eyebrow">{p.course.courseCode || 'CLASS'}</p><h1>{p.course.name}</h1></div><button className="icon-button class-more" aria-label="Archive class" onClick={p.onArchive}><Archive size={17} /></button></div><div className="class-meta">{p.course.professor && <span>{p.course.professor}</span>}{p.course.location && <span>{p.course.location}</span>}{p.course.schedule && <span>{p.course.schedule}</span>}</div><nav className="class-tabs" aria-label={`${p.course.name} navigation`}>{tabs.map((tab) => { const Icon = tab.icon; return <button key={tab.key} className={p.tab === tab.key ? 'active' : ''} onClick={() => p.onTab(tab.key)}><Icon size={15} />{tab.label}</button> })}</nav></header><div className="content-view class-content">{p.tab === 'overview' && <Overview {...p} />}{p.tab === 'notes' && <DocumentsView documents={p.documents} folders={p.folders} aiEnabled={p.aiEnabled} onOpen={p.onOpenDocument} onCreate={p.onNewDocument} onImportPdf={p.onImportPdf} onTrash={p.onTrashDocument} onDuplicate={p.onDuplicateDocument} onBulkRename={p.onBulkRename} onGroup={p.onGroupDocuments} onUngroup={p.onUngroupDocument} onRenameFolder={p.onRenameDocumentFolder} />}{p.tab === 'lectures' && <LecturesView lectures={p.lectures} onCreate={p.onNewLecture} onOpen={p.onOpenLecture} onDelete={p.onDeleteLecture} />}{p.tab === 'syllabus' && <SyllabusView syllabus={p.syllabus} aiEnabled={p.aiEnabled} onImport={p.onImportSyllabus} />}{p.tab === 'flashcards' && <SetsLanding sets={p.sets} allCards={p.allCards} aiEnabled={p.aiEnabled} onNewSet={p.onNewSet} onImportSet={p.onImportSet} onNewAiSet={p.onNewAiSet} onOpenSet={p.onOpenSet} onDuplicateSet={p.onDuplicateSet} onTrashSet={p.onTrashSet} />}{p.tab === 'study' && <StudyLanding courseId={p.course.id} sets={p.sets} onOpenSet={p.onOpenSet} onStudyWeak={p.onStudyWeak} />}{p.tab === 'trash' && <TrashLanding documents={p.trashedDocuments} sets={p.trashedSets} onRestoreDocument={p.onRestoreDocument} onRestoreSet={p.onRestoreSet} />}</div></main> }
 
-function SyllabusView({ syllabus, aiEnabled, onImport }: { syllabus: DocumentDetail | null; aiEnabled: boolean; onImport: () => void }) { if (!syllabus) return <section className="section-blank syllabus-empty"><FileText size={28} /><h2>Add your class syllabus.</h2><p>Import a PDF or Word document and SoFlo will turn its text into a read-only paper for this class.</p><button className={`button button-primary${aiEnabled ? ' ai-action' : ''}`} onClick={onImport}><FileUp size={16} /> Import syllabus</button></section>; return <section className="syllabus-view"><div className="section-heading"><div><h2>Syllabus</h2><p>Class syllabus.</p></div><button className={`button button-quiet button-small${aiEnabled ? ' ai-action' : ''}`} onClick={onImport}><FileUp size={15} /> Replace syllabus</button></div><article className="document-page syllabus-paper"><SyllabusContent syllabus={syllabus} /></article></section> }
+function SyllabusView({ syllabus, aiEnabled, onImport }: { syllabus: DocumentDetail | null; aiEnabled: boolean; onImport: () => void }) { if (!syllabus) return <section className="section-blank syllabus-empty"><FileText size={28} /><h2>Add your class syllabus.</h2><p>Import a PDF or Word document and SoFlo will turn its text into a read-only paper for this class.</p><button className={`button button-primary${aiEnabled ? ' ai-action' : ''}`} onClick={onImport}><FileUp size={16} /> Import syllabus</button></section>; return <section className="syllabus-view"><div className="section-heading"><div><h2>Syllabus</h2><p>Class syllabus.</p></div><button className={`button button-quiet button-small${aiEnabled ? ' ai-action' : ''}`} onClick={onImport}><FileUp size={15} /> Replace syllabus</button></div><SyllabusContent syllabus={syllabus} /></section> }
 type SyllabusNode = { type?: string; text?: string; marks?: { type?: string }[]; attrs?: { level?: number }; content?: SyllabusNode[] }
 const nodeText = (node: SyllabusNode): string => node.text ?? node.content?.map(nodeText).join('') ?? ''
 const syllabusText = (node: SyllabusNode): ReactNode => { if (node.type === 'hardBreak') return <br />; if (node.text === undefined) return node.content?.map((child, index) => <span key={index}>{syllabusText(child)}</span>); const text = node.marks?.some((mark) => mark.type === 'bold') ? <strong>{node.text}</strong> : markdownBold(node.text); return node.marks?.some((mark) => mark.type === 'italic') ? <em>{text}</em> : text }
 const markdownBold = (text: string) => text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) => part.startsWith('**') && part.endsWith('**') ? <strong key={index}>{part.slice(2, -2)}</strong> : <span key={index}>{part}</span>)
-function SyllabusContent({ syllabus }: { syllabus: DocumentDetail }) { try { const parsed = JSON.parse(syllabus.content) as SyllabusNode; return <div className="syllabus-paper-content">{(parsed.content ?? []).map((node, index) => renderNode(node, index))}</div> } catch { return <div className="syllabus-paper-content"><h1>{syllabus.title || 'Syllabus'}</h1><p>{syllabus.contentPlain || 'This syllabus is empty.'}</p></div> } }
+function SyllabusContent({ syllabus }: { syllabus: DocumentDetail }) {
+  const nodes = useMemo(() => {
+    try {
+      const parsed = JSON.parse(syllabus.content) as SyllabusNode
+      return parsed.content?.length ? parsed.content : [{ type: 'paragraph', content: [] }]
+    } catch {
+      return [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: syllabus.title || 'Syllabus' }] }, { type: 'paragraph', content: [{ type: 'text', text: syllabus.contentPlain || 'This syllabus is empty.' }] }]
+    }
+  }, [syllabus.content, syllabus.contentPlain, syllabus.title])
+  const measureRef = useRef<HTMLDivElement>(null)
+  const [pageIndexes, setPageIndexes] = useState<number[][]>(() => [nodes.map((_, index) => index)])
+  useLayoutEffect(() => {
+    const measure = measureRef.current
+    if (!measure) return
+    let frame = 0
+    const paginate = () => {
+      const capacity = measure.clientHeight
+      const elements = Array.from(measure.children) as HTMLElement[]
+      if (!capacity || elements.length !== nodes.length) return
+      const next: number[][] = [[]]
+      let used = 0
+      elements.forEach((element, index) => {
+        const style = window.getComputedStyle(element)
+        const height = element.getBoundingClientRect().height + Number.parseFloat(style.marginBottom || '0')
+        if (next[next.length - 1].length && used + height > capacity) { next.push([]); used = 0 }
+        next[next.length - 1].push(index)
+        used += height
+      })
+      setPageIndexes((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next)
+    }
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(paginate) }
+    schedule()
+    const observer = new ResizeObserver(schedule)
+    observer.observe(measure)
+    window.addEventListener('resize', schedule)
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); window.removeEventListener('resize', schedule) }
+  }, [nodes])
+  const pages = pageIndexes.flat().length === nodes.length ? pageIndexes : [nodes.map((_, index) => index)]
+  return <><div className="syllabus-measure" ref={measureRef} aria-hidden="true">{nodes.map((node, index) => <div className="syllabus-node" key={index}>{renderNode(node, index)}</div>)}</div><div className="syllabus-page-stack">{pages.map((page, pageIndex) => <article className="document-page syllabus-paper" key={pageIndex}><div className="syllabus-paper-content">{page.map((nodeIndex) => <div className="syllabus-node" key={nodeIndex}>{renderNode(nodes[nodeIndex], nodeIndex)}</div>)}</div><span className="syllabus-page-number" aria-label={`Page ${pageIndex + 1}`}>{pageIndex + 1}</span></article>)}</div></>
+}
 function renderNode(node: SyllabusNode, key: number): ReactNode { const text = syllabusText(node); if (node.type === 'heading') { const Tag = `h${Math.min(3, Math.max(1, node.attrs?.level ?? 2))}` as 'h1' | 'h2' | 'h3'; return <Tag key={key}>{text}</Tag> }; if (node.type === 'bulletList' || node.type === 'orderedList') { const Tag = node.type === 'bulletList' ? 'ul' : 'ol'; return <Tag key={key}>{node.content?.map((item, index) => <li key={index}>{syllabusText(item)}</li>)}</Tag> }; if (node.type === 'table') return <table key={key}><tbody>{node.content?.map((row, rowIndex) => <tr key={rowIndex}>{row.content?.map((cell, cellIndex) => cell.type === 'tableHeader' ? <th key={cellIndex}>{syllabusText(cell)}</th> : <td key={cellIndex}>{syllabusText(cell)}</td>)}</tr>)}</tbody></table>; if (node.type === 'horizontalRule') return <hr key={key} />; return <p key={key}>{text}</p> }
 
 function Overview(p: ClassViewProps) { const [hidden, setHidden] = useState(() => localStorage.getItem('soflo:hide-overview-banner') === 'true'); const hide = () => { localStorage.setItem('soflo:hide-overview-banner', 'true'); setHidden(true) }; return <>{!hidden && <section className="overview-hero" style={{ '--course-accent': p.course.accentColor } as React.CSSProperties}><div><p className="eyebrow">YOUR WORKSPACE</p><h2>Ready when you are.</h2><p>Write a paper, review a set, or pick up where you left off.</p></div><div className="overview-actions"><button className="button button-light" onClick={p.onNewDocument}><FilePlus2 size={16} /> New paper</button><button className="button button-soft" onClick={p.onNewSet}><BookOpen size={16} /> New set</button></div><button className="overview-hide" onClick={hide}>Hide</button></section>}<section className="overview-metrics"><div><span>{p.documentCount}</span><small>{p.documentCount === 1 ? 'paper' : 'papers'}</small></div><div><span>{p.sets.length}</span><small>{p.sets.length === 1 ? 'flashcard set' : 'flashcard sets'}</small></div><div><span>{p.sets.reduce((total, set) => total + set.cardCount, 0)}</span><small>cards to review</small></div></section><section className="class-section"><div className="section-heading"><div><h2>Flashcard sets</h2><p>Keep your review material close to your papers.</p></div>{p.sets.length > 0 && <button className="text-button" onClick={p.onNewSet}>New set <Plus size={15} /></button>}</div>{p.sets.length ? <div className="set-grid">{p.sets.slice(0, 4).map((set) => <SetCard key={set.id} set={set} onClick={() => p.onOpenSet(set.id)} onDuplicate={p.onDuplicateSet} onTrash={p.onTrashSet} />)}</div> : <div className="quiet-empty compact"><BookOpen size={20} /><p>Your flashcard sets will live here.</p></div>}</section></> }

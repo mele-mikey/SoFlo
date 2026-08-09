@@ -28,6 +28,7 @@ struct FlowTextOutput {
     last_y: f64,
     first_character_in_word: bool,
     has_character: bool,
+    preserve_vertical_gaps: bool,
 }
 
 impl pdf_extract::OutputDev for FlowTextOutput {
@@ -62,10 +63,18 @@ impl pdf_extract::OutputDev for FlowTextOutput {
         let y = trm.m32;
         let size = font_size.abs().max(1.0);
         if self.has_character && self.first_character_in_word {
-            if (y - self.last_y).abs() > size * 0.45
-                || (x < self.last_end && (y - self.last_y).abs() > size * 0.2)
+            let vertical_change = (y - self.last_y).abs();
+            if vertical_change > size * 0.45
+                || (x < self.last_end && vertical_change > size * 0.2)
             {
-                if !self.text.ends_with('\n') {
+                if self.preserve_vertical_gaps && vertical_change > size * 1.35 {
+                    if !self.text.ends_with("\n\n") {
+                        if !self.text.ends_with('\n') {
+                            self.text.push('\n');
+                        }
+                        self.text.push('\n');
+                    }
+                } else if !self.text.ends_with('\n') {
                     self.text.push('\n');
                 }
             } else if x > self.last_end + size * 0.22
@@ -100,6 +109,21 @@ fn extract_pdf_text(bytes: &[u8]) -> CommandResult<String> {
     let document = pdf_extract::Document::load_mem(bytes)
         .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
     let mut output = FlowTextOutput::default();
+    pdf_extract::output_doc(&document, &mut output)
+        .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
+    Ok(output.text)
+}
+
+/// Syllabi are read-only, so their import can retain the PDF's vertical gaps
+/// for the local model to reason about. Paper and lecture imports keep the
+/// existing compact extraction path unchanged.
+fn extract_syllabus_pdf_text(bytes: &[u8]) -> CommandResult<String> {
+    let document = pdf_extract::Document::load_mem(bytes)
+        .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
+    let mut output = FlowTextOutput {
+        preserve_vertical_gaps: true,
+        ..Default::default()
+    };
     pdf_extract::output_doc(&document, &mut output)
         .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
     Ok(output.text)
@@ -248,6 +272,16 @@ pub fn import_pdf_text(path: String) -> CommandResult<String> {
 }
 
 #[tauri::command]
+pub fn import_syllabus_pdf_text(path: String) -> CommandResult<String> {
+    let bytes = fs::read(path).map_err(|_| "SoFlo could not read that PDF file.".to_string())?;
+    let text = extract_syllabus_pdf_text(&bytes)?;
+    if text.trim().is_empty() {
+        return Err("That PDF has no selectable text. Scanned PDFs need OCR before they can be imported as an editable syllabus.".into());
+    }
+    Ok(text)
+}
+
+#[tauri::command]
 pub fn import_word_text(path: String) -> CommandResult<String> {
     let file =
         fs::File::open(path).map_err(|_| "SoFlo could not read that Word document.".to_string())?;
@@ -292,7 +326,7 @@ fn refine_document_text_blocking(
     let source_chunks = split_source_for_ai(&source_text, AI_SOURCE_CHUNK_CHARS);
     let is_syllabus = document_kind.eq_ignore_ascii_case("syllabus");
     let system = if is_syllabus {
-        "You are SoFlo's meticulous local syllabus formatter. Return only clean Markdown, never code fences or commentary. Preserve every source fact exactly and never invent, summarize away, reorder, correct, or omit material. This is a formatting task, not a rewriting task. Keep every policy, deadline, contact detail, grading rule, assignment, reading, schedule item, URL, percentage, and warning. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. If a PDF has a visual line break after every wrapped line, join those wrapped lines into complete paragraphs or list items rather than echoing each line separately. Use # only for the document title; use ## and ### only for genuine section headings; use bullets for true lists; use a table only when the source is genuinely tabular. Keep prose in complete paragraphs. Use **bold** sparingly for labels, dates, percentages, and warnings. Never use more than ###."
+        "You are SoFlo's meticulous local syllabus formatter. Think through the source layout silently, then return only clean Markdown—never code fences, commentary, or an explanation. Preserve every source fact exactly and never invent, summarize away, reorder, correct, or omit material. This is a formatting task, not a rewriting task. Keep every policy, deadline, contact detail, grading rule, assignment, reading, schedule item, URL, percentage, and warning. The extracted source preserves vertical spacing: one newline usually means a visual wrap inside the same block, while a blank line signals a real paragraph or section gap. Use that layout evidence. Join ordinary visual wraps into one complete paragraph, but always put a blank Markdown line between distinct paragraphs, list blocks, tables, and sections so they never run together. Use two trailing spaces only for intentional same-block line breaks such as compact contact details, poetry, or a source line that genuinely stays together. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. Use # only for the document title; use ## and ### only for genuine section headings; use bullets for true lists; use a table only when the source is genuinely tabular. Keep prose in complete paragraphs. Use **bold** sparingly for labels, dates, percentages, and warnings. Never use more than ###."
     } else {
         "You are SoFlo's meticulous local paper formatter. Think through the source layout silently before answering, then return only clean Markdown—never code fences, commentary, or a layout explanation. Preserve every source word, number, punctuation mark, date, URL, citation, and paragraph boundary: do not rewrite, proofread, summarize, reorder, or invent anything. This is a formatting task only. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. Do not assume an MLA template. Only retain a four-line MLA heading when the source genuinely contains one; otherwise do not manufacture a heading block, title, author, or date. Treat a date as ordinary text unless the source clearly uses it as metadata. Identify headings, lists, tables, quotations, and verse from the source's actual cues, never from a line's position alone. Join ordinary visual line wraps into complete paragraphs instead of echoing each PDF line. Keep intentional verse or quotations line by line using two trailing spaces for each intentional break. Use # for one actual document title only when one is evident, ## and ### only for genuine section headings, Markdown lists only for true lists, and tables only for genuinely tabular material. Preserve citations exactly, including Works Cited entries; never turn a name, date, citation, or ordinary sentence into a heading. Use **bold** or *italics* only when the source clearly indicates emphasis."
     };
