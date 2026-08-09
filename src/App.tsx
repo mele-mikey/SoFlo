@@ -89,6 +89,7 @@ function App() {
   }, [showToast])
   useEffect(() => { void loadLibrary() }, [loadLibrary])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<number>('ai-download-progress', (event) => setAiDownloadProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
+  useEffect(() => { let unlisten: (() => void) | undefined; void listen('ai-download-finished', () => setAiDownloadProgress(null)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<AiProgress>('ai-generation-progress', (event) => setAiProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'flashcardSet' || view.kind === 'study' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])

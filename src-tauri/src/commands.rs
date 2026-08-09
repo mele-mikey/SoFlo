@@ -356,6 +356,7 @@ pub async fn download_default_ai_model(app: tauri::AppHandle) -> CommandResult<S
         drop(output);
         fs::rename(&temporary, &destination).map_err(|error| error.to_string())?;
         let _ = app.emit("ai-download-progress", 100u8);
+        let _ = app.emit("ai-download-finished", ());
         Ok(destination.to_string_lossy().to_string())
     }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?
 }
