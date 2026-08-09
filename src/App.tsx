@@ -302,7 +302,12 @@ function App() {
   const defineWord = async (word: string) => {
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) throw new Error('Turn on AI in Settings to look up a word.')
-    return api.defineWord(aiModelPath, word)
+    let modelPath = aiModelPath
+    if (!await api.wordAiModelReady()) {
+      setAiDownloadProgress(0)
+      try { modelPath = await api.downloadDefaultAiModel() } catch (error) { setAiDownloadProgress(null); throw error }
+    }
+    return api.defineWord(modelPath, word)
   }
   const releaseAiModel = useCallback(async () => { await api.stopAiServer() }, [])
   const importPdfAsNewNote = async () => {

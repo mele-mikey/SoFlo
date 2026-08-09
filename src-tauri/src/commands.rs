@@ -136,14 +136,17 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 }
 
 const AI_SERVER_PORT: u16 = 19393;
+const WORD_AI_SERVER_PORT: u16 = 19394;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 const AI_CONTEXT_SIZE: &str = "8192";
+const WORD_AI_CONTEXT_SIZE: &str = "2048";
 // Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
 // the very slow half-CPU/half-GPU split that made generation drag on.
 const AI_GPU_LAYERS: &str = "32";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+const WORD_AI_MODEL_NAME: &str = "Qwen3-0.6B-Q4_K_M.gguf";
 const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
@@ -151,6 +154,7 @@ struct AiServer {
     last_used: Instant,
 }
 static AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
+static WORD_AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
 
 fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
     let requested = Path::new(requested_path.trim());
@@ -184,6 +188,30 @@ fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> Comman
         return Err("Choose a compact local model (4B parameters or less).".into());
     }
     Ok(model.to_string_lossy().to_string())
+}
+
+fn resolve_word_ai_model_path(app: &tauri::AppHandle) -> CommandResult<String> {
+    let model = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join(WORD_AI_MODEL_NAME);
+    if !model.is_file() {
+        return Err("SoFlo's fast word-reference model is not downloaded yet. Download the AI model package in Settings, then try again.".into());
+    }
+    Ok(model.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn word_ai_model_ready(app: tauri::AppHandle) -> CommandResult<bool> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join(WORD_AI_MODEL_NAME)
+        .is_file())
 }
 
 #[tauri::command]
@@ -556,14 +584,15 @@ fn define_word_blocking(app: tauri::AppHandle, model_path: String, word: String)
     if word.is_empty() || word.chars().count() > 80 {
         return Err("Select one ordinary word to look it up.".into());
     }
-    let model_path = resolve_ai_model_path(&app, &model_path)?;
-    ensure_ai_server(&model_path, &app)?;
+    let _ = model_path;
+    let word_model_path = resolve_word_ai_model_path(&app)?;
+    ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let response = client
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT))
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", WORD_AI_SERVER_PORT))
         .json(&serde_json::json!({
             "messages": [
                 {"role":"system","content":"You are a concise, reliable English dictionary for a college writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated formal, academic, or more precise related alternatives; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
@@ -587,7 +616,7 @@ fn define_word_blocking(app: tauri::AppHandle, model_path: String, word: String)
         .and_then(|value| value.get("content"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    touch_ai_server();
+    touch_word_ai_server();
     json_object_from_response(output).ok_or_else(|| "SoFlo could not prepare a word reference.".into())
 }
 
@@ -784,7 +813,22 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
-    let state = AI_SERVER.get_or_init(|| Mutex::new(None));
+    ensure_model_server(&AI_SERVER, model_path, app, AI_SERVER_PORT, AI_CONTEXT_SIZE, "on")
+}
+
+fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
+    ensure_model_server(&WORD_AI_SERVER, model_path, app, WORD_AI_SERVER_PORT, WORD_AI_CONTEXT_SIZE, "off")
+}
+
+fn ensure_model_server(
+    server_state: &'static OnceLock<Mutex<Option<AiServer>>>,
+    model_path: &str,
+    app: &tauri::AppHandle,
+    port_number: u16,
+    context_size: &str,
+    reasoning: &str,
+) -> CommandResult<()> {
+    let state = server_state.get_or_init(|| Mutex::new(None));
     let mut guard = state
         .lock()
         .map_err(|_| "SoFlo's local AI state is unavailable.".to_string())?;
@@ -796,7 +840,7 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
                 .try_wait()
                 .map_err(|error| error.to_string())?
                 .is_none()
-            && ai_server_ready()
+            && ai_server_ready(port_number)
         {
             server.last_used = Instant::now();
             emit_ai_progress(app, 32, "Your local model is ready");
@@ -806,7 +850,7 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
         let _ = server.child.wait();
         *guard = None;
     }
-    let port = AI_SERVER_PORT.to_string();
+    let port = port_number.to_string();
     let mut command = Command::new("llama-server");
     command.args([
         "-m",
@@ -816,13 +860,13 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
         "--port",
         &port,
         "--ctx-size",
-        AI_CONTEXT_SIZE,
+        context_size,
         "--parallel",
         AI_PARALLEL_REQUESTS,
         "--gpu-layers",
         AI_GPU_LAYERS,
         "--reasoning",
-        "on",
+        reasoning,
         "--reasoning-budget",
         "1024",
         "--no-webui",
@@ -841,12 +885,12 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
         last_used: Instant::now(),
     });
     drop(guard);
-    let address: SocketAddr = format!("127.0.0.1:{}", AI_SERVER_PORT)
+    let address: SocketAddr = format!("127.0.0.1:{}", port_number)
         .parse()
         .map_err(|_| "SoFlo could not start the local AI connection.".to_string())?;
     for _ in 0..45 {
         if TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
-            && ai_server_ready()
+            && ai_server_ready(port_number)
         {
             emit_ai_progress(app, 32, "Your local model is ready");
             return Ok(());
@@ -856,28 +900,36 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
     Err("The local AI model took too long to start.".into())
 }
 
-fn ai_server_ready() -> bool {
+fn ai_server_ready(port: u16) -> bool {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(900))
         .build()
         .and_then(|client| {
             client
-                .get(format!("http://127.0.0.1:{}/v1/models", AI_SERVER_PORT))
+                .get(format!("http://127.0.0.1:{}/v1/models", port))
                 .send()
         })
         .is_ok_and(|response| response.status().is_success())
 }
 fn touch_ai_server() {
-    if let Some(state) = AI_SERVER.get() {
+    touch_model_server(&AI_SERVER)
+}
+
+fn touch_word_ai_server() {
+    touch_model_server(&WORD_AI_SERVER)
+}
+
+fn touch_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) {
+    if let Some(state) = server_state.get() {
         if let Ok(mut guard) = state.lock() {
             if let Some(server) = guard.as_mut() {
                 server.last_used = Instant::now();
             }
         }
     }
-    thread::spawn(|| {
+    thread::spawn(move || {
         thread::sleep(AI_WARM_WINDOW);
-        if let Some(state) = AI_SERVER.get() {
+        if let Some(state) = server_state.get() {
             if let Ok(mut guard) = state.lock() {
                 if guard
                     .as_ref()
@@ -893,9 +945,8 @@ fn touch_ai_server() {
     });
 }
 
-#[tauri::command]
-pub fn stop_ai_server() -> CommandResult<()> {
-    if let Some(state) = AI_SERVER.get() {
+fn stop_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) {
+    if let Some(state) = server_state.get() {
         if let Ok(mut guard) = state.lock() {
             if let Some(mut server) = guard.take() {
                 let _ = server.child.kill();
@@ -903,6 +954,60 @@ pub fn stop_ai_server() -> CommandResult<()> {
             }
         }
     }
+}
+
+#[tauri::command]
+pub fn stop_ai_server() -> CommandResult<()> {
+    stop_model_server(&AI_SERVER);
+    stop_model_server(&WORD_AI_SERVER);
+    Ok(())
+}
+
+fn download_ai_model_file(
+    app: &tauri::AppHandle,
+    url: &str,
+    destination: &Path,
+    progress_start: u8,
+    progress_end: u8,
+) -> CommandResult<()> {
+    if destination.is_file() {
+        return Ok(());
+    }
+    let directory = destination
+        .parent()
+        .ok_or_else(|| "SoFlo could not determine the local AI model folder.".to_string())?;
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let filename = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model.gguf");
+    let temporary = directory.join(format!("{}.download", filename));
+    let mut response = reqwest::blocking::get(url)
+        .map_err(|_| "SoFlo could not start the local AI model download.".to_string())?
+        .error_for_status()
+        .map_err(|_| "SoFlo could not download the local AI model.".to_string())?;
+    let total = response
+        .content_length()
+        .ok_or_else(|| "The AI model download did not report its size.".to_string())?;
+    let mut output = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+    let mut downloaded = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = response
+            .read(&mut buffer)
+            .map_err(|_| "The local AI model download was interrupted.".to_string())?;
+        if count == 0 {
+            break;
+        }
+        use std::io::Write;
+        output.write_all(&buffer[..count]).map_err(|error| error.to_string())?;
+        downloaded += count as u64;
+        let span = u64::from(progress_end.saturating_sub(progress_start));
+        let progress = u64::from(progress_start) + downloaded.saturating_mul(span) / total;
+        let _ = app.emit("ai-download-progress", progress.min(100) as u8);
+    }
+    drop(output);
+    fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -913,7 +1018,8 @@ pub async fn download_default_ai_model(
 ) -> CommandResult<String> {
     let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
     tauri::async_runtime::spawn_blocking(move || {
-        const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
+        const MAIN_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
+        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf?download=true";
         let configured = Path::new(configured_model_path.trim());
         let configured_is_legacy_default = configured
             .file_name()
@@ -928,25 +1034,14 @@ pub async fn download_default_ai_model(
                 configured.join(DEFAULT_AI_MODEL_NAME)
             }
         };
-        let directory = destination.parent().ok_or_else(|| "SoFlo could not determine the local AI model folder.".to_string())?;
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        if destination.exists() { return Ok(destination.to_string_lossy().to_string()); }
-        let temporary = directory.join(format!("{}.download", DEFAULT_AI_MODEL_NAME));
-        let mut response = reqwest::blocking::get(MODEL_URL).map_err(|_| "SoFlo could not start the local AI model download.".to_string())?.error_for_status().map_err(|_| "SoFlo could not download the local AI model.".to_string())?;
-        let total = response.content_length().ok_or_else(|| "The AI model download did not report its size.".to_string())?;
-        let mut output = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-        let mut downloaded = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = response.read(&mut buffer).map_err(|_| "The local AI model download was interrupted.".to_string())?;
-            if count == 0 { break; }
-            use std::io::Write;
-            output.write_all(&buffer[..count]).map_err(|error| error.to_string())?;
-            downloaded += count as u64;
-            let _ = app.emit("ai-download-progress", ((downloaded.saturating_mul(100) / total).min(100)) as u8);
-        }
-        drop(output);
-        fs::rename(&temporary, &destination).map_err(|error| error.to_string())?;
+        let word_destination = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("models")
+            .join(WORD_AI_MODEL_NAME);
+        download_ai_model_file(&app, MAIN_MODEL_URL, &destination, 0, 83)?;
+        download_ai_model_file(&app, WORD_MODEL_URL, &word_destination, 83, 100)?;
         let _ = app.emit("ai-download-progress", 100u8);
         let _ = app.emit("ai-download-finished", ());
         Ok(destination.to_string_lossy().to_string())

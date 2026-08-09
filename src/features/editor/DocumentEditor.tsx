@@ -130,6 +130,7 @@ type GrammarIssueKind = 'mechanic' | 'style' | 'structure'
 type GrammarIssue = { kind: GrammarIssueKind; original: string; replacement: string; alternatives: string[]; reason: string; category: string; partOfSpeech: string; definition: string; useCase: string; synonyms: string[]; from: number; to: number }
 type WordSense = { partOfSpeech: string; definition: string; example: string }
 type WordReference = { word: string; pronunciation: string; senses: WordSense[]; synonyms: string[] }
+type WordSelection = { word: string; from: number; to: number }
 const GrammarReview = Extension.create({
   name: 'grammarReview',
   addProseMirrorPlugins() {
@@ -176,11 +177,11 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
   return issues
 }
 
-function selectedSingleWord(editor: Editor) {
+function selectedSingleWord(editor: Editor): WordSelection | null {
   const { from, to } = editor.state.selection
-  if (from === to) return ''
+  if (from === to) return null
   const selected = editor.state.doc.textBetween(from, to, ' ').trim()
-  return /^\p{L}+(?:[-'’]\p{L}+)*$/u.test(selected) ? selected : ''
+  return /^\p{L}+(?:[-'’]\p{L}+)*$/u.test(selected) ? { word: selected, from, to } : null
 }
 
 function parseWordReference(raw: string, word: string): WordReference | null {
@@ -446,6 +447,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarRequestRef = useRef(false)
   const wordReferenceRequestRef = useRef(0)
   const selectedWordReferenceRef = useRef('')
+  const selectedWordRangeRef = useRef<WordSelection | null>(null)
+  const useWordAlternativeRef = useRef<(alternative: string) => void>(() => undefined)
   const aiEnabledRef = useRef(aiEnabled)
   const defineWordRef = useRef(onDefineWord)
   aiEnabledRef.current = aiEnabled
@@ -484,18 +487,21 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return handleLinkClick(view, position, event)
   }
   const handleWordReferenceSelection = (nextEditor: Editor) => {
-    const word = selectedSingleWord(nextEditor)
-    if (!word || !aiEnabledRef.current) {
-      if (!word) {
+    const selection = selectedSingleWord(nextEditor)
+    if (!selection || !aiEnabledRef.current) {
+      if (!selection) {
         selectedWordReferenceRef.current = ''
+        selectedWordRangeRef.current = null
         setWordReference(null)
         setWordReferenceLoading(false)
         setWordReferenceError('')
       }
       return
     }
+    const { word } = selection
     if (selectedWordReferenceRef.current.toLocaleLowerCase() === word.toLocaleLowerCase()) return
     selectedWordReferenceRef.current = word
+    selectedWordRangeRef.current = selection
     const request = ++wordReferenceRequestRef.current
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
@@ -548,6 +554,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setWordReferenceLoading(false)
     setWordReferenceError('')
     selectedWordReferenceRef.current = ''
+    selectedWordRangeRef.current = null
     wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
@@ -650,6 +657,16 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return () => window.clearInterval(timer)
   }, [aiEnabled, aiGrammarEnabled, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
+  useEffect(() => {
+    const replaceFromWordReference = (event: MouseEvent) => {
+      const chip = event.target instanceof Element ? event.target.closest<HTMLElement>('.word-reference-synonyms > span') : null
+      if (!chip?.textContent) return
+      event.preventDefault()
+      useWordAlternativeRef.current(chip.textContent)
+    }
+    window.addEventListener('click', replaceFromWordReference)
+    return () => window.removeEventListener('click', replaceFromWordReference)
+  }, [])
 
   if (!editor) return <div className="editor-loading" />
   const runFind = (value: string) => { setFindValue(value); const finder = (window as Window & { find?: (query: string, caseSensitive?: boolean, backwards?: boolean, wrapAround?: boolean) => boolean }).find; if (value && finder) finder(value, false, false, true) }
@@ -739,6 +756,23 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
   }
+  const useWordAlternative = (alternative: string) => {
+    const range = selectedWordRangeRef.current
+    if (!range) return
+    const exact = editor.state.doc.textBetween(range.from, range.to, ' ')
+    if (exact.toLocaleLowerCase() !== range.word.toLocaleLowerCase()) return
+    const transaction = editor.state.tr.insertText(alternative, range.from, range.to).scrollIntoView()
+    editor.view.dispatch(transaction)
+    void navigator.clipboard.writeText(alternative).catch(() => undefined)
+    wordReferenceRequestRef.current += 1
+    selectedWordReferenceRef.current = ''
+    selectedWordRangeRef.current = null
+    setWordReference(null)
+    setWordReferenceLoading(false)
+    setWordReferenceError('')
+    editor.commands.focus()
+  }
+  useWordAlternativeRef.current = useWordAlternative
   const openLinkDialog = () => setLinkDialog({ url: (editor.getAttributes('link').href as string | undefined) ?? '', canRemove: editor.isActive('link') })
   const applyLink = (url: string) => {
     const href = url.trim()
