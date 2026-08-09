@@ -148,7 +148,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.76" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.77" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
