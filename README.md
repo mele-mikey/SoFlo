@@ -49,7 +49,3 @@ npm run tauri build
 ```
 
 The MSI is written to `src-tauri/target/release/bundle/msi/`.
-
-## Privacy and publishing notes
-
-Do not commit a personal SoFlo database, backups, downloaded AI models, environment files, or generated build folders. The included `.gitignore` excludes those files by default. Publish the resulting MSI through GitHub Releases rather than committing it to the repository.
