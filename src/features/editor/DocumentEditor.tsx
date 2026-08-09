@@ -20,11 +20,12 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
-import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, Unlink, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DocumentDetail } from '../../lib/types'
 import { open } from '@tauri-apps/plugin-dialog'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../../lib/api'
 import { importPdfAsEditableNote } from './pdfImport'
 
@@ -123,6 +124,7 @@ function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: u
   let used = 0
   let capacity = firstCapacity
   const breaks: Decoration[] = []
+  let hasPageBreak = false
   view.state.doc.forEach((_node, offset) => {
     const nodeDom = view.nodeDOM(offset)
     if (!(nodeDom instanceof HTMLElement)) return
@@ -130,7 +132,7 @@ function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: u
     const blockHeight = nodeDom.getBoundingClientRect().height + (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0)
     if (used > 0 && used + blockHeight > capacity) {
       const remaining = Math.max(0, capacity - used)
-      const breakHeight = remaining + paperGap + topInset
+      const breakHeight = remaining + bottomInset + paperGap + topInset
       breaks.push(Decoration.widget(offset, () => {
         const element = document.createElement('span')
         element.className = 'paper-page-break'
@@ -139,14 +141,17 @@ function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: u
         element.style.setProperty('--paper-break-gap', `${paperGap}px`)
         return element
       }, { key: `paper-break-${offset}-${Math.round(breakHeight)}`, side: -1, ignoreSelection: true }))
+      hasPageBreak = true
       used = 0
       capacity = laterCapacity
     }
     used += blockHeight
   })
-  const tail = Math.max(0, capacity - used + bottomInset)
+  // The document-page minimum height completes page one. Once content has crossed
+  // a page break, this final spacer completes the last later page to the same size.
+  const tail = Math.max(0, capacity - used)
   const documentSize = (view.state.doc as unknown as { content: { size: number } }).content.size
-  if (tail > 0) breaks.push(Decoration.widget(documentSize, () => {
+  if (hasPageBreak && tail > 0) breaks.push(Decoration.widget(documentSize, () => {
     const element = document.createElement('span')
     element.className = 'paper-page-tail'
     element.style.height = `${tail}px`
@@ -195,6 +200,26 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const [lineSpacing, setLineSpacing] = useState<'single' | 'docs' | 'one-half' | 'double'>('docs')
   const [pdfMessage, setPdfMessage] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [linkDialog, setLinkDialog] = useState<{ url: string; canRemove: boolean } | null>(null)
+  const [linkPreview, setLinkPreview] = useState<{ href: string; label: string; x: number; y: number } | null>(null)
+  const [imageDialog, setImageDialog] = useState<{ src: string } | null>(null)
+  const [tableDialog, setTableDialog] = useState<{ rows: number; cols: number; withHeaderRow: boolean } | null>(null)
+  const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
+  const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
+  const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
+  const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
+    const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null
+    if (!anchor?.href) return false
+    event.preventDefault()
+    if (linkPreviewRef.current?.href === anchor.href) {
+      setActiveLinkPreview(null)
+      openExternalLink(anchor.href)
+      return true
+    }
+    const bounds = anchor.getBoundingClientRect()
+    setActiveLinkPreview({ href: anchor.href, label: anchor.textContent?.trim() || anchor.href, x: Math.max(12, Math.min(bounds.left, window.innerWidth - 348)), y: Math.min(bounds.bottom + 9, window.innerHeight - 86) })
+    return true
+  }
   const content = useMemo(() => safeContent(document.content), [document.content])
   const editor = useEditor({
     extensions: [
@@ -202,11 +227,14 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
       Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperPagination, Color, Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
-      Image.configure({ inline: false, allowBase64: false }), Table.configure({ resizable: true }), TableRow, TableHeader, TableCell,
+      Image.configure({ inline: false, allowBase64: true }), Table.configure({ resizable: true, allowTableNodeSelection: true }), TableRow, TableHeader, TableCell,
       Superscript, Subscript, Placeholder.configure({ placeholder: 'Start writing…' }), Typography,
     ],
     content,
-    editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` } },
+    editorProps: {
+      attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` },
+      handleClick: handleLinkClick,
+    },
     onUpdate: ({ editor: nextEditor }) => onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title),
   })
   const currentId = useRef(document.id)
@@ -215,7 +243,7 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     currentId.current = document.id
     editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
   }, [document.id, document.content, editor])
-  useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` } } }) }, [editor, spellcheck, fontSize])
+  useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleLinkClick } }) }, [editor, spellcheck, fontSize])
   useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin])
   useEffect(() => {
     const interceptFind = (event: KeyboardEvent) => {
@@ -279,6 +307,22 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     const text = editor.state.doc.textBetween(from, to, '\n')
     try { await navigator.clipboard.writeText(text); if (action === 'cut') editor.commands.deleteSelection() } catch { /* The browser command is the best available fallback. */ }
   }
+  const openLinkDialog = () => setLinkDialog({ url: (editor.getAttributes('link').href as string | undefined) ?? '', canRemove: editor.isActive('link') })
+  const applyLink = (url: string) => {
+    const href = url.trim()
+    if (!href) return
+    editor.chain().focus().extendMarkRange('link').setLink({ href }).run()
+    setLinkDialog(null)
+  }
+  const insertImage = (src: string) => {
+    if (!src.trim()) return
+    editor.chain().focus().setImage({ src }).run()
+    setImageDialog(null)
+  }
+  const insertTable = (table: { rows: number; cols: number; withHeaderRow: boolean }) => {
+    editor.chain().focus().insertTable(table).run()
+    setTableDialog(null)
+  }
   return <main className="editor-view">
     <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
@@ -286,32 +330,45 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
-      <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} />
+      <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
     <section className="editor-page-wrap"><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing}`}><EditorContent editor={editor} onContextMenu={openContextMenu} /></article></section>
+    {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
+    {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}
+    {imageDialog && <ImageDialog source={imageDialog.src} onClose={() => setImageDialog(null)} onSourceChange={(src) => setImageDialog({ src })} onInsert={insertImage} />}
+    {tableDialog && <TableDialog table={tableDialog} onClose={() => setTableDialog(null)} onChange={setTableDialog} onInsert={insertTable} />}
     <button className="page-settings-button" aria-label="Page settings" title="Page settings" onClick={() => setPageSettingsOpen((open) => !open)}><Settings2 size={20} /></button>
     {pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p><div className="page-settings-actions"><button className="button button-primary button-small" onClick={() => void exportPdf()}><FileDown size={15} /> Export PDF</button><button className="button button-quiet button-small" onClick={() => void importPdf()}><Import size={15} /> Import PDF text</button></div>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}<p className="page-settings-note">Export opens the native Print dialog. Choose <strong>Microsoft Print to PDF</strong> to save a properly sized Letter PDF.</p></div></aside>}
   </main>
+}
+
+function LinkDialog({ initialUrl, canRemove, onClose, onApply, onRemove }: { initialUrl: string; canRemove: boolean; onClose: () => void; onApply: (url: string) => void; onRemove: () => void }) {
+  const [url, setUrl] = useState(initialUrl)
+  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog" aria-label="Add or edit link" onSubmit={(event) => { event.preventDefault(); onApply(url) }}><header><div><p className="eyebrow">LINK</p><h2>{canRemove ? 'Edit link' : 'Add link'}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close link dialog"><X size={18} /></button></header><div className="editor-dialog-content"><label>Web address<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com" inputMode="url" /></label><p>Highlight text first, then apply a link to it.</p></div><footer>{canRemove && <button type="button" className="button button-danger button-small" onClick={onRemove}>Remove link</button>}<span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!url.trim()}>Apply link</button></footer></form></div>
+}
+
+function ImageDialog({ source, onClose, onSourceChange, onInsert }: { source: string; onClose: () => void; onSourceChange: (source: string) => void; onInsert: (source: string) => void }) {
+  const chooseFile = (file: File | undefined) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => { if (typeof reader.result === 'string') onSourceChange(reader.result) }
+    reader.readAsDataURL(file)
+  }
+  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog" aria-label="Add image" onSubmit={(event) => { event.preventDefault(); onInsert(source) }}><header><div><p className="eyebrow">IMAGE</p><h2>Add an image</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close image dialog"><X size={18} /></button></header><div className="editor-dialog-content"><label>Image URL<input type="url" autoFocus value={source.startsWith('data:') ? '' : source} onChange={(event) => onSourceChange(event.target.value)} placeholder="https://example.com/image.png" inputMode="url" /></label><div className="image-file-picker"><span>or</span><label className="button button-quiet button-small"><ImagePlus size={15} /> Choose image file<input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={(event) => chooseFile(event.currentTarget.files?.[0])} /></label></div>{source && <div className="image-preview"><img src={source} alt="Selected image preview" /></div>}<p>Image files are saved inside this paper so they remain available on this PC.</p></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!source.trim()}>Insert image</button></footer></form></div>
+}
+
+function TableDialog({ table, onClose, onChange, onInsert }: { table: { rows: number; cols: number; withHeaderRow: boolean }; onClose: () => void; onChange: (table: { rows: number; cols: number; withHeaderRow: boolean }) => void; onInsert: (table: { rows: number; cols: number; withHeaderRow: boolean }) => void }) {
+  const setDimension = (key: 'rows' | 'cols', value: number) => onChange({ ...table, [key]: Math.max(1, Math.min(20, Number.isFinite(value) ? value : 1)) })
+  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog table-dialog" aria-label="Insert table" onSubmit={(event) => { event.preventDefault(); onInsert(table) }}><header><div><p className="eyebrow">TABLE</p><h2>Insert table</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close table dialog"><X size={18} /></button></header><div className="editor-dialog-content"><div className="table-size-fields"><label>Columns<input type="number" min="1" max="20" value={table.cols} onChange={(event) => setDimension('cols', Number(event.target.value))} /></label><span>×</span><label>Rows<input type="number" min="1" max="20" value={table.rows} onChange={(event) => setDimension('rows', Number(event.target.value))} /></label></div><div className="table-preview" style={{ gridTemplateColumns: `repeat(${table.cols}, 1fr)` }} aria-label={`${table.rows} by ${table.cols} table preview`}>{Array.from({ length: table.rows * table.cols }, (_, index) => <i className={table.withHeaderRow && index < table.cols ? 'header-cell' : ''} key={index} />)}</div><label className="dialog-checkbox"><input type="checkbox" checked={table.withHeaderRow} onChange={(event) => onChange({ ...table, withHeaderRow: event.target.checked })} /> Start with a header row</label><p>Click inside the table afterward to add or remove rows and columns, merge cells, or change its header row.</p></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary">Insert table</button></footer></form></div>
 }
 
 function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { label: string; shortcut: string; disabled?: boolean; onClick: () => void }) {
   return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
 }
 
-function EditorToolbar({ editor, onFind }: { editor: NonNullable<ReturnType<typeof useEditor>>; onFind: () => void }) {
-  const addLink = () => {
-    const previousUrl = editor.getAttributes('link').href as string | undefined
-    const value = window.prompt('Paste a link', previousUrl ?? '')
-    if (value === null) return
-    if (!value.trim()) { editor.chain().focus().unsetLink().run(); return }
-    editor.chain().focus().extendMarkRange('link').setLink({ href: value.trim() }).run()
-  }
-  const addImage = () => {
-    const value = window.prompt('Paste an image URL')
-    if (value?.trim()) editor.chain().focus().setImage({ src: value.trim() }).run()
-  }
+function EditorToolbar({ editor, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
   const pasteWithoutFormatting = async () => {
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
@@ -343,10 +400,9 @@ function EditorToolbar({ editor, onFind }: { editor: NonNullable<ReturnType<type
     <ToolButton label="Superscript" active={editor.isActive('superscript')} onClick={() => editor.chain().focus().toggleSuperscript().run()}><SuperscriptIcon size={16} /></ToolButton>
     <ToolButton label="Subscript" active={editor.isActive('subscript')} onClick={() => editor.chain().focus().toggleSubscript().run()}><SubscriptIcon size={16} /></ToolButton>
     <Divider />
-    <ToolButton label="Add link" active={editor.isActive('link')} onClick={addLink}><Link2 size={16} /></ToolButton>
-    <ToolButton label="Remove link" onClick={() => editor.chain().focus().unsetLink().run()}><Unlink size={16} /></ToolButton>
-    <ToolButton label="Add image" onClick={addImage}><ImagePlus size={16} /></ToolButton>
-    <ToolButton label="Insert table" onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}><Table2 size={16} /></ToolButton>
+    <ToolButton label={editor.isActive('link') ? 'Edit or remove link' : 'Add link'} active={editor.isActive('link')} onClick={onOpenLinkDialog}><Link2 size={16} /></ToolButton>
+    <ToolButton label="Add image" onClick={onOpenImageDialog}><ImagePlus size={16} /></ToolButton>
+    <ToolbarMenu label="Table" icon={<Table2 size={16} />}><button onClick={onOpenTableDialog}>Insert table…</button>{editor.isActive('table') && <><hr /><button onClick={() => editor.chain().focus().addRowBefore().run()}>Insert row above</button><button onClick={() => editor.chain().focus().addRowAfter().run()}>Insert row below</button><button onClick={() => editor.chain().focus().deleteRow().run()}>Delete row</button><button onClick={() => editor.chain().focus().addColumnBefore().run()}>Insert column left</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>Insert column right</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>Delete column</button><button onClick={() => editor.chain().focus().toggleHeaderRow().run()}>Toggle header row</button><button onClick={() => editor.chain().focus().mergeOrSplit().run()}>Merge or split cells</button><button className="toolbar-danger-action" onClick={() => editor.chain().focus().deleteTable().run()}>Delete table</button></>}</ToolbarMenu>
     <ToolButton label="Horizontal rule" onClick={() => editor.chain().focus().setHorizontalRule().run()}><Columns3 size={16} /></ToolButton>
     <Divider />
     <ToolButton label="Undo" onClick={() => editor.chain().focus().undo().run()}><Undo2 size={16} /></ToolButton>

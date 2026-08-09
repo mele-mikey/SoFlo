@@ -1,35 +1,33 @@
 # SoFlo
 
-SoFlo is a private, local-first study workspace for Windows. Keep your classes, papers, syllabi, schedules, flashcards, and study sessions together without creating an account or sending your library to a cloud service.
+I made SoFlo because I wanted one calm place to keep up with college: classes, papers, lecture notes, syllabi, flashcards, and study sessions. It is built for Windows and keeps your library on your own computer. There is no account to make and no required cloud service.
 
-## Download
+## Download and install
 
-Download the latest `SoFlo-Setup-<version>.exe` from the repository's **Releases** page, run it, and open SoFlo from the Start menu. The installer can add a desktop shortcut and optionally prepare the local AI-model location without downloading the model.
+Head to this repository's **Releases** page and download the latest `SoFlo-Setup-<version>.exe`. Run it, then open SoFlo from the Start menu. The installer can also create a desktop shortcut.
 
-The setup executable is standalone: people installing SoFlo do **not** need Node.js, Rust, Tauri, Visual Studio, or any other development tools. It supports Windows 10 and 11. If Microsoft Edge WebView2 is not already present, setup downloads and installs that Microsoft runtime automatically, so only that uncommon case needs an internet connection during installation.
-
-Your library is stored on your own PC and remains there across normal updates. Use **Settings → Danger zone → Export .soflo data** to make one portable library file whenever you want an extra copy or need to move to another computer.
+Your library stays on your PC through normal app updates. To make a portable backup or move your work to another device, use **Settings → Danger zone → Export SoFlo data**. That creates one `.soflo` file with your library.
 
 ## What you can do
 
-- Organize papers, lectures, syllabi, and flashcard sets by semester and class.
-- Write in a US Letter, Google Docs-style rich-text paper editor with automatic local saves.
+- Keep papers, lectures, syllabi, flashcard sets, and classes together by semester.
+- Write on a US Letter paper layout with a Google Docs-style rich-text editor and automatic local saving.
 - Import editable text from PDF and Word documents.
-- Study with Flashcards, Learn, Test, Match, and an all-cards class view.
-- Set a PIN and/or password to encrypt the library stored on your PC.
-- Optionally use a compact local AI model for document formatting and flashcard generation. It downloads only when requested and runs locally.
+- Study with Flashcards, Learn, Test, Match, and an all-cards view for each class.
+- Protect your local library with a PIN, password, or both.
+- Use an optional compact local AI model for formatting documents and creating flashcards. I made it download only when you choose an AI action, and it runs on your computer.
 
 ## Getting started
 
-1. Open SoFlo and complete the brief welcome setup.
-2. Create a semester, then add your classes.
-3. Create or import papers in a class.
-4. Add flashcards manually or use **Create with AI** when local AI is enabled.
-5. Export your library from **Settings → Danger zone** before making major changes or moving computers.
+1. Open SoFlo and go through the quick welcome setup.
+2. Create a semester and add your classes.
+3. Create a paper or import one into a class.
+4. Add flashcards yourself, or use **Create with AI** if local AI is enabled.
+5. Export a `.soflo` backup from **Settings → Danger zone** before a big change or when moving to another computer.
 
-## Development
+## Building SoFlo yourself
 
-Requirements: Node.js, Rust, and the Windows build tools required by Tauri.
+If you want to contribute or build it from source, you will need Node.js, Rust, and the Windows build tools required by Tauri.
 
 ```powershell
 npm install
@@ -44,18 +42,18 @@ npm test
 cd src-tauri; cargo check
 ```
 
-Create the Windows release installer:
+To create the Windows installer:
 
 ```powershell
 npm run build:installer
 ```
 
-The installer is written to `src-tauri/target/release/bundle/nsis-custom/`.
+You will find the finished installer in `src-tauri/target/release/bundle/nsis-custom/`.
 
-## Credits and license
+## Credit and license
 
-Created by Mikey M. Copyright © 2026 Mikey M.
+I’m Mikey M., and I created SoFlo. Copyright © 2026 Mikey M.
 
-SoFlo is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). You may use, modify, and redistribute it for non-commercial purposes, provided you preserve the required credit and license notice. Commercial use requires permission from Mikey M.
+SoFlo is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). You are welcome to use, change, and share it for non-commercial purposes as long as you keep the required credit and license notice. If you want to use it commercially, please ask me first.
 
-This is deliberately **not** described as OSI open source: an open-source license cannot prohibit commercial use.
+This is not OSI open source, because the license does not allow commercial use without permission.

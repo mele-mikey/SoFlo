@@ -133,15 +133,15 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.33" />
-      <SettingRow title="Credits" detail="Created by Mikey M."><span className="location-badge">SoFlo</span></SettingRow>
-      <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission."><span className="location-badge">Source-available</span></SettingRow>
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.38" />
+      <SettingRow title="Credits" detail="Created by Mikey M." />
+      <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
 
     <section className="settings-section danger-zone">
       <SectionHeading icon={<AlertTriangle size={18} />} title="Danger zone" detail="Move or permanently remove your local SoFlo library." />
       <SettingRow title="Export SoFlo data" detail="Save your entire library as one portable .soflo file in Downloads."><button className="button button-soft button-small" disabled={busy !== null} onClick={() => void exportData()}><Download size={15} /> {busy === 'export' ? 'Exporting...' : 'Export data'}</button></SettingRow>
-      <SettingRow title="Import SoFlo data" detail="Replace this computer's library with a .soflo file. A protected export opens the usual PIN/password unlock screen."><button className="button button-quiet button-small" disabled={busy !== null} onClick={() => void importData()}><Upload size={15} /> {busy === 'import' ? 'Importing...' : 'Import data'}</button></SettingRow>
+      <SettingRow title="Import SoFlo data" detail="Replace this computer's library with a .soflo file."><button className="button button-quiet button-small" disabled={busy !== null} onClick={() => void importData()}><Upload size={15} /> {busy === 'import' ? 'Importing...' : 'Import data'}</button></SettingRow>
       <SettingRow title="Wipe local data" detail="Permanently erase every class, paper, lecture, card, and setting from this computer."><button className="button button-danger button-small" disabled={busy !== null} onClick={() => setWipeConfirmOpen(true)}><AlertTriangle size={15} /> Wipe data</button></SettingRow>
     </section>
 
@@ -152,7 +152,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
 }
 
 function SectionHeading({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) { return <div className="settings-section-heading">{icon}<div><h2>{title}</h2><p>{detail}</p></div></div> }
-function SettingRow({ title, detail, children }: { title: string; detail: string; children: ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
+function SettingRow({ title, detail, children }: { title: string; detail: string; children?: ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) { return <button role="switch" aria-checked={checked} className={checked ? 'toggle checked' : 'toggle'} onClick={() => onChange(!checked)}><span /></button> }
 
 function ThemePicker({ value, onChange }: { value: AppSettings['themeColor']; onChange: (value: AppSettings['themeColor']) => void }) {
