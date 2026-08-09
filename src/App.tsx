@@ -75,7 +75,9 @@ function App() {
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null)
   const [aiDownloadProgress, setAiDownloadProgress] = useState<number | null>(null)
   const [wordAiModelReady, setWordAiModelReady] = useState(false)
+  const [wordAiModelStatusLoaded, setWordAiModelStatusLoaded] = useState(false)
   const [aiConsentOpen, setAiConsentOpen] = useState(false)
+  const [writingModelPromptOpen, setWritingModelPromptOpen] = useState(false)
   const [trashedDocuments, setTrashedDocuments] = useState<DocumentSummary[]>([])
   const [sets, setSets] = useState<FlashcardSetSummary[]>([])
   const [trashedSets, setTrashedSets] = useState<FlashcardSetSummary[]>([])
@@ -136,9 +138,9 @@ function App() {
   useEffect(() => { let unlisten: (() => void) | undefined; void listen('ai-download-finished', () => setAiDownloadProgress(null)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<AiProgress>('ai-generation-progress', (event) => setAiProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   const refreshWordAiModelStatus = useCallback(async () => {
-    try { setWordAiModelReady(await api.wordAiModelReady()) } catch { setWordAiModelReady(false) }
+    try { setWordAiModelReady(await api.wordAiModelReady()) } catch { setWordAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
-  useEffect(() => { void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, refreshWordAiModelStatus])
+  useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, refreshWordAiModelStatus])
   const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])
   useEffect(() => {
@@ -159,6 +161,13 @@ function App() {
     if (view.kind === 'lecture') { setActiveLecture(null); void api.getLecture(view.lectureId).then(setActiveLecture).catch(() => showToast('That lecture could not be opened.', 'error')) }
     if (view.kind === 'flashcardSet' || view.kind === 'study') { setActiveSet(null); void api.getSet(view.setId).then(setActiveSet).catch(() => showToast('That flashcard set could not be opened.', 'error')) }
   }, [showToast, view])
+  useEffect(() => {
+    if (view.kind !== 'document' || !activeDocument || !library?.settings.aiEnabled || !wordAiModelStatusLoaded || wordAiModelReady || aiConsentOpen || aiDownloadProgress !== null) {
+      if (view.kind !== 'document' || !library?.settings.aiEnabled || wordAiModelReady) setWritingModelPromptOpen(false)
+      return
+    }
+    setWritingModelPromptOpen(true)
+  }, [activeDocument, aiConsentOpen, aiDownloadProgress, library?.settings.aiEnabled, view.kind, wordAiModelReady, wordAiModelStatusLoaded])
 
   const flushDocument = useCallback(async () => {
     if (saveTimer.current !== null) { window.clearTimeout(saveTimer.current); saveTimer.current = null }
@@ -285,6 +294,21 @@ function App() {
       await api.updateSettings(settings)
       setLibrary((current) => current ? { ...current, settings } : current)
       return aiModelPath
+    } finally { setAiDownloadProgress(null) }
+  }
+  const downloadWritingModel = async () => {
+    if (!library?.settings.aiEnabled) return
+    setWritingModelPromptOpen(false)
+    setAiDownloadProgress(0)
+    try {
+      const aiModelPath = await api.downloadDefaultAiModel()
+      const settings = { ...library.settings, aiModelPath }
+      await api.updateSettings(settings)
+      setLibrary((current) => current ? { ...current, settings } : current)
+      setWordAiModelReady(true)
+      showToast('Writing AI is ready for private spelling and grammar checks.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The writing AI could not be downloaded.', 'error')
     } finally { setAiDownloadProgress(null) }
   }
   const formatImportedText = async (text: string, source: string, documentKind: 'paper' | 'syllabus') => {
@@ -574,6 +598,7 @@ function App() {
     {modal?.type === 'restartWalkthrough' && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Restart walkthrough"><header><div><p className="eyebrow">RESTART WALKTHROUGH</p><h2>Replace the old example class?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>You kept the example class from the last walkthrough. Starting again will permanently remove that example and create a fresh one for this walkthrough. Your own classes and papers will not be changed.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => void startWalkthrough(true)}>Start walkthrough</button></footer></section></div>}
     {lectureToDelete && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Delete lecture"><header><div><p className="eyebrow">PERMANENT ACTION</p><h2>Delete this lecture?</h2></div><button className="icon-button" onClick={() => setLectureToDelete(null)} aria-label="Cancel deletion"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{lectureToDelete.title}</strong> and its notes will be permanently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setLectureToDelete(null)}>Cancel</button><button className="button button-danger" onClick={() => void deleteLecture(lectureToDelete)}>Delete lecture</button></footer></section></div>}
     {toast && <div className={`toast ${toast.type}`} role="status">{toast.type === 'success' ? <Plus size={15} /> : <X size={15} />}{toast.message}</div>}
+    {writingModelPromptOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Download writing AI"><p className="eyebrow">PRIVATE WRITING AI</p><h2>Add writing help?</h2><p>Download SoFlo’s 1.7B writing model for private spelling, grammar, and word details. It runs on this PC after download. If the general AI model is not installed yet, this same one-time download adds it too.</p><p>You can choose not now; SoFlo will ask again the next time you open a paper.</p><div><button className="button button-quiet" onClick={() => setWritingModelPromptOpen(false)}>Not now</button><button className="button button-primary" onClick={() => void downloadWritingModel()}>Download writing AI</button></div></section></div>}
     {aiConsentOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Use local AI?"><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>This action will use AI.</h2><p>SoFlo will download its local models once, then process this document on your PC. Research & Grade only sends a short topic query - never your paper - to Crossref for scholarly metadata. Turn AI off any time in Settings.</p><div><button className="button button-quiet" onClick={() => closeAiConsent(false)}>Return</button><button className="button button-primary" onClick={() => closeAiConsent(true)}>Proceed</button></div></section></div>}
     {aiDownloadProgress !== null && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card ai-download-card" role="dialog" aria-modal="true" aria-label="Downloading local AI model"><p className="eyebrow">PREPARING LOCAL AI</p><h2>Downloading your private model</h2><p>This happens once. Keep SoFlo open while the model is saved on this PC.</p><div className="ai-download-track"><i style={{ width: `${aiDownloadProgress}%` }} /></div><strong>{aiDownloadProgress}%</strong></section></div>}
     {aiWorking && <div className="ai-consent-backdrop ai-progress-backdrop" role="presentation"><section className="ai-consent-card ai-download-card ai-progress-card" role="status" aria-live="polite"><i className="ai-progress-spinner" /><p className="eyebrow">SOFLO AI IS WORKING</p><h2>Making this editable</h2><p>{aiProgress?.message ?? 'Formatting your document on this PC.'}</p><div className="ai-download-track"><i style={{ width: `${aiProgress?.progress ?? 4}%` }} /></div><strong>{aiProgress?.progress ?? 4}% complete</strong></section></div>}
