@@ -552,15 +552,18 @@ fn review_grammar_text_blocking(
     text: String,
     quick: bool,
 ) -> CommandResult<String> {
+    // The editor sends a rotating excerpt for quiet checks so long papers are
+    // covered over time. Keep that excerpt comfortably inside the writing
+    // model's context window instead of silently dropping its latter half.
     let source = text
         .chars()
-        .take(if quick { 6_000 } else { 18_000 })
+        .take(if quick { 5_400 } else { 18_000 })
         .collect::<String>();
     if source.trim().len() < 3 {
         return Ok("[]".into());
     }
     let system_instruction = if quick {
-        "You are SoFlo's quiet, precise academic spelling and mechanics checker. Return only one complete valid JSON array: no Markdown, no code fences, no explanation outside the array. Return at most 6 compact objects with these keys: kind, original, replacement, reason, category, partOfSpeech, definition, useCase, alternatives, synonyms. kind must always be mechanic. alternatives and synonyms must each be arrays of at most three strings. Scan every ordinary English word and find clear spelling, apostrophe, capitalization, hyphenation, duplicated-space, and basic punctuation errors; do not overlook an obvious common typo. Every original, replacement, and alternative must be one to three words or a short punctuation/space sequence. original must exactly match a continuous excerpt from the input, preserving its spelling and capitalization. Keep replacement minimal. For a misspelled word, give its most likely correction and up to three plausible alternatives. Never rewrite a sentence, suggest style or fluency changes, alter the writer's voice, flag citations, or flag a proper name merely because it is unfamiliar. Keep reason, definition, and useCase to one short sentence each. For word corrections, provide the corrected word's part of speech, a brief definition, a short use case, and useful related synonyms. Use empty strings and [] only when those fields genuinely do not apply. Return [] only when there are no clear errors."
+        "You are SoFlo's quiet, precise academic spelling and mechanics checker. Scan the complete supplied excerpt from beginning to end. Return only one complete valid JSON array: no Markdown, no code fences, no commentary. Return up to 10 clear errors, prioritizing obvious misspellings when there are many. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must always be mechanic. original must be copied exactly from a continuous excerpt of the input, including capitalization. replacement must be the smallest correct replacement. alternatives must be a JSON array with zero to three short strings. Find clear spelling, apostrophe, capitalization, hyphenation, duplicate-space, and basic punctuation errors. Do not skip an obvious common typo because there are other errors. Do not rewrite a sentence, suggest style or fluency changes, alter the writer's voice, flag citations, or flag a proper name merely because it is unfamiliar. Keep original, replacement, and each alternative to one to three words or a short punctuation or space sequence. Keep reason to one short sentence. Return [] only when there are no clear errors."
     } else {
         "You are SoFlo's rigorous academic writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning. reason must say specifically why the replacement is more formal, precise, clear, or grammatically correct. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
@@ -585,7 +588,7 @@ fn review_grammar_text_blocking(
             {"role":"user","content":format!("Review this writing. Return JSON only.\n\n{}", source)}
         ],
         "chat_template_kwargs": { "enable_thinking": false },
-        "max_tokens": if quick { 1000 } else { 2200 },
+        "max_tokens": if quick { 1300 } else { 2200 },
         "temperature": 0.0
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not finish the grammar review: {}", error))?;
     let body: serde_json::Value = response

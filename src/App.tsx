@@ -314,7 +314,7 @@ function App() {
       await api.updateSettings(settings)
       setLibrary((current) => current ? { ...current, settings } : current)
       setWordAiModelReady(true)
-      showToast('Writing AI is ready for private spelling and grammar checks.')
+      showToast('Writing AI is ready for spelling and grammar checks.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The writing AI could not be downloaded.'
       setWritingModelDownloadError(message)

@@ -506,10 +506,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
   const grammarOpenedReviewRef = useRef('')
-  // Browser spellcheck cannot be styled. When AI spelling is on, use SoFlo's
-  // own straight, interactive marks instead of the platform squiggle.
-  const customAiSpellcheck = aiEnabled && aiGrammarEnabled
-  const nativeSpellcheck = spellcheck && !customAiSpellcheck
+  const grammarTextCursorRef = useRef(0)
+  // Keep the platform spellcheck on as a reliable baseline. AI adds SoFlo's
+  // straight, interactive marks when it has a more useful correction.
+  const nativeSpellcheck = spellcheck
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
@@ -628,6 +628,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     selectedWordReferenceRef.current = ''
     selectedWordRangeRef.current = null
     ignoredGrammarKeysRef.current.clear()
+    grammarTextCursorRef.current = 0
+    grammarLastAutomaticReviewAt.current = 0
     wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
@@ -719,7 +721,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return () => { window.removeEventListener('click', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('scroll', dismiss, true); window.removeEventListener('keydown', onKeyDown) }
   }, [contextMenu])
   useEffect(() => {
-    if (!editor || !aiEnabled || !aiGrammarEnabled) return
+    if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady) return
     const timer = window.setInterval(() => {
       const now = Date.now()
       const recentlyTyped = now - grammarLastInputAt.current < 8_000
@@ -729,7 +731,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       grammarReviewRef.current(true)
     }, 2_000)
     return () => window.clearInterval(timer)
-  }, [aiEnabled, aiGrammarEnabled, editor])
+  }, [aiEnabled, aiGrammarEnabled, aiModelReady, editor])
   useEffect(() => {
     if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarOpenedReviewRef.current === document.id) return
     grammarOpenedReviewRef.current = document.id
@@ -792,8 +794,25 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
   }
+  const nextPassiveGrammarExcerpt = () => {
+    const text = editor.getText()
+    const maximumLength = 5_200
+    if (text.length <= maximumLength) return text
+    let start = Math.min(grammarTextCursorRef.current, Math.max(0, text.length - 1))
+    if (start > 0) {
+      const nextBreak = text.slice(start).search(/[\s]/)
+      start = nextBreak >= 0 ? start + nextBreak + 1 : 0
+    }
+    let end = Math.min(text.length, start + maximumLength)
+    if (end < text.length) {
+      const previousBreak = text.lastIndexOf(' ', end)
+      if (previousBreak > start + Math.floor(maximumLength / 2)) end = previousBreak
+    }
+    grammarTextCursorRef.current = end >= text.length - 1 ? 0 : end
+    return text.slice(start, end)
+  }
   const reviewGrammar = async (quick = false) => {
-    if (!aiEnabled || !aiGrammarEnabled || grammarRequestRef.current) return
+    if (!aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarRequestRef.current) return
     grammarRequestRef.current = true
     if (quick) setPassiveGrammarReviewing(true)
     else {
@@ -802,7 +821,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       editor.view.dom.classList.add('ai-grammar-scanning')
     }
     try {
-      const issues = extractGrammarIssues(await onGrammarReview(editor.getText(), quick), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+      const source = quick ? nextPassiveGrammarExcerpt() : editor.getText()
+      const issues = extractGrammarIssues(await onGrammarReview(source, quick), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       if (quick) {
         const combined = [...issues, ...grammarIssues.filter((issue) => issue.kind !== 'mechanic' && !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))]
         setGrammarIssues(combined)
