@@ -42,6 +42,7 @@ interface DocumentEditorProps {
   onAiGrammarEnabledChange: (value: boolean) => void
   grammarProgress: { progress: number; message: string } | null
   onGrammarReview: (text: string, quick: boolean) => Promise<string>
+  onDefineWord: (word: string) => Promise<string>
   onReleaseAi: () => Promise<void>
   onBack: () => void
   onDelete: () => void
@@ -127,6 +128,8 @@ const usLetterHeightInches = 11
 
 type GrammarIssueKind = 'mechanic' | 'style' | 'structure'
 type GrammarIssue = { kind: GrammarIssueKind; original: string; replacement: string; alternatives: string[]; reason: string; category: string; partOfSpeech: string; definition: string; useCase: string; synonyms: string[]; from: number; to: number }
+type WordSense = { partOfSpeech: string; definition: string; example: string }
+type WordReference = { word: string; pronunciation: string; senses: WordSense[]; synonyms: string[] }
 const GrammarReview = Extension.create({
   name: 'grammarReview',
   addProseMirrorPlugins() {
@@ -171,6 +174,28 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
     }
   }
   return issues
+}
+
+function selectedSingleWord(editor: Editor) {
+  const { from, to } = editor.state.selection
+  if (from === to) return ''
+  const selected = editor.state.doc.textBetween(from, to, ' ').trim()
+  return /^\p{L}+(?:[-'’]\p{L}+)*$/u.test(selected) ? selected : ''
+}
+
+function parseWordReference(raw: string, word: string): WordReference | null {
+  try {
+    const candidate = JSON.parse(raw) as { word?: unknown; pronunciation?: unknown; senses?: unknown; synonyms?: unknown }
+    const senses = Array.isArray(candidate.senses) ? candidate.senses.flatMap((sense): WordSense[] => {
+      if (!sense || typeof sense !== 'object') return []
+      const value = sense as { partOfSpeech?: unknown; definition?: unknown; example?: unknown }
+      const definition = typeof value.definition === 'string' ? value.definition.trim() : ''
+      return definition ? [{ partOfSpeech: typeof value.partOfSpeech === 'string' ? value.partOfSpeech.trim() : '', definition, example: typeof value.example === 'string' ? value.example.trim() : '' }] : []
+    }).slice(0, 3) : []
+    if (!senses.length) return null
+    const synonyms = Array.isArray(candidate.synonyms) ? candidate.synonyms.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean).filter((value, index, values) => values.findIndex((other) => other.toLocaleLowerCase() === value.toLocaleLowerCase()) === index).slice(0, 10) : []
+    return { word: typeof candidate.word === 'string' && candidate.word.trim() ? candidate.word.trim() : word, pronunciation: typeof candidate.pronunciation === 'string' ? candidate.pronunciation.trim() : '', senses, synonyms }
+  } catch { return null }
 }
 
 function derivePaperTitle(editor: Editor) {
@@ -384,7 +409,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onDefineWord, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -411,11 +436,20 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [passiveGrammarReviewing, setPassiveGrammarReviewing] = useState(false)
   const [grammarMessage, setGrammarMessage] = useState('')
   const [selectedGrammarIssue, setSelectedGrammarIssue] = useState<GrammarIssue | null>(null)
+  const [wordReference, setWordReference] = useState<WordReference | null>(null)
+  const [wordReferenceLoading, setWordReferenceLoading] = useState(false)
+  const [wordReferenceError, setWordReferenceError] = useState('')
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
   const activeRunningElementRef = useRef<HTMLElement | null>(null)
   const grammarRequestRef = useRef(false)
+  const wordReferenceRequestRef = useRef(0)
+  const selectedWordReferenceRef = useRef('')
+  const aiEnabledRef = useRef(aiEnabled)
+  const defineWordRef = useRef(onDefineWord)
+  aiEnabledRef.current = aiEnabled
+  defineWordRef.current = onDefineWord
   const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
@@ -449,6 +483,36 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     }
     return handleLinkClick(view, position, event)
   }
+  const handleWordReferenceSelection = (nextEditor: Editor) => {
+    const word = selectedSingleWord(nextEditor)
+    if (!word || !aiEnabledRef.current) {
+      if (!word) {
+        selectedWordReferenceRef.current = ''
+        setWordReference(null)
+        setWordReferenceLoading(false)
+        setWordReferenceError('')
+      }
+      return
+    }
+    if (selectedWordReferenceRef.current.toLocaleLowerCase() === word.toLocaleLowerCase()) return
+    selectedWordReferenceRef.current = word
+    const request = ++wordReferenceRequestRef.current
+    setGrammarOpen(false)
+    setSelectedGrammarIssue(null)
+    setWordReference(null)
+    setWordReferenceError('')
+    setWordReferenceLoading(true)
+    void defineWordRef.current(word).then((raw) => {
+      if (request !== wordReferenceRequestRef.current) return
+      const reference = parseWordReference(raw, word)
+      if (reference) setWordReference(reference)
+      else setWordReferenceError('SoFlo could not prepare a reference for that word.')
+    }).catch((error: unknown) => {
+      if (request === wordReferenceRequestRef.current) setWordReferenceError(error instanceof Error ? error.message : 'SoFlo could not look up that word.')
+    }).finally(() => {
+      if (request === wordReferenceRequestRef.current) setWordReferenceLoading(false)
+    })
+  }
   const content = useMemo(() => safeContent(document.content), [document.content])
   const editor = useEditor({
     extensions: [
@@ -469,6 +533,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       grammarLastInputAt.current = now
       onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
     },
+    onSelectionUpdate: ({ editor: nextEditor }) => handleWordReferenceSelection(nextEditor),
   })
   const currentId = useRef(document.id)
   useEffect(() => {
@@ -479,6 +544,11 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setGrammarMessage('')
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
+    setWordReference(null)
+    setWordReferenceLoading(false)
+    setWordReferenceError('')
+    selectedWordReferenceRef.current = ''
+    wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
   useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(nativeSpellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleEditorClick } }) }, [editor, fontSize, grammarIssues, nativeSpellcheck])
@@ -772,7 +842,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   return <main className="editor-view">
     <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
-      <div className={`save-indicator ${saveState}`}>{passiveGrammarReviewing ? <><RefreshCw className="passive-grammar-refresh" size={13} /><span>Checking</span></> : <><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</>}</div>
+      <div className={`save-indicator ${saveState}`}>{passiveGrammarReviewing ? <><RefreshCw className="passive-grammar-refresh" size={13} /><em>Checking</em></> : <><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</>}</div>
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
@@ -780,7 +850,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     </div>
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
-    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar" aria-label="Writing suggestion"><header><div><p className="eyebrow">{selectedGrammarIssue.kind === 'style' ? 'FORMAL WRITING' : selectedGrammarIssue.kind === 'structure' ? 'FLOW & STRUCTURE' : 'SPELLING & WRITING'}</p><h2>{selectedGrammarIssue.kind === 'style' ? 'Formal rewrite' : selectedGrammarIssue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div><button className="icon-button tiny" onClick={() => { setGrammarOpen(false); setSelectedGrammarIssue(null) }} aria-label="Close writing suggestion"><X size={16} /></button></header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p>{selectedGrammarIssue.kind !== 'structure' && selectedGrammarIssue.alternatives.length > 0 && <section><h3>{selectedGrammarIssue.kind === 'style' ? 'Choose a rewrite' : 'Choose a correction'}</h3><div className="grammar-alternatives">{selectedGrammarIssue.alternatives.map((alternative) => <button key={alternative} onClick={() => applyGrammarIssue(selectedGrammarIssue, alternative)}>{alternative}</button>)}</div></section>}<section><h3>{selectedGrammarIssue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}{selectedGrammarIssue.kind === 'structure' ? <p className="grammar-structure-note">This is a flow recommendation; move the paragraph yourself if it fits your argument.</p> : <button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Use suggested correction</button>}</div></aside>}</section>
+    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar" aria-label="Writing suggestion"><header><div><p className="eyebrow">{selectedGrammarIssue.kind === 'style' ? 'FORMAL WRITING' : selectedGrammarIssue.kind === 'structure' ? 'FLOW & STRUCTURE' : 'SPELLING & WRITING'}</p><h2>{selectedGrammarIssue.kind === 'style' ? 'Formal rewrite' : selectedGrammarIssue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div><button className="icon-button tiny" onClick={() => { setGrammarOpen(false); setSelectedGrammarIssue(null) }} aria-label="Close writing suggestion"><X size={16} /></button></header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p>{selectedGrammarIssue.kind !== 'structure' && selectedGrammarIssue.alternatives.length > 0 && <section><h3>{selectedGrammarIssue.kind === 'style' ? 'Choose a rewrite' : 'Choose a correction'}</h3><div className="grammar-alternatives">{selectedGrammarIssue.alternatives.map((alternative) => <button key={alternative} onClick={() => applyGrammarIssue(selectedGrammarIssue, alternative)}>{alternative}</button>)}</div></section>}<section><h3>{selectedGrammarIssue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}{selectedGrammarIssue.kind === 'structure' ? <p className="grammar-structure-note">This is a flow recommendation; move the paragraph yourself if it fits your argument.</p> : <button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Use suggested correction</button>}</div></aside>}{(wordReferenceLoading || wordReference || wordReferenceError) && <aside className="word-reference-sidebar" aria-label="Word reference"><header><div><p className="eyebrow">WORD REFERENCE</p><h2>{wordReference?.word || selectedWordReferenceRef.current}</h2>{wordReference?.pronunciation && <span>{wordReference.pronunciation}</span>}</div><button className="icon-button tiny" onClick={() => { wordReferenceRequestRef.current += 1; selectedWordReferenceRef.current = ''; setWordReference(null); setWordReferenceLoading(false); setWordReferenceError('') }} aria-label="Close word reference"><X size={16} /></button></header><div className="word-reference-detail">{wordReferenceLoading && <div className="word-reference-loading"><i />Looking up this word locally…</div>}{wordReferenceError && <p className="word-reference-error">{wordReferenceError}</p>}{wordReference?.senses.map((sense, index) => <section key={`${sense.partOfSpeech}-${index}`}><h3>{sense.partOfSpeech || 'Definition'}</h3><p><b>{index + 1}.</b>{sense.definition}</p>{sense.example && <em>“{sense.example}”</em>}</section>)}{wordReference && <section><h3>Formal related words</h3><div className="grammar-synonyms word-reference-synonyms">{wordReference.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}</div></aside>}</section>
     {grammarReviewing && <div className="grammar-review-notice" role="status" aria-live="polite"><i /><div><strong>Checking your writing</strong><span>{grammarProgress?.message || 'Reviewing spelling and grammar locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
     {grammarMessage && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>Grammar review paused</strong><span>{grammarMessage}</span></div><button className="icon-button tiny" onClick={() => setGrammarMessage('')} aria-label="Dismiss grammar review message"><X size={15} /></button></div>}
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}

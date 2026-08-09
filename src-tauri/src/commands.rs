@@ -540,6 +540,57 @@ fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text:
     Ok(output)
 }
 
+#[tauri::command]
+pub async fn define_word(
+    app: tauri::AppHandle,
+    model_path: String,
+    word: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || define_word_blocking(app, model_path, word))
+        .await
+        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+fn define_word_blocking(app: tauri::AppHandle, model_path: String, word: String) -> CommandResult<String> {
+    let word = word.trim();
+    if word.is_empty() || word.chars().count() > 80 {
+        return Err("Select one ordinary word to look it up.".into());
+    }
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
+    ensure_ai_server(&model_path, &app)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT))
+        .json(&serde_json::json!({
+            "messages": [
+                {"role":"system","content":"You are a concise, reliable English dictionary for a college writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated formal, academic, or more precise related alternatives; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
+                {"role":"user","content":format!("Define this one word: {}", word)}
+            ],
+            "chat_template_kwargs": { "enable_thinking": false },
+            "max_tokens": 900,
+            "temperature": 0.1
+        }))
+        .send()
+        .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
+        .error_for_status()
+        .map_err(|error| format!("SoFlo's local AI model could not look up that word: {}", error))?;
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    let output = body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    touch_ai_server();
+    json_object_from_response(output).ok_or_else(|| "SoFlo could not prepare a word reference.".into())
+}
+
 fn generate_flashcards_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
@@ -633,6 +684,42 @@ fn json_array_from_response(output: &str) -> Option<String> {
                 if depth == 0 {
                     let candidate = &output[start?..=index];
                     if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_array()) {
+                        return Some(candidate.to_string());
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn json_object_from_response(output: &str) -> Option<String> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in output.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' if start.is_none() => { start = Some(index); depth = 1; }
+            '{' if start.is_some() => depth += 1,
+            '}' if start.is_some() => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate = &output[start?..=index];
+                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_object()) {
                         return Some(candidate.to_string());
                     }
                     start = None;
@@ -2353,7 +2440,7 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 
 #[cfg(test)]
 mod tests {
-    use super::{is_visual_line_echo, json_array_from_response};
+    use super::{is_visual_line_echo, json_array_from_response, json_object_from_response};
 
     #[test]
     fn detects_a_raw_visual_line_echo_without_rejecting_markdown_structure() {
@@ -2366,5 +2453,11 @@ mod tests {
     fn extracts_only_the_valid_flashcard_json_array_from_a_model_response() {
         let response = "Here are the cards:\n```json\n[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]\n```";
         assert_eq!(json_array_from_response(response).as_deref(), Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]"));
+    }
+
+    #[test]
+    fn extracts_a_complete_word_reference_object_from_a_model_response() {
+        let response = "```json\n{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}\n```";
+        assert_eq!(json_object_from_response(response).as_deref(), Some("{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}"));
     }
 }

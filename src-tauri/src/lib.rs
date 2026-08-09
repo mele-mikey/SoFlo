@@ -49,6 +49,7 @@ pub fn run() {
             commands::refine_document_text,
             commands::generate_flashcards_text,
             commands::review_grammar_text,
+            commands::define_word,
             commands::stop_ai_server,
             commands::download_default_ai_model,
             commands::bootstrap,
