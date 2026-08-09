@@ -113,7 +113,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
 
     <section className="settings-section">
       <SectionHeading icon={<SpellCheck2 size={18} />} title="Editor" detail="Google Docs-style paper defaults, with room to customize." />
-      <SettingRow title="Spellcheck" detail="Use the browser's simple spelling checks as you write. AI spellcheck adds an extra review when enabled."><Toggle checked={settings.spellcheck} onChange={(spellcheck) => void update({ spellcheck })} /></SettingRow>
+      <SettingRow title="Spellcheck" detail="Use browser spelling checks as you write. With AI spellcheck on, SoFlo replaces the platform squiggle with its own interactive straight marks."><Toggle checked={settings.spellcheck} onChange={(spellcheck) => void update({ spellcheck })} /></SettingRow>
       <SettingRow title="Default text size" detail="Arial, black text, and 11 pt are the Google Docs-style defaults."><select value={settings.editorFontSize} onChange={(event) => void update({ editorFontSize: Number(event.target.value) })} aria-label="Default text size">{[9, 10, 11, 12, 14, 16, 18].map((size) => <option key={size} value={size}>{size} pt</option>)}</select></SettingRow>
       <div className="reading-surface-setting"><div><h3>Reading surface</h3><p>Choose a page treatment that feels best for long study sessions.</p></div><ReadingSurfacePicker value={settings.editorCanvas} onChange={(editorCanvas) => void update({ editorCanvas })} /></div>
     </section>
@@ -143,7 +143,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.70" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.71" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>

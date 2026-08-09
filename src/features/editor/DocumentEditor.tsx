@@ -20,7 +20,7 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
-import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DocumentDetail } from '../../lib/types'
@@ -408,6 +408,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [grammarIssues, setGrammarIssues] = useState<GrammarIssue[]>([])
   const [grammarOpen, setGrammarOpen] = useState(false)
   const [grammarReviewing, setGrammarReviewing] = useState(false)
+  const [passiveGrammarReviewing, setPassiveGrammarReviewing] = useState(false)
   const [grammarMessage, setGrammarMessage] = useState('')
   const [selectedGrammarIssue, setSelectedGrammarIssue] = useState<GrammarIssue | null>(null)
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
@@ -418,9 +419,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
-  // Keep the immediate browser spellcheck available at all times. AI review is
-  // additive and can take a moment, so it must never remove basic feedback.
-  const nativeSpellcheck = spellcheck
+  // Browser spellcheck cannot be styled. When AI spelling is on, use SoFlo's
+  // own straight, interactive marks instead of the platform squiggle.
+  const customAiSpellcheck = aiEnabled && aiGrammarEnabled
+  const nativeSpellcheck = spellcheck && !customAiSpellcheck
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
@@ -569,12 +571,12 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     if (!editor || !aiEnabled || !aiGrammarEnabled) return
     const timer = window.setInterval(() => {
       const now = Date.now()
-      const recentlyTyped = now - grammarLastInputAt.current < 6_000
+      const recentlyTyped = now - grammarLastInputAt.current < 8_000
       if (!globalThis.document.hasFocus() || !editor.isFocused || grammarRequestRef.current || !recentlyTyped) return
-      if (grammarLastAutomaticReviewAt.current && now - grammarLastAutomaticReviewAt.current < 25_000) return
+      if (grammarLastAutomaticReviewAt.current && now - grammarLastAutomaticReviewAt.current < 30_000) return
       grammarLastAutomaticReviewAt.current = now
       grammarReviewRef.current(true)
-    }, 1_500)
+    }, 2_000)
     return () => window.clearInterval(timer)
   }, [aiEnabled, aiGrammarEnabled, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
@@ -623,21 +625,35 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const reviewGrammar = async (quick = false) => {
     if (!aiEnabled || !aiGrammarEnabled || grammarRequestRef.current) return
     grammarRequestRef.current = true
-    setGrammarReviewing(true)
-    setGrammarMessage('')
-    setGrammarDecorations([])
-    editor.view.dom.classList.add('ai-grammar-scanning')
+    if (quick) setPassiveGrammarReviewing(true)
+    else {
+      setGrammarReviewing(true)
+      setGrammarMessage('')
+      setGrammarDecorations([])
+      editor.view.dom.classList.add('ai-grammar-scanning')
+    }
     try {
       const issues = extractGrammarIssues(await onGrammarReview(editor.getText(), quick), editor, !quick)
       setGrammarIssues(issues)
       setGrammarDecorations(issues)
-      setGrammarOpen(false)
-      setSelectedGrammarIssue(null)
+      if (!quick) {
+        setGrammarOpen(false)
+        setSelectedGrammarIssue(null)
+      }
     } catch (error) {
-      setGrammarIssues([])
-      setGrammarDecorations([])
-      setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review.')
-    } finally { editor.view.dom.classList.remove('ai-grammar-scanning'); grammarRequestRef.current = false; setGrammarReviewing(false) }
+      if (!quick) {
+        setGrammarIssues([])
+        setGrammarDecorations([])
+        setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review.')
+      }
+    } finally {
+      if (quick) setPassiveGrammarReviewing(false)
+      else {
+        editor.view.dom.classList.remove('ai-grammar-scanning')
+        setGrammarReviewing(false)
+      }
+      grammarRequestRef.current = false
+    }
   }
   grammarReviewRef.current = (quick) => { void reviewGrammar(quick) }
   const applyGrammarIssue = (issue: GrammarIssue, replacement = issue.replacement) => {
@@ -756,11 +772,11 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   return <main className="editor-view">
     <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
-      <div className={`save-indicator ${saveState}`}><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</div>
+      <div className={`save-indicator ${saveState}`}>{passiveGrammarReviewing ? <><RefreshCw className="passive-grammar-refresh" size={13} /><span>Checking</span></> : <><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</>}</div>
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
-      <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+      <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
