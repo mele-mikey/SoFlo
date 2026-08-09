@@ -10,7 +10,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { api } from './lib/api'
-import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, SecurityStatus, Semester } from './lib/types'
+import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureSummary, SecurityStatus, Semester } from './lib/types'
 import { ClassView } from './features/classes/ClassView'
 import { DocumentEditor } from './features/editor/DocumentEditor'
 import { importAiFormattedNote, importPdfAsEditableNote } from './features/editor/pdfImport'
@@ -30,6 +30,27 @@ type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
 type AiProgress = { progress: number; message: string }
 
+function localDateKey(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60_000
+  return new Date(date.valueOf() - offset).toISOString().slice(0, 10)
+}
+
+function toTwentyFourHour(value: string) {
+  const match = value.trim().match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i)
+  if (!match) return value.trim() || null
+  let hour = Number(match[1]) % 12
+  if (match[3].toUpperCase() === 'PM') hour += 12
+  return `${String(hour).padStart(2, '0')}:${match[2] ?? '00'}`
+}
+
+function todayMeeting(schedule: string | null) {
+  if (!schedule) return { start: null, end: null }
+  const today = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date().getDay()]
+  const escapedDay = today.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = schedule.match(new RegExp(`\\b${escapedDay}\\s+(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))\\s*-\\s*(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))`, 'i'))
+  return match ? { start: toTwentyFourHour(match[1]), end: toTwentyFourHour(match[2]) } : { start: null, end: null }
+}
+
 function App() {
   const [library, setLibrary] = useState<BootstrapData | null>(null)
   const [security, setSecurity] = useState<SecurityStatus | null>(null)
@@ -37,6 +58,7 @@ function App() {
   const [view, setView] = useState<AppView>({ kind: 'home' })
   const [documents, setDocuments] = useState<DocumentSummary[]>([])
   const [documentFolders, setDocumentFolders] = useState<DocumentFolder[]>([])
+  const [lectures, setLectures] = useState<LectureSummary[]>([])
   const [syllabus, setSyllabus] = useState<DocumentDetail | null>(null)
   const [aiWorking, setAiWorking] = useState(false)
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null)
@@ -50,6 +72,7 @@ function App() {
   const [archivedClasses, setArchivedClasses] = useState<CourseClass[]>([])
   const [recentDocuments, setRecentDocuments] = useState<DocumentSummary[]>([])
   const [activeDocument, setActiveDocument] = useState<DocumentDetail | null>(null)
+  const [activeLecture, setActiveLecture] = useState<LectureDetail | null>(null)
   const [activeSet, setActiveSet] = useState<FlashcardSetDetail | null>(null)
   const [modal, setModal] = useState<ModalState>(null)
   const [commandOpen, setCommandOpen] = useState(false)
@@ -59,6 +82,9 @@ function App() {
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved')
   const pendingDocument = useRef<DocumentDetail | null>(null)
   const saveTimer = useRef<number | null>(null)
+  const pendingLecture = useRef<LectureDetail | null>(null)
+  const lectureSaveTimer = useRef<number | null>(null)
+  const [lectureToDelete, setLectureToDelete] = useState<LectureDetail | null>(null)
   const closing = useRef(false)
   const aiConsentResolver = useRef<((proceed: boolean) => void) | null>(null)
 
@@ -80,9 +106,10 @@ function App() {
   }, [showToast])
   const loadClassContent = useCallback(async (classId: string) => {
     try {
-      const [nextDocuments, nextFolders, nextSets, nextCards] = await Promise.all([api.listDocuments(classId), api.listDocumentFolders(classId), api.listSets(classId), api.listAllCards(classId)])
+      const [nextDocuments, nextFolders, nextLectures, nextSets, nextCards] = await Promise.all([api.listDocuments(classId), api.listDocumentFolders(classId), api.listLectures(classId), api.listSets(classId), api.listAllCards(classId)])
       setDocuments(nextDocuments)
       setDocumentFolders(nextFolders)
+      setLectures(nextLectures)
       setSets(nextSets)
       setAllCards(nextCards)
     } catch (error) { showToast(error instanceof Error ? error.message : 'Class materials could not be loaded.', 'error') }
@@ -91,7 +118,7 @@ function App() {
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<number>('ai-download-progress', (event) => setAiDownloadProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen('ai-download-finished', () => setAiDownloadProgress(null)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<AiProgress>('ai-generation-progress', (event) => setAiProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
-  const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'flashcardSet' || view.kind === 'study' ? view.classId : null
+  const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])
   useEffect(() => {
     if (view.kind !== 'class' || view.tab !== 'syllabus') return
@@ -108,6 +135,7 @@ function App() {
   useEffect(() => { if (view.kind === 'archive') void Promise.all([api.listSemesters(true), api.listClasses(true)]).then(([semesters, classes]) => { setArchivedSemesters(semesters); setArchivedClasses(classes) }).catch(() => showToast('Archive could not be loaded.', 'error')) }, [showToast, view.kind])
   useEffect(() => {
     if (view.kind === 'document') { setActiveDocument(null); void api.getDocument(view.documentId).then(setActiveDocument).catch(() => showToast('That paper could not be opened.', 'error')) }
+    if (view.kind === 'lecture') { setActiveLecture(null); void api.getLecture(view.lectureId).then(setActiveLecture).catch(() => showToast('That lecture could not be opened.', 'error')) }
     if (view.kind === 'flashcardSet' || view.kind === 'study') { setActiveSet(null); void api.getSet(view.setId).then(setActiveSet).catch(() => showToast('That flashcard set could not be opened.', 'error')) }
   }, [showToast, view])
 
@@ -131,18 +159,38 @@ function App() {
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current)
     saveTimer.current = window.setTimeout(() => { void flushDocument() }, 550)
   }, [flushDocument])
-  useEffect(() => () => { void flushDocument() }, [flushDocument])
+  const flushLecture = useCallback(async () => {
+    if (lectureSaveTimer.current !== null) { window.clearTimeout(lectureSaveTimer.current); lectureSaveTimer.current = null }
+    const lectureToSave = pendingLecture.current
+    if (!lectureToSave) return
+    pendingLecture.current = null
+    setSaveState('saving')
+    try {
+      const saved = await api.saveLecture(lectureToSave)
+      setActiveLecture((current) => current?.id === saved.id ? { ...current, updatedAt: saved.updatedAt, revision: saved.revision } : current)
+      setSaveState('saved')
+      void loadClassContent(lectureToSave.classId)
+    } catch { setSaveState('error'); pendingLecture.current = lectureToSave }
+  }, [loadClassContent])
+  const scheduleLectureSave = useCallback((next: LectureDetail) => {
+    pendingLecture.current = next
+    setSaveState('saving')
+    if (lectureSaveTimer.current !== null) window.clearTimeout(lectureSaveTimer.current)
+    lectureSaveTimer.current = window.setTimeout(() => { void flushLecture() }, 550)
+  }, [flushLecture])
+  useEffect(() => () => { void flushDocument(); void flushLecture() }, [flushDocument, flushLecture])
   const closeSafely = useCallback(async () => {
     if (closing.current) return
     closing.current = true
     try {
       await flushDocument()
+      await flushLecture()
       await api.syncEncryptedLibrary()
     } catch {
       // A locked library has no in-memory work to flush; the window may still close.
     }
     await invoke('force_close_window')
-  }, [flushDocument])
+  }, [flushDocument, flushLecture])
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void getCurrentWindow().onCloseRequested(async (event) => {
@@ -168,7 +216,7 @@ function App() {
   }, [])
   useEffect(() => { const openFind = () => setGlobalFindOpen(true); window.addEventListener('soflo:open-find', openFind); return () => window.removeEventListener('soflo:open-find', openFind) }, [])
 
-  const navigate = (next: AppView) => { void flushDocument(); setView(next) }
+  const navigate = (next: AppView) => { void flushDocument(); void flushLecture(); setView(next) }
   const getCourse = (id: string) => library?.classes.find((course) => course.id === id)
   const activeCourse = classId ? getCourse(classId) : undefined
   const createSemester = async (input: { name: string; term: string; year: number }) => {
@@ -181,6 +229,27 @@ function App() {
   const createDocument = async () => {
     if (!classId) { showToast('Open a class before creating a paper.', 'error'); return }
     try { const document = await api.createDocument({ classId, title: 'Untitled paper' }); await loadClassContent(classId); navigate({ kind: 'document', classId, documentId: document.id }) } catch { showToast('A new paper could not be created.', 'error') }
+  }
+  const createLecture = async () => {
+    if (!activeCourse) { showToast('Open a class before creating a lecture.', 'error'); return }
+    const now = new Date()
+    const date = localDateKey(now)
+    const meeting = todayMeeting(activeCourse.schedule)
+    const label = new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric' }).format(now)
+    try {
+      const lecture = await api.createLecture({
+        classId: activeCourse.id,
+        courseCode: activeCourse.courseCode,
+        courseName: activeCourse.name,
+        lectureDate: date,
+        scheduledStart: meeting.start,
+        scheduledEnd: meeting.end,
+        professorSnapshot: activeCourse.professor,
+        title: `Lecture — ${label}`,
+      })
+      await loadClassContent(activeCourse.id)
+      navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })
+    } catch (error) { showToast(error instanceof Error ? error.message : 'A new lecture could not be created.', 'error') }
   }
   const requestAiConsent = () => new Promise<boolean>((resolve) => { aiConsentResolver.current = resolve; setAiConsentOpen(true) })
   const closeAiConsent = (proceed: boolean) => { setAiConsentOpen(false); aiConsentResolver.current?.(proceed); aiConsentResolver.current = null }
@@ -257,6 +326,9 @@ function App() {
   const updateDocument = (partial: Partial<Pick<DocumentDetail, 'content' | 'contentPlain' | 'title'>>) => {
     setActiveDocument((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleDocumentSave(next); return next })
   }
+  const updateLecture = (partial: Partial<Pick<LectureDetail, 'content' | 'contentPlain' | 'title'>>) => {
+    setActiveLecture((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleLectureSave(next); return next })
+  }
   const archiveActiveClass = async () => {
     if (!activeCourse) return
     await api.updateClass({ ...activeCourse, archived: true })
@@ -264,6 +336,16 @@ function App() {
   }
   const restoreClass = async (course: CourseClass) => { await api.updateClass({ ...course, archived: false }); await loadLibrary(); setArchivedClasses((current) => current.filter((item) => item.id !== course.id)); showToast(`${course.name} has been restored.`) }
   const deleteDocument = async () => { if (!activeDocument) return; await flushDocument(); await api.setDocumentDeleted(activeDocument.id, true); await loadClassContent(activeDocument.classId); navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' }); showToast('Paper moved to trash.') }
+  const deleteLecture = async (lecture: Pick<LectureDetail, 'id' | 'classId' | 'title'>) => {
+    if (activeLecture?.id === lecture.id) await flushLecture()
+    try {
+      await api.deleteLecture(lecture.id)
+      await loadClassContent(lecture.classId)
+      setLectureToDelete(null)
+      if (view.kind === 'lecture' && view.lectureId === lecture.id) navigate({ kind: 'class', classId: lecture.classId, tab: 'lectures' })
+      showToast('Lecture permanently deleted.')
+    } catch (error) { showToast(error instanceof Error ? error.message : 'That lecture could not be deleted.', 'error') }
+  }
   const duplicateDocument = async () => { if (!activeDocument) return; await flushDocument(); const duplicate = await api.duplicateDocument(activeDocument.id); navigate({ kind: 'document', classId: duplicate.classId, documentId: duplicate.id }); showToast('Paper duplicated.') }
   const trashPaper = async (paper: DocumentSummary) => { await api.setDocumentDeleted(paper.id, true); await loadClassContent(paper.classId); showToast('Paper moved to trash.') }
   const duplicatePaper = async (paper: DocumentSummary, title: string) => { const duplicate = await api.duplicateDocument(paper.id, title); await loadClassContent(paper.classId); navigate({ kind: 'document', classId: duplicate.classId, documentId: duplicate.id }); showToast('Paper duplicated.') }
@@ -292,6 +374,15 @@ function App() {
     setBooting(true)
     await loadLibrary()
   }
+  const activeLectureAsDocument: DocumentDetail | null = activeLecture ? {
+    ...activeLecture,
+    excerpt: activeLecture.contentPlain,
+    isFavorite: false,
+    deletedAt: null,
+    isSyllabus: false,
+    folderId: null,
+    linkedPdfPath: null,
+  } : null
 
   if (booting) return <div className="boot-screen"><img className="brand-mark" src={sofloMark} alt="" /><strong>SoFlo</strong><i /></div>
   if (security?.locked) return <LockView security={security} onUnlock={unlockLibrary} />
@@ -305,8 +396,9 @@ function App() {
         {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} />}
         {view.kind === 'help' && <HelpView />}
         {view.kind === 'archive' && <ArchiveView semesters={archivedSemesters} classes={archivedClasses} onRestore={(course) => void restoreClass(course)} />}
-        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => void archiveActiveClass()} />}
+        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => void archiveActiveClass()} />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
+        {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} /> : <LoadingView />)}
         {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} onBack={() => navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id })} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} /> : <LoadingView />)}
       </section>
@@ -316,6 +408,7 @@ function App() {
     {modal?.type === 'semester' && <CreateSemesterDialog onClose={() => setModal(null)} onCreate={createSemester} />}
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
     {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(sources, guidance, title) => void generateAiSet(modal.classId, sources, guidance, title)} />}
+    {lectureToDelete && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Delete lecture"><header><div><p className="eyebrow">PERMANENT ACTION</p><h2>Delete this lecture?</h2></div><button className="icon-button" onClick={() => setLectureToDelete(null)} aria-label="Cancel deletion"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{lectureToDelete.title}</strong> and its notes will be permanently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setLectureToDelete(null)}>Cancel</button><button className="button button-danger" onClick={() => void deleteLecture(lectureToDelete)}>Delete lecture</button></footer></section></div>}
     {toast && <div className={`toast ${toast.type}`} role="status">{toast.type === 'success' ? <Plus size={15} /> : <X size={15} />}{toast.message}</div>}
     {aiConsentOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Use local AI?"><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>This action will use AI.</h2><p>SoFlo will download its compact local model once, then process this document only on your PC. This is your reminder—turn AI off any time in Settings.</p><div><button className="button button-quiet" onClick={() => closeAiConsent(false)}>Return</button><button className="button button-primary" onClick={() => closeAiConsent(true)}>Proceed</button></div></section></div>}
     {aiDownloadProgress !== null && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card ai-download-card" role="dialog" aria-modal="true" aria-label="Downloading local AI model"><p className="eyebrow">PREPARING LOCAL AI</p><h2>Downloading your private model</h2><p>This happens once. Keep SoFlo open while the model is saved on this PC.</p><div className="ai-download-track"><i style={{ width: `${aiDownloadProgress}%` }} /></div><strong>{aiDownloadProgress}%</strong></section></div>}

@@ -37,7 +37,11 @@ interface DocumentEditorProps {
   onChange: (content: string, contentPlain: string, title: string) => void
   onBack: () => void
   onDelete: () => void
-  onDuplicate: () => void
+  onDuplicate?: () => void
+  collectionLabel?: string
+  deleteLabel?: string
+  deriveTitle?: boolean
+  context?: string
 }
 
 const accentColors = ['#E7E9F0', '#F08B8B', '#F1BD6A', '#86C59A', '#7EB7ED', '#B79CF4']
@@ -183,7 +187,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, fontSize, readingSurface, saveState, onChange, onBack, onDelete, onDuplicate }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, fontSize, readingSurface, saveState, onChange, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -203,7 +207,7 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     ],
     content,
     editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` } },
-    onUpdate: ({ editor: nextEditor }) => onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), derivePaperTitle(nextEditor)),
+    onUpdate: ({ editor: nextEditor }) => onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title),
   })
   const currentId = useRef(document.id)
   useEffect(() => {
@@ -277,9 +281,9 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   }
   return <main className="editor-view">
     <header className="editor-topbar">
-      <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />Papers</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span></div>
+      <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
       <div className={`save-indicator ${saveState}`}><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</div>
-      <div className="editor-actions"><button className="editor-action" onClick={onDuplicate}>Duplicate</button><button className="editor-action danger" onClick={onDelete}>Move to trash</button></div>
+      <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
       <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} />

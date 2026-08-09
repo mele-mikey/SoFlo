@@ -2,7 +2,7 @@ use std::{
     fs,
     io::Read,
     net::{SocketAddr, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command},
     sync::{Mutex, OnceLock},
     thread,
@@ -59,6 +59,51 @@ pub fn close_window(window: tauri::Window) -> CommandResult<()> {
 #[tauri::command]
 pub fn force_close_window(window: tauri::Window) -> CommandResult<()> {
     window.destroy().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn is_installer_launch() -> bool {
+    std::env::args().any(|argument| argument == "--installer")
+}
+
+fn setup_executable_argument() -> CommandResult<PathBuf> {
+    let path = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--setup-exe=").map(PathBuf::from))
+        .ok_or_else(|| "SoFlo setup could not find its installation worker.".to_string())?;
+    if !path.is_file() {
+        return Err("SoFlo setup could not find its installation worker.".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn run_installer_worker() -> CommandResult<()> {
+    let setup = setup_executable_argument()?;
+    let status = Command::new(setup)
+        .arg("--perform-silent-install=1")
+        .status()
+        .map_err(|_| "SoFlo setup could not begin the installation.".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("SoFlo could not finish installing. Please try again.".into())
+    }
+}
+
+#[tauri::command]
+pub fn launch_installed_soflo_and_close(app: tauri::AppHandle) -> CommandResult<()> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "Windows could not find the local application folder.".to_string())?;
+    let installed_app = local_app_data.join("Programs").join("SoFlo").join("SoFlo.exe");
+    if !installed_app.is_file() {
+        return Err("SoFlo was installed, but its app file could not be found.".into());
+    }
+    Command::new(installed_app)
+        .spawn()
+        .map_err(|_| "SoFlo could not open after installation.".to_string())?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -331,13 +376,23 @@ fn touch_ai_server() {
 }
 
 #[tauri::command]
-pub async fn download_default_ai_model(app: tauri::AppHandle) -> CommandResult<String> {
+pub async fn download_default_ai_model(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<String> {
+    let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
     tauri::async_runtime::spawn_blocking(move || {
         const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf?download=true";
         const MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
-        let directory = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");
+        let destination = if configured_model_path.trim().is_empty() {
+            app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(MODEL_NAME)
+        } else {
+            let configured = Path::new(configured_model_path.trim());
+            if configured.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
+                configured.to_path_buf()
+            } else {
+                configured.join(MODEL_NAME)
+            }
+        };
+        let directory = destination.parent().ok_or_else(|| "SoFlo could not determine the local AI model folder.".to_string())?;
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        let destination = directory.join(MODEL_NAME);
         if destination.exists() { return Ok(destination.to_string_lossy().to_string()); }
         let temporary = directory.join(format!("{}.download", MODEL_NAME));
         let mut response = reqwest::blocking::get(MODEL_URL).map_err(|_| "SoFlo could not start the local AI model download.".to_string())?.error_for_status().map_err(|_| "SoFlo could not download the local AI model.".to_string())?;
@@ -452,6 +507,42 @@ fn read_document(row: &Row<'_>) -> rusqlite::Result<DocumentDetail> {
     })
 }
 
+fn read_lecture_summary(row: &Row<'_>) -> rusqlite::Result<LectureSummary> {
+    Ok(LectureSummary {
+        id: row.get(0)?,
+        class_id: row.get(1)?,
+        course_code: row.get(2)?,
+        course_name: row.get(3)?,
+        lecture_date: row.get(4)?,
+        scheduled_start: row.get(5)?,
+        scheduled_end: row.get(6)?,
+        professor_snapshot: row.get(7)?,
+        title: row.get(8)?,
+        excerpt: row.get(9)?,
+        updated_at: row.get(10)?,
+        created_at: row.get(11)?,
+    })
+}
+
+fn read_lecture(row: &Row<'_>) -> rusqlite::Result<LectureDetail> {
+    Ok(LectureDetail {
+        id: row.get(0)?,
+        class_id: row.get(1)?,
+        course_code: row.get(2)?,
+        course_name: row.get(3)?,
+        lecture_date: row.get(4)?,
+        scheduled_start: row.get(5)?,
+        scheduled_end: row.get(6)?,
+        professor_snapshot: row.get(7)?,
+        title: row.get(8)?,
+        content: row.get(9)?,
+        content_plain: row.get(10)?,
+        revision: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
 fn read_set_summary(row: &Row<'_>) -> rusqlite::Result<FlashcardSetSummary> {
     Ok(FlashcardSetSummary {
         id: row.get(0)?,
@@ -480,7 +571,7 @@ fn read_card(row: &Row<'_>) -> rusqlite::Result<Flashcard> {
     })
 }
 
-fn get_settings(connection: &Connection) -> CommandResult<AppSettings> {
+fn get_settings(connection: &Connection, installer_model_path: Option<&str>) -> CommandResult<AppSettings> {
     let raw: Option<String> = connection
         .query_row(
             "SELECT value FROM app_settings WHERE key = 'settings'",
@@ -506,6 +597,12 @@ fn get_settings(connection: &Connection) -> CommandResult<AppSettings> {
         settings.onboarding_completed = true;
         needs_save = true;
     }
+    if settings.ai_model_path.trim().is_empty() {
+        if let Some(path) = installer_model_path.filter(|path| !path.trim().is_empty()) {
+            settings.ai_model_path = path.trim().to_string();
+            needs_save = true;
+        }
+    }
     if needs_save {
         let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
         connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", [&serialized]).map_err(|error| error.to_string())?;
@@ -519,10 +616,15 @@ pub fn bootstrap(database: State<'_, Database>) -> CommandResult<BootstrapData> 
     purge_expired_trash(&connection)?;
     let semesters = list_semesters_from(&connection, false)?;
     let classes = list_classes_from(&connection, false)?;
+    let installer_model_path = database.installer_model_path();
+    let settings = get_settings(&connection, installer_model_path.as_deref())?;
+    if installer_model_path.is_some() {
+        database.clear_installer_model_path()?;
+    }
     Ok(BootstrapData {
         semesters,
         classes,
-        settings: get_settings(&connection)?,
+        settings,
         data_location: database.data_path().display().to_string(),
     })
 }
@@ -743,6 +845,66 @@ pub fn create_document(
     let content = r#"{"type":"doc","content":[{"type":"paragraph"}]}"#;
     connection.execute("INSERT INTO documents (id, class_id, title, content, content_plain) VALUES (?1, ?2, ?3, ?4, '')", params![id, input.class_id, input.title.trim(), content]).map_err(|error| error.to_string())?;
     connection.query_row("SELECT id, class_id, title, content, content_plain, is_favorite, revision, created_at, updated_at, deleted_at, is_syllabus, folder_id, linked_pdf_path FROM documents WHERE id=?1", [&id], read_document).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_lectures(
+    database: State<'_, Database>,
+    class_id: String,
+) -> CommandResult<Vec<LectureSummary>> {
+    let connection = database.open()?;
+    let mut statement = connection.prepare("SELECT id, class_id, course_code, course_name, lecture_date, scheduled_start, scheduled_end, professor_snapshot, title, substr(content_plain, 1, 180), updated_at, created_at FROM lectures WHERE class_id=?1 ORDER BY lecture_date DESC, created_at DESC").map_err(|error| error.to_string())?;
+    let rows = statement.query_map([class_id], read_lecture_summary).map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_lecture(database: State<'_, Database>, id: String) -> CommandResult<LectureDetail> {
+    database.open()?.query_row("SELECT id, class_id, course_code, course_name, lecture_date, scheduled_start, scheduled_end, professor_snapshot, title, content, content_plain, revision, created_at, updated_at FROM lectures WHERE id=?1", [&id], read_lecture).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn create_lecture(
+    database: State<'_, Database>,
+    input: CreateLectureInput,
+) -> CommandResult<LectureDetail> {
+    if input.title.trim().is_empty() {
+        return Err("Give this lecture a title.".into());
+    }
+    let connection = database.open()?;
+    let id = Uuid::new_v4().to_string();
+    let content = r#"{"type":"doc","content":[{"type":"paragraph"}]}"#;
+    connection.execute(
+        "INSERT INTO lectures (id, class_id, course_code, course_name, lecture_date, scheduled_start, scheduled_end, professor_snapshot, title, content, content_plain) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '')",
+        params![id, input.class_id, input.course_code.trim(), input.course_name.trim(), input.lecture_date.trim(), input.scheduled_start, input.scheduled_end, input.professor_snapshot.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()), input.title.trim(), content],
+    ).map_err(|error| error.to_string())?;
+    get_lecture(database, id)
+}
+
+#[tauri::command]
+pub fn save_lecture(
+    database: State<'_, Database>,
+    input: SaveLectureInput,
+) -> CommandResult<LectureDetail> {
+    if input.title.trim().is_empty() {
+        return Err("Lecture titles cannot be empty.".into());
+    }
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let (existing, revision): (String, i32) = transaction.query_row("SELECT content, revision FROM lectures WHERE id=?1", [&input.id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| error.to_string())?;
+    let next_revision = if existing != input.content { revision + 1 } else { revision };
+    transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    get_lecture(database, input.id)
+}
+
+#[tauri::command]
+pub fn delete_lecture(database: State<'_, Database>, id: String) -> CommandResult<()> {
+    let changed = database.open()?.execute("DELETE FROM lectures WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("That lecture could not be found.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1230,7 +1392,13 @@ pub fn save_test_attempt(
 
 #[tauri::command]
 pub fn get_settings_command(database: State<'_, Database>) -> CommandResult<AppSettings> {
-    get_settings(&database.open()?)
+    let connection = database.open()?;
+    let installer_model_path = database.installer_model_path();
+    let settings = get_settings(&connection, installer_model_path.as_deref())?;
+    if installer_model_path.is_some() {
+        database.clear_installer_model_path()?;
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -1274,6 +1442,7 @@ pub fn search_library(
     let mut statements = vec![
         ("SELECT id, NULL, name, COALESCE(course_code, '') FROM classes WHERE archived_at IS NULL AND (name LIKE ?1 OR course_code LIKE ?1) LIMIT 8", "class"),
         ("SELECT id, class_id, title, substr(content_plain, 1, 100) FROM documents WHERE deleted_at IS NULL AND (title LIKE ?1 OR content_plain LIKE ?1) LIMIT 12", "document"),
+        ("SELECT id, class_id, title, substr(content_plain, 1, 100) FROM lectures WHERE title LIKE ?1 OR content_plain LIKE ?1 LIMIT 12", "lecture"),
         ("SELECT id, class_id, title, COALESCE(description, '') FROM flashcard_sets WHERE deleted_at IS NULL AND (title LIKE ?1 OR description LIKE ?1) LIMIT 8", "set"),
         ("SELECT f.id, s.class_id, f.front, f.back FROM flashcards f INNER JOIN flashcard_sets s ON s.id=f.set_id WHERE s.deleted_at IS NULL AND (f.front LIKE ?1 OR f.back LIKE ?1) LIMIT 12", "card"),
     ];
@@ -1310,6 +1479,39 @@ pub fn restore_library(database: State<'_, Database>, source: String) -> Command
         return Err("The selected backup file could not be found.".into());
     }
     database.restore_from(source)
+}
+
+#[tauri::command]
+pub fn default_soflo_export_path() -> CommandResult<String> {
+    let base = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?);
+    let downloads = base.join("Downloads");
+    Ok(downloads.join(format!("SoFlo Library {}.soflo", chrono::Local::now().format("%Y-%m-%d"))).display().to_string())
+}
+
+#[tauri::command]
+pub fn export_soflo_data(database: State<'_, Database>, destination: String) -> CommandResult<()> {
+    database.export_archive(Path::new(&destination))
+}
+
+#[tauri::command]
+pub fn import_soflo_data_and_restart(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    source: String,
+) -> CommandResult<()> {
+    database.import_archive(Path::new(&source))?;
+    app.restart()
+}
+
+#[tauri::command]
+pub fn wipe_soflo_data_and_restart(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<()> {
+    database.wipe_library()?;
+    app.restart()
 }
 
 #[tauri::command]

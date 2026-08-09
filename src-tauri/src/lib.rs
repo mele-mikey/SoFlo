@@ -19,6 +19,11 @@ pub fn run() {
             let database = Database::new(data_directory.join("soflo.sqlite3"))
                 .expect("could not initialize SoFlo database");
             app.manage(database);
+            if std::env::args().any(|argument| argument == "--minimized") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.minimize()?;
+                }
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -34,6 +39,9 @@ pub fn run() {
             commands::toggle_maximize_window,
             commands::close_window,
             commands::force_close_window,
+            commands::is_installer_launch,
+            commands::run_installer_worker,
+            commands::launch_installed_soflo_and_close,
             commands::import_pdf_text,
             commands::import_word_text,
             commands::refine_document_text,
@@ -52,6 +60,11 @@ pub fn run() {
             commands::get_syllabus,
             commands::create_document,
             commands::save_document,
+            commands::list_lectures,
+            commands::get_lecture,
+            commands::create_lecture,
+            commands::save_lecture,
+            commands::delete_lecture,
             commands::set_document_syllabus,
             commands::set_document_deleted,
             commands::duplicate_document,
@@ -82,6 +95,10 @@ pub fn run() {
             commands::search_library,
             commands::backup_library,
             commands::restore_library,
+            commands::default_soflo_export_path,
+            commands::export_soflo_data,
+            commands::import_soflo_data_and_restart,
+            commands::wipe_soflo_data_and_restart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

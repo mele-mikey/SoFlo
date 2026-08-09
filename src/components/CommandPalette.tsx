@@ -43,6 +43,7 @@ export function CommandPalette({ open, onOpenChange, classes, onNavigate, onNewN
         {query && <Command.Group heading="Library">
           {results.map((result) => <Command.Item key={`${result.kind}-${result.id}`} value={`${result.title} ${result.subtitle}`} onSelect={() => {
             if (result.kind === 'document' && result.parentId) choose({ kind: 'document', classId: result.parentId, documentId: result.id })
+            else if (result.kind === 'lecture' && result.parentId) choose({ kind: 'lecture', classId: result.parentId, lectureId: result.id })
             else if (result.kind === 'set' && result.parentId) choose({ kind: 'flashcardSet', classId: result.parentId, setId: result.id })
             else if (result.kind === 'class') choose({ kind: 'class', classId: result.id, tab: 'overview' })
             else if (result.kind === 'card' && result.parentId) choose({ kind: 'class', classId: result.parentId, tab: 'flashcards' })

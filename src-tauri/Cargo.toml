@@ -1,9 +1,9 @@
 [package]
 name = "soflo"
-version = "1.0.29"
+version = "1.0.33"
 description = "A local-first notes and study workspace"
-authors = ["SoFlo"]
-license = "MIT"
+authors = ["Mikey M."]
+license = "PolyForm-Noncommercial-1.0.0"
 edition = "2021"
 rust-version = "1.77.2"
 

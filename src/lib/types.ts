@@ -51,6 +51,27 @@ export interface DocumentDetail extends DocumentSummary {
   createdAt: string
 }
 
+export interface LectureSummary {
+  id: string
+  classId: string
+  courseCode: string
+  courseName: string
+  lectureDate: string
+  scheduledStart: string | null
+  scheduledEnd: string | null
+  professorSnapshot: string | null
+  title: string
+  excerpt: string
+  updatedAt: string
+  createdAt: string
+}
+
+export interface LectureDetail extends Omit<LectureSummary, 'excerpt'> {
+  content: string
+  contentPlain: string
+  revision: number
+}
+
 export interface FlashcardSetSummary {
   id: string
   classId: string
@@ -124,7 +145,7 @@ export interface BootstrapData {
 }
 
 export interface SearchResult {
-  kind: 'class' | 'document' | 'set' | 'card'
+  kind: 'class' | 'document' | 'lecture' | 'set' | 'card'
   id: string
   parentId: string | null
   title: string
@@ -143,8 +164,9 @@ export interface TestAttemptSummary {
 export type AppView =
   | { kind: 'home' }
   | { kind: 'calendar' }
-  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'syllabus' | 'flashcards' | 'study' | 'trash' }
+  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'lectures' | 'syllabus' | 'flashcards' | 'study' | 'trash' }
   | { kind: 'document'; classId: string; documentId: string }
+  | { kind: 'lecture'; classId: string; lectureId: string }
   | { kind: 'flashcardSet'; classId: string; setId: string }
   | { kind: 'study'; classId: string; setId: string; mode: 'flashcards' | 'learn' | 'test' | 'match' }
   | { kind: 'archive' }

@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
-  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary,
+  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary,
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'create_class', 'update_class', 'create_document', 'save_document', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'save_test_attempt', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'create_class', 'update_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'save_test_attempt', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -12,6 +12,9 @@ const call = async <T>(command: string, arguments_?: Record<string, unknown>) =>
 }
 
 export const api = {
+  isInstallerLaunch: () => invoke<boolean>('is_installer_launch'),
+  runInstallerWorker: () => invoke<void>('run_installer_worker'),
+  launchInstalledSofloAndClose: () => invoke<void>('launch_installed_soflo_and_close'),
   bootstrap: () => call<BootstrapData>('bootstrap'),
   listSemesters: (includeArchived = false) => call<Semester[]>('list_semesters', { includeArchived }),
   createSemester: (input: { name: string; term: string; year: number }) => call<Semester>('create_semester', { input }),
@@ -25,6 +28,11 @@ export const api = {
   getSyllabus: (classId: string) => call<DocumentDetail | null>('get_syllabus', { classId }),
   createDocument: (input: { classId: string; title: string }) => call<DocumentDetail>('create_document', { input }),
   saveDocument: (input: Pick<DocumentDetail, 'id' | 'title' | 'content' | 'contentPlain' | 'isFavorite'>) => call<DocumentDetail>('save_document', { input }),
+  listLectures: (classId: string) => call<LectureSummary[]>('list_lectures', { classId }),
+  getLecture: (id: string) => call<LectureDetail>('get_lecture', { id }),
+  createLecture: (input: { classId: string; courseCode: string; courseName: string; lectureDate: string; scheduledStart: string | null; scheduledEnd: string | null; professorSnapshot: string | null; title: string }) => call<LectureDetail>('create_lecture', { input }),
+  saveLecture: (input: Pick<LectureDetail, 'id' | 'title' | 'content' | 'contentPlain'>) => call<LectureDetail>('save_lecture', { input }),
+  deleteLecture: (id: string) => call<void>('delete_lecture', { id }),
   setDocumentSyllabus: (id: string) => call<DocumentDetail>('set_document_syllabus', { id }),
   setDocumentDeleted: (id: string, deleted: boolean) => call<void>('set_document_deleted', { id, deleted }),
   duplicateDocument: (id: string, title?: string) => call<DocumentDetail>('duplicate_document', { id, title }),
@@ -54,6 +62,10 @@ export const api = {
   search: (query: string) => call<SearchResult[]>('search_library', { query }),
   backupLibrary: (destination: string) => call<void>('backup_library', { destination }),
   restoreLibrary: (source: string) => call<void>('restore_library', { source }),
+  defaultSofloExportPath: () => call<string>('default_soflo_export_path'),
+  exportSofloData: (destination: string) => call<void>('export_soflo_data', { destination }),
+  importSofloDataAndRestart: (source: string) => call<void>('import_soflo_data_and_restart', { source }),
+  wipeSofloDataAndRestart: () => call<void>('wipe_soflo_data_and_restart'),
   importPdfText: (path: string) => call<string>('import_pdf_text', { path }),
   importWordText: (path: string) => call<string>('import_word_text', { path }),
   refineDocumentText: (modelPath: string, text: string) => call<string>('refine_document_text', { modelPath, text }),

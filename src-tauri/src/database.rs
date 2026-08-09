@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{Arc, Mutex},
@@ -13,6 +14,8 @@ use chacha20poly1305::{
 use rand::{rngs::OsRng, RngCore};
 use rusqlite::{serialize::OwnedData, Connection, DatabaseName, OpenFlags};
 use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::models::{
     CredentialMetadata, SecurityMetadata, SecurityStatus, UnlockLibraryInput,
@@ -23,6 +26,13 @@ const KDF_MEMORY_KIB: u32 = 19 * 1024;
 const KDF_ITERATIONS: u32 = 2;
 const ENCRYPTED_HEADER: &[u8] = b"SOFLOENC1";
 const NONCE_LENGTH: usize = 24;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SofloArchiveManifest {
+    format: String,
+    version: u8,
+    encrypted: bool,
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -85,6 +95,18 @@ impl Database {
             .ok()
             .and_then(|guard| guard.as_ref().map(|_| self.encrypted_path.clone()))
             .unwrap_or_else(|| self.path.clone())
+    }
+
+    pub fn installer_model_path(&self) -> Option<String> {
+        let marker = self.path.parent()?.join("installer.model-path");
+        fs::read_to_string(marker).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    }
+
+    pub fn clear_installer_model_path(&self) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            remove_file_if_present(&parent.join("installer.model-path"))?;
+        }
+        Ok(())
     }
 
     pub fn security_status(&self) -> Result<SecurityStatus, String> {
@@ -318,6 +340,86 @@ impl Database {
         Ok(())
     }
 
+    pub fn export_archive(&self, destination: &Path) -> Result<(), String> {
+        self.sync_encrypted()?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let encrypted = self
+            .security
+            .lock()
+            .map_err(|_| "SoFlo's security state is unavailable.".to_string())?
+            .is_some();
+        let data = if encrypted {
+            fs::read(self.data_path()).map_err(|_| "SoFlo could not read its local library.".to_string())?
+        } else {
+            // SQLite may have current writes in its WAL sidecar. Export a checkpointed
+            // main database so one .soflo file always contains the complete library.
+            self.read_plaintext_database()?
+        };
+        let file = fs::File::create(destination).map_err(|error| error.to_string())?;
+        let mut archive = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let manifest = SofloArchiveManifest { format: "soflo-library".into(), version: 1, encrypted };
+        archive.start_file("manifest.json", options).map_err(|error| error.to_string())?;
+        archive.write_all(&serde_json::to_vec(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        archive.start_file(if encrypted { "library.enc" } else { "library.sqlite3" }, options).map_err(|error| error.to_string())?;
+        archive.write_all(&data).map_err(|error| error.to_string())?;
+        if encrypted {
+            archive.start_file("security.json", options).map_err(|error| error.to_string())?;
+            archive.write_all(&fs::read(&self.security_path).map_err(|_| "SoFlo could not read its security configuration.".to_string())?).map_err(|error| error.to_string())?;
+        }
+        archive.finish().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn import_archive(&self, source: &Path) -> Result<(), String> {
+        let file = fs::File::open(source).map_err(|_| "The selected SoFlo data file could not be read.".to_string())?;
+        let mut archive = ZipArchive::new(file).map_err(|_| "That file is not a valid SoFlo data export.".to_string())?;
+        let manifest: SofloArchiveManifest = {
+            let mut entry = archive.by_name("manifest.json").map_err(|_| "That file is missing SoFlo export details.".to_string())?;
+            let mut raw = Vec::new();
+            entry.read_to_end(&mut raw).map_err(|error| error.to_string())?;
+            serde_json::from_slice(&raw).map_err(|_| "That file is not a valid SoFlo data export.".to_string())?
+        };
+        if manifest.format != "soflo-library" || manifest.version != 1 {
+            return Err("That file is not a compatible SoFlo data export.".into());
+        }
+        let mut data = Vec::new();
+        archive.by_name(if manifest.encrypted { "library.enc" } else { "library.sqlite3" }).map_err(|_| "That export is missing its library data.".to_string())?.read_to_end(&mut data).map_err(|error| error.to_string())?;
+        if manifest.encrypted {
+            if !data.starts_with(ENCRYPTED_HEADER) {
+                return Err("That encrypted export is invalid.".into());
+            }
+            let mut security = Vec::new();
+            archive.by_name("security.json").map_err(|_| "That encrypted export is missing its security details.".to_string())?.read_to_end(&mut security).map_err(|error| error.to_string())?;
+            serde_json::from_slice::<SecurityMetadata>(&security).map_err(|_| "That encrypted export has invalid security details.".to_string())?;
+            write_atomically(&self.encrypted_path, &data)?;
+            write_atomically(&self.security_path, &security)?;
+            remove_file_if_present(&self.path)?;
+            remove_sidecars(&self.path)?;
+        } else {
+            let connection = connection_from_bytes(data.clone()).map_err(|_| "That export does not contain a valid SoFlo library.".to_string())?;
+            validate_schema(&connection)?;
+            self.write_plaintext_bytes(&data)?;
+            remove_sidecars(&self.path)?;
+            remove_file_if_present(&self.encrypted_path)?;
+            remove_file_if_present(&self.security_path)?;
+        }
+        Ok(())
+    }
+
+    pub fn wipe_library(&self) -> Result<(), String> {
+        remove_file_if_present(&self.path)?;
+        remove_sidecars(&self.path)?;
+        remove_file_if_present(&self.encrypted_path)?;
+        remove_file_if_present(&self.security_path)?;
+        *self.security.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        *self.session_key.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        *self.memory_anchor.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        Ok(())
+    }
+
     pub fn restore_from(&self, source: &Path) -> Result<(), String> {
         self.validate_backup(source)?;
         if self
@@ -472,7 +574,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 4 {
+        if version >= 5 {
             return Ok(());
         }
         if version < 1 {
@@ -511,6 +613,28 @@ impl Database {
         }
         if version < 4 {
             connection.execute_batch("ALTER TABLE documents ADD COLUMN linked_pdf_path TEXT; PRAGMA user_version = 4;").map_err(|error| error.to_string())?;
+        }
+        if version < 5 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS lectures (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT,
+                    course_code TEXT NOT NULL DEFAULT '',
+                    course_name TEXT NOT NULL DEFAULT '',
+                    lecture_date TEXT NOT NULL,
+                    scheduled_start TEXT,
+                    scheduled_end TEXT,
+                    professor_snapshot TEXT,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '{"type":"doc","content":[{"type":"paragraph"}]}',
+                    content_plain TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_lectures_class_date ON lectures(class_id, lecture_date DESC, created_at DESC);
+                PRAGMA user_version = 5;
+            "#).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -752,6 +876,38 @@ mod tests {
             .expect("read data");
         assert_eq!(count, 1);
         drop(locked);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn soflo_archive_round_trips_plaintext_and_encrypted_libraries() {
+        let directory = std::env::temp_dir().join(format!("soflo-archive-test-{}", uuid::Uuid::new_v4()));
+        let source_path = directory.join("source").join("soflo.sqlite3");
+        let archive_path = directory.join("export.soflo");
+        let source = Database::new(source_path.clone()).expect("create source database");
+        source.open().expect("open source").execute("INSERT INTO semesters (id, name, term, year) VALUES ('semester', 'Fall 2026', 'Fall', 2026)", []).expect("insert source data");
+        source.export_archive(&archive_path).expect("export plaintext archive");
+
+        let plain_target_path = directory.join("plain-target").join("soflo.sqlite3");
+        let plain_target = Database::new(plain_target_path.clone()).expect("create plain target");
+        plain_target.import_archive(&archive_path).expect("import plaintext archive");
+        let count: i32 = plain_target.open().expect("open imported plaintext").query_row("SELECT COUNT(*) FROM semesters WHERE id='semester'", [], |row| row.get(0)).expect("read plaintext import");
+        assert_eq!(count, 1);
+
+        source.update_security(UpdateLibrarySecurityInput { current_pin: None, current_password: None, new_pin: Some("1234".into()), new_password: None, remove_pin: false, remove_password: false }).expect("encrypt source");
+        source.export_archive(&archive_path).expect("export encrypted archive");
+        let encrypted_target_path = directory.join("encrypted-target").join("soflo.sqlite3");
+        let encrypted_target = Database::new(encrypted_target_path.clone()).expect("create encrypted target");
+        encrypted_target.import_archive(&archive_path).expect("import encrypted archive");
+        drop(encrypted_target);
+        let locked = Database::new(encrypted_target_path).expect("reopen encrypted target");
+        assert!(locked.security_status().expect("encrypted status").locked);
+        locked.unlock(UnlockLibraryInput { pin: Some("1234".into()), password: None }).expect("unlock imported archive");
+        let count: i32 = locked.open().expect("open imported encrypted library").query_row("SELECT COUNT(*) FROM semesters WHERE id='semester'", [], |row| row.get(0)).expect("read encrypted import");
+        assert_eq!(count, 1);
+        drop(locked);
+        drop(plain_target);
+        drop(source);
         let _ = fs::remove_dir_all(directory);
     }
 }

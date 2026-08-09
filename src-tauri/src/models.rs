@@ -74,6 +74,42 @@ pub struct DocumentFolder {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct LectureSummary {
+    pub id: String,
+    pub class_id: String,
+    pub course_code: String,
+    pub course_name: String,
+    pub lecture_date: String,
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub professor_snapshot: Option<String>,
+    pub title: String,
+    pub excerpt: String,
+    pub updated_at: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LectureDetail {
+    pub id: String,
+    pub class_id: String,
+    pub course_code: String,
+    pub course_name: String,
+    pub lecture_date: String,
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub professor_snapshot: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub content_plain: String,
+    pub revision: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct FlashcardSetSummary {
     pub id: String,
     pub class_id: String,
@@ -276,6 +312,28 @@ pub struct SaveDocumentInput {
     pub content: String,
     pub content_plain: String,
     pub is_favorite: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLectureInput {
+    pub class_id: String,
+    pub course_code: String,
+    pub course_name: String,
+    pub lecture_date: String,
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub professor_snapshot: Option<String>,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLectureInput {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub content_plain: String,
 }
 
 #[derive(Debug, Deserialize)]

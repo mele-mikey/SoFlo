@@ -1,13 +1,15 @@
 {
   "name": "soflo",
   "private": true,
-  "version": "1.0.29",
+  "version": "1.0.33",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "tauri": "tauri",
+    "build:installer": "npm run tauri -- build --no-bundle && powershell -ExecutionPolicy Bypass -File tools/build-installer.ps1",
     "lint": "eslint .",
     "preview": "vite preview"
   },

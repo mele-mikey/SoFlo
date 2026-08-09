@@ -1,7 +1,6 @@
-import { ArchiveRestore, Bot, Check, Database, Download, Info, KeyRound, LockKeyhole, Moon, Palette, ShieldAlert, ShieldCheck, SpellCheck2, X } from 'lucide-react'
-import { open, save, confirm } from '@tauri-apps/plugin-dialog'
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { AlertTriangle, Bot, Check, Database, Download, Info, KeyRound, LockKeyhole, Moon, Palette, ShieldAlert, ShieldCheck, SpellCheck2, Upload, X } from 'lucide-react'
+import { open, save } from '@tauri-apps/plugin-dialog'
+import { useState, type ReactNode } from 'react'
 import { api } from '../../lib/api'
 import type { AppSettings, SecurityStatus } from '../../lib/types'
 
@@ -14,67 +13,185 @@ interface SettingsViewProps {
   onToast: (message: string, type?: 'success' | 'error') => void
 }
 
+type BusyAction = 'export' | 'import' | 'wipe' | null
+
 export function SettingsView({ settings, dataLocation, security, onSettingsChange, onSecurityChange, onToast }: SettingsViewProps) {
-  const [busy, setBusy] = useState<'backup' | 'restore' | null>(null)
+  const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
+  const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
   const [downloadingModel, setDownloadingModel] = useState(false)
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
+
   const update = async (partial: Partial<AppSettings>) => {
     const next = { ...settings, ...partial }
     onSettingsChange(next)
-    try { await api.updateSettings(next) } catch { onSettingsChange(settings); onToast('Settings could not be saved.', 'error') }
+    try {
+      await api.updateSettings(next)
+    } catch {
+      onSettingsChange(settings)
+      onToast('Settings could not be saved.', 'error')
+    }
   }
-  const backup = async () => {
-    const target = await save({ title: 'Backup SoFlo Library', defaultPath: `SoFlo Backup ${new Date().toISOString().slice(0, 10)}.sqlite3`, filters: [{ name: 'SoFlo backup', extensions: ['sqlite3'] }] })
-    if (!target) return
-    setBusy('backup')
-    try { await api.backupLibrary(target); onToast('Your SoFlo library was backed up successfully.') } catch (error) { onToast(error instanceof Error ? error.message : 'The backup could not be created.', 'error') } finally { setBusy(null) }
+
+  const exportData = async () => {
+    try {
+      const defaultPath = await api.defaultSofloExportPath()
+      const target = await save({ title: 'Export SoFlo data', defaultPath, filters: [{ name: 'SoFlo data', extensions: ['soflo'] }] })
+      if (!target) return
+      setBusy('export')
+      await api.exportSofloData(target)
+      onToast('Your SoFlo data was exported successfully.')
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'The data export could not be created.', 'error')
+    } finally {
+      setBusy(null)
+    }
   }
-  const restore = async () => {
-    const source = await open({ title: 'Restore SoFlo Library', multiple: false, directory: false, filters: [{ name: 'SoFlo backup', extensions: ['sqlite3', 'db'] }] })
+
+  const importData = async () => {
+    const source = await open({ title: 'Import SoFlo data', multiple: false, directory: false, filters: [{ name: 'SoFlo data', extensions: ['soflo'] }] })
     if (!source || Array.isArray(source)) return
-    const approved = await confirm('Restoring replaces the library currently stored on this computer. This cannot be undone unless you have a backup.', { title: 'Restore backup?', kind: 'warning', okLabel: 'Restore backup', cancelLabel: 'Cancel' })
-    if (!approved) return
-    setBusy('restore')
-    try { await api.restoreLibrary(source); onToast('Library restored. SoFlo will now reload.'); window.setTimeout(() => window.location.reload(), 700) } catch (error) { onToast(error instanceof Error ? error.message : 'That file is not a valid SoFlo backup.', 'error') } finally { setBusy(null) }
+    setBusy('import')
+    try {
+      // A successful import restarts the process. Protected exports then show LockView.
+      await api.importSofloDataAndRestart(source)
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'That file is not a valid SoFlo data export.', 'error')
+      setBusy(null)
+    }
   }
+
+  const wipeData = async () => {
+    setBusy('wipe')
+    try {
+      await api.wipeSofloDataAndRestart()
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'SoFlo could not wipe its local data.', 'error')
+      setBusy(null)
+    }
+  }
+
   const chooseAiModel = async () => {
     const source = await open({ title: 'Choose a local AI model', multiple: false, directory: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] })
     if (!source || Array.isArray(source)) return
     void update({ aiModelPath: source })
   }
+
   const downloadAiModel = async () => {
     setDownloadingModel(true)
-    try { const aiModelPath = await api.downloadDefaultAiModel(); await update({ aiModelPath }) } catch (error) { onToast(error instanceof Error ? error.message : 'The local AI model could not be downloaded.', 'error') } finally { setDownloadingModel(false) }
+    try {
+      const aiModelPath = await api.downloadDefaultAiModel()
+      await update({ aiModelPath })
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'The local AI model could not be downloaded.', 'error')
+    } finally {
+      setDownloadingModel(false)
+    }
   }
-  return <main className="settings-view content-view"><header className="view-intro"><p className="eyebrow">PREFERENCES</p><h1>Settings</h1><p>Thoughtful defaults, with just enough room to make SoFlo yours.</p></header>
-    <section className="settings-section"><div className="settings-section-heading"><Moon size={18} /><div><h2>Appearance</h2><p>SoFlo is intentionally dark and focused.</p></div></div><SettingRow title="Reduced motion" detail="Limit non-essential movement throughout the interface."><Toggle checked={settings.reduceMotion} onChange={(checked) => void update({ reduceMotion: checked })} /></SettingRow></section>
-    <section className="settings-section"><div className="settings-section-heading"><Info size={18} /><div><h2>Personal</h2><p>Small details that make the workspace yours.</p></div></div><SettingRow title="Your name" detail="Used in your home-screen greeting."><input className="settings-name-input" defaultValue={settings.userName} maxLength={48} onBlur={(event) => { const name = event.target.value.trim(); if (name !== settings.userName) void update({ userName: name }) }} placeholder="Your first name" aria-label="Your name" /></SettingRow><div className="theme-setting"><div><h3><Palette size={15} /> Accent color</h3><p>Updates SoFlo’s signature color everywhere.</p></div><ThemePicker value={settings.themeColor} onChange={(themeColor) => void update({ themeColor })} /></div></section>
-    <section className="settings-section"><div className="settings-section-heading"><SpellCheck2 size={18} /><div><h2>Editor</h2><p>Google Docs-style paper defaults, with room to customize.</p></div></div><SettingRow title="Spellcheck" detail="Check spelling as you write. Enabled by default."><Toggle checked={settings.spellcheck} onChange={(checked) => void update({ spellcheck: checked })} /></SettingRow><SettingRow title="Default text size" detail="Arial, black text, and 11 pt are the Google Docs-style defaults."><select value={settings.editorFontSize} onChange={(event) => void update({ editorFontSize: Number(event.target.value) })} aria-label="Default text size">{[9, 10, 11, 12, 14, 16, 18].map((size) => <option key={size} value={size}>{size} pt</option>)}</select></SettingRow><div className="reading-surface-setting"><div><h3>Reading surface</h3><p>Choose a page treatment that feels best for long study sessions.</p></div><ReadingSurfacePicker value={settings.editorCanvas} onChange={(editorCanvas) => void update({ editorCanvas })} /></div></section>
-    <section className="settings-section security-section"><div className="settings-section-heading"><ShieldCheck size={18} /><div><h2>Security</h2><p>{security?.configured ? 'Your library is encrypted at rest.' : 'Protect your entire library with encryption.'}</p></div></div><div className="security-warning"><ShieldAlert size={16} /><p>If you forget every PIN and password you set, SoFlo cannot recover your encrypted papers, cards, or study history.</p></div><SettingRow title="PIN" detail={security?.hasPin ? 'A PIN is required each time SoFlo opens.' : 'Use a 4- or 6-digit PIN for quick unlock.'}><button className="button button-soft button-small" onClick={() => setSecurityDialog({ type: 'pin', remove: false })}><KeyRound size={15} /> {security?.hasPin ? 'Change PIN' : 'Add PIN'}</button></SettingRow>{security?.hasPin && <SettingRow title="Remove PIN" detail="You will need your active credentials to confirm."><button className="button button-quiet button-small" onClick={() => setSecurityDialog({ type: 'pin', remove: true })}>Remove PIN</button></SettingRow>}<SettingRow title="Password" detail={security?.hasPassword ? 'A password is required each time SoFlo opens.' : 'Use a password for stronger protection.'}><button className="button button-soft button-small" onClick={() => setSecurityDialog({ type: 'password', remove: false })}><LockKeyhole size={15} /> {security?.hasPassword ? 'Change password' : 'Add password'}</button></SettingRow>{security?.hasPassword && <SettingRow title="Remove password" detail="You will need your active credentials to confirm."><button className="button button-quiet button-small" onClick={() => setSecurityDialog({ type: 'password', remove: true })}>Remove password</button></SettingRow>}</section>
-    <section className="settings-section"><div className="settings-section-heading"><Database size={18} /><div><h2>Library data</h2><p>Your papers and study history stay on this computer.</p></div></div><SettingRow title="Data location" detail={dataLocation}><span className="location-badge">{security?.configured ? 'Encrypted' : 'Local SQLite'}</span></SettingRow><SettingRow title="Backup SoFlo Library" detail="Create one portable backup file containing your entire library."><button className="button button-soft button-small" disabled={busy !== null} onClick={() => void backup()}><Download size={15} /> {busy === 'backup' ? 'Backing up…' : 'Create backup'}</button></SettingRow><SettingRow title="Restore backup" detail="Validate and safely replace your current library from a prior backup."><button className="button button-quiet button-small" disabled={busy !== null} onClick={() => void restore()}><ArchiveRestore size={15} /> {busy === 'restore' ? 'Restoring…' : 'Restore backup'}</button></SettingRow></section>
-    <section className="settings-section ai-section"><div className="settings-section-heading"><Bot size={18} /><div><h2>Artificial Intelligence</h2><p>Optional, private help for structuring imported documents.</p></div></div><SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow><SettingRow title="Local model" detail={settings.aiModelPath || 'Download SoFlo’s compact 3B model now, or let the first AI action download it.'}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (settings.aiModelPath ? chooseAiModel() : downloadAiModel())}>{downloadingModel ? 'Downloading…' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>{settings.aiEnabled && !settings.aiModelPath && <p className="ai-model-note">The model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}</section>
-    <section className="settings-section about-section"><div className="settings-section-heading"><Info size={18} /><div><h2>About SoFlo</h2><p>Version 1.0.28</p></div></div></section>
-    <TrashSettingsAddon onClear={() => setClearTrashOpen(true)} />
-    {clearTrashOpen && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Clear trash"><header><h2>Clear the entire trash?</h2><button className="icon-button" onClick={() => setClearTrashOpen(false)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>This permanently deletes every paper and flashcard set in Recently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setClearTrashOpen(false)}>Cancel</button><button className="button button-danger" onClick={() => void api.emptyTrash().then(() => { setClearTrashOpen(false); onToast('Trash cleared.') }).catch(() => onToast('Trash could not be cleared.', 'error'))}>Clear trash</button></footer></section></div>}
+
+  return <main className="settings-view content-view">
+    <header className="view-intro"><p className="eyebrow">PREFERENCES</p><h1>Settings</h1><p>Thoughtful defaults, with just enough room to make SoFlo yours.</p></header>
+
+    <section className="settings-section">
+      <SectionHeading icon={<Moon size={18} />} title="Appearance" detail="SoFlo is intentionally dark and focused." />
+      <SettingRow title="Reduced motion" detail="Limit non-essential movement throughout the interface."><Toggle checked={settings.reduceMotion} onChange={(reduceMotion) => void update({ reduceMotion })} /></SettingRow>
+    </section>
+
+    <section className="settings-section">
+      <SectionHeading icon={<Info size={18} />} title="Personal" detail="Small details that make the workspace yours." />
+      <SettingRow title="Your name" detail="Used in your home-screen greeting."><input className="settings-name-input" defaultValue={settings.userName} maxLength={48} onBlur={(event) => { const userName = event.target.value.trim(); if (userName !== settings.userName) void update({ userName }) }} placeholder="Your first name" aria-label="Your name" /></SettingRow>
+      <div className="theme-setting"><div><h3><Palette size={15} /> Accent color</h3><p>Updates SoFlo's signature color everywhere.</p></div><ThemePicker value={settings.themeColor} onChange={(themeColor) => void update({ themeColor })} /></div>
+    </section>
+
+    <section className="settings-section">
+      <SectionHeading icon={<SpellCheck2 size={18} />} title="Editor" detail="Google Docs-style paper defaults, with room to customize." />
+      <SettingRow title="Spellcheck" detail="Check spelling as you write. Enabled by default."><Toggle checked={settings.spellcheck} onChange={(spellcheck) => void update({ spellcheck })} /></SettingRow>
+      <SettingRow title="Default text size" detail="Arial, black text, and 11 pt are the Google Docs-style defaults."><select value={settings.editorFontSize} onChange={(event) => void update({ editorFontSize: Number(event.target.value) })} aria-label="Default text size">{[9, 10, 11, 12, 14, 16, 18].map((size) => <option key={size} value={size}>{size} pt</option>)}</select></SettingRow>
+      <div className="reading-surface-setting"><div><h3>Reading surface</h3><p>Choose a page treatment that feels best for long study sessions.</p></div><ReadingSurfacePicker value={settings.editorCanvas} onChange={(editorCanvas) => void update({ editorCanvas })} /></div>
+    </section>
+
+    <section className="settings-section security-section">
+      <SectionHeading icon={<ShieldCheck size={18} />} title="Security" detail={security?.configured ? 'Your library is encrypted at rest.' : 'Protect your entire library with encryption.'} />
+      <div className="security-warning"><ShieldAlert size={16} /><p>If you forget every PIN and password you set, SoFlo cannot recover your encrypted papers, lectures, cards, or study history.</p></div>
+      <SettingRow title="PIN" detail={security?.hasPin ? 'A PIN is required each time SoFlo opens.' : 'Use a 4- or 6-digit PIN for quick unlock.'}><button className="button button-soft button-small" onClick={() => setSecurityDialog({ type: 'pin', remove: false })}><KeyRound size={15} /> {security?.hasPin ? 'Change PIN' : 'Add PIN'}</button></SettingRow>
+      {security?.hasPin && <SettingRow title="Remove PIN" detail="You will need your active credentials to confirm."><button className="button button-quiet button-small" onClick={() => setSecurityDialog({ type: 'pin', remove: true })}>Remove PIN</button></SettingRow>}
+      <SettingRow title="Password" detail={security?.hasPassword ? 'A password is required each time SoFlo opens.' : 'Use a password for stronger protection.'}><button className="button button-soft button-small" onClick={() => setSecurityDialog({ type: 'password', remove: false })}><LockKeyhole size={15} /> {security?.hasPassword ? 'Change password' : 'Add password'}</button></SettingRow>
+      {security?.hasPassword && <SettingRow title="Remove password" detail="You will need your active credentials to confirm."><button className="button button-quiet button-small" onClick={() => setSecurityDialog({ type: 'password', remove: true })}>Remove password</button></SettingRow>}
+    </section>
+
+    <section className="settings-section">
+      <SectionHeading icon={<Database size={18} />} title="Library data" detail="Your papers and study history stay on this computer." />
+      <SettingRow title="Data location" detail={dataLocation}><span className="location-badge">{security?.configured ? 'Encrypted' : 'Local SQLite'}</span></SettingRow>
+      <SettingRow title="Clear trash" detail="Recently deleted papers and sets are removed after 30 days. Clear them permanently now."><button className="button button-quiet button-small" onClick={() => setClearTrashOpen(true)}>Clear trash</button></SettingRow>
+    </section>
+
+    <section className="settings-section ai-section">
+      <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." />
+      <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
+      <SettingRow title="Local model" detail={settings.aiModelPath || "Download SoFlo's compact 3B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (settings.aiModelPath ? chooseAiModel() : downloadAiModel())}>{downloadingModel ? 'Downloading...' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
+      {settings.aiEnabled && !settings.aiModelPath && <p className="ai-model-note">The model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
+    </section>
+
+    <section className="settings-section about-section">
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.33" />
+      <SettingRow title="Credits" detail="Created by Mikey M."><span className="location-badge">SoFlo</span></SettingRow>
+      <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission."><span className="location-badge">Source-available</span></SettingRow>
+    </section>
+
+    <section className="settings-section danger-zone">
+      <SectionHeading icon={<AlertTriangle size={18} />} title="Danger zone" detail="Move or permanently remove your local SoFlo library." />
+      <SettingRow title="Export SoFlo data" detail="Save your entire library as one portable .soflo file in Downloads."><button className="button button-soft button-small" disabled={busy !== null} onClick={() => void exportData()}><Download size={15} /> {busy === 'export' ? 'Exporting...' : 'Export data'}</button></SettingRow>
+      <SettingRow title="Import SoFlo data" detail="Replace this computer's library with a .soflo file. A protected export opens the usual PIN/password unlock screen."><button className="button button-quiet button-small" disabled={busy !== null} onClick={() => void importData()}><Upload size={15} /> {busy === 'import' ? 'Importing...' : 'Import data'}</button></SettingRow>
+      <SettingRow title="Wipe local data" detail="Permanently erase every class, paper, lecture, card, and setting from this computer."><button className="button button-danger button-small" disabled={busy !== null} onClick={() => setWipeConfirmOpen(true)}><AlertTriangle size={15} /> Wipe data</button></SettingRow>
+    </section>
+
+    {clearTrashOpen && <ConfirmDialog title="Clear the entire trash?" copy="This permanently deletes every paper and flashcard set in Recently deleted. This cannot be undone." confirmLabel="Clear trash" onClose={() => setClearTrashOpen(false)} onConfirm={() => void api.emptyTrash().then(() => { setClearTrashOpen(false); onToast('Trash cleared.') }).catch(() => onToast('Trash could not be cleared.', 'error'))} />}
+    {wipeConfirmOpen && <ConfirmDialog eyebrow="IRREVERSIBLE ACTION" title="Wipe all local data?" copy="This permanently removes every class, paper, lecture, flashcard, schedule, setting, and saved credential on this computer. Export a .soflo file first if you may need anything later." confirmLabel="Wipe everything" busy={busy === 'wipe'} onClose={() => setWipeConfirmOpen(false)} onConfirm={() => void wipeData()} />}
     {securityDialog && <SecurityDialog security={security} type={securityDialog.type} remove={securityDialog.remove} onClose={() => setSecurityDialog(null)} onUpdated={(next) => { onSecurityChange(next); setSecurityDialog(null); onToast(next.configured ? 'Library security updated.' : 'Library encryption removed.') }} />}
   </main>
 }
 
-function SettingRow({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
-function TrashSettingsAddon({ onClear }: { onClear: () => void }) { const [target, setTarget] = useState<HTMLElement | null>(null); useEffect(() => setTarget(document.querySelector<HTMLElement>('.settings-section:has(.location-badge)')), []); return target ? createPortal(<SettingRow title="Clear trash" detail="Recently deleted items are automatically removed after 30 days. Clear them permanently now."><button className="button button-quiet button-small" onClick={onClear}>Clear trash</button></SettingRow>, target) : null }
+function SectionHeading({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) { return <div className="settings-section-heading">{icon}<div><h2>{title}</h2><p>{detail}</p></div></div> }
+function SettingRow({ title, detail, children }: { title: string; detail: string; children: ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) { return <button role="switch" aria-checked={checked} className={checked ? 'toggle checked' : 'toggle'} onClick={() => onChange(!checked)}><span /></button> }
-function ThemePicker({ value, onChange }: { value: AppSettings['themeColor']; onChange: (value: AppSettings['themeColor']) => void }) { return <div className="theme-control"><div className="theme-picker" role="radiogroup" aria-label="Accent color">{(['purple', 'red', 'blue', 'yellow'] as const).map((color) => <button key={color} type="button" role="radio" aria-checked={value === color} className={value === color ? `theme-chip selected ${color}` : `theme-chip ${color}`} onClick={() => onChange(color)}><i /><span>{color}</span>{value === color && <Check size={13} />}</button>)}</div><div className={`theme-live-preview ${value}`} aria-label={`${value} accent preview`}><i /><span /><span /><b /></div></div> }
+
+function ThemePicker({ value, onChange }: { value: AppSettings['themeColor']; onChange: (value: AppSettings['themeColor']) => void }) {
+  return <div className="theme-control"><div className="theme-picker" role="radiogroup" aria-label="Accent color">{(['purple', 'red', 'blue', 'yellow'] as const).map((color) => <button key={color} type="button" role="radio" aria-checked={value === color} className={value === color ? `theme-chip selected ${color}` : `theme-chip ${color}`} onClick={() => onChange(color)}><i /><span>{color}</span>{value === color && <Check size={13} />}</button>)}</div><div className={`theme-live-preview ${value}`} aria-label={`${value} accent preview`}><i /><span /><span /><b /></div></div>
+}
+
 function ReadingSurfacePicker({ value, onChange }: { value: AppSettings['editorCanvas']; onChange: (value: AppSettings['editorCanvas']) => void }) {
   const surfaces: { value: AppSettings['editorCanvas']; label: string; detail: string }[] = [{ value: 'paper', label: 'Paper', detail: 'Bright and familiar' }, { value: 'midnight', label: 'Midnight', detail: 'Low-light reading' }, { value: 'slate', label: 'Slate', detail: 'Soft dark contrast' }, { value: 'sepia', label: 'Sepia', detail: 'Warm and gentle' }]
   return <div className="reading-surface-picker" role="radiogroup" aria-label="Reading surface">{surfaces.map((surface) => <button key={surface.value} type="button" role="radio" aria-checked={value === surface.value} className={value === surface.value ? `reading-surface-option selected ${surface.value}` : `reading-surface-option ${surface.value}`} onClick={() => onChange(surface.value)}><span className="reading-preview"><i /><i /><i /></span><strong>{surface.label}</strong><small>{surface.detail}</small></button>)}</div>
 }
 
-function SecurityDialog({ security, type, remove, onClose, onUpdated }: { security: SecurityStatus | null; type: 'pin' | 'password'; remove: boolean; onClose: () => void; onUpdated: (status: SecurityStatus) => void; }) {
-  const [pinDigits, setPinDigits] = useState<4 | 6>(6); const [currentPin, setCurrentPin] = useState(''); const [currentPassword, setCurrentPassword] = useState(''); const [value, setValue] = useState(''); const [confirmation, setConfirmation] = useState(''); const [error, setError] = useState(''); const [saving, setSaving] = useState(false)
+function ConfirmDialog({ eyebrow, title, copy, confirmLabel, busy = false, onClose, onConfirm }: { eyebrow?: string; title: string; copy: string; confirmLabel: string; busy?: boolean; onClose: () => void; onConfirm: () => void }) {
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label={title}><header><div>{eyebrow && <p className="eyebrow">{eyebrow}</p>}<h2>{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>{copy}</p></div><footer><button className="button button-quiet" disabled={busy} onClick={onClose}>Cancel</button><button className="button button-danger" disabled={busy} onClick={onConfirm}>{busy ? 'Working...' : confirmLabel}</button></footer></section></div>
+}
+
+function SecurityDialog({ security, type, remove, onClose, onUpdated }: { security: SecurityStatus | null; type: 'pin' | 'password'; remove: boolean; onClose: () => void; onUpdated: (status: SecurityStatus) => void }) {
+  const [pinDigits, setPinDigits] = useState<4 | 6>(security?.pinDigits ?? 6)
+  const [currentPin, setCurrentPin] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [value, setValue] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
   const changingPin = type === 'pin'
   const hasCurrentCredentials = (!security?.hasPin || currentPin.length > 0) && (!security?.hasPassword || currentPassword.length > 0)
   const valid = hasCurrentCredentials && (remove || (changingPin ? value.length === pinDigits && value === confirmation : value.length >= 8 && value === confirmation))
-  const submit = async () => { if (!valid) return; setError(''); setSaving(true); try { const status = await api.updateLibrarySecurity({ currentPin: security?.hasPin ? currentPin : undefined, currentPassword: security?.hasPassword ? currentPassword : undefined, newPin: !remove && changingPin ? value : undefined, newPassword: !remove && !changingPin ? value : undefined, removePin: remove && changingPin, removePassword: remove && !changingPin }); onUpdated(status) } catch (reason) { setError(reason instanceof Error ? reason.message : 'SoFlo could not update security.') } finally { setSaving(false) } }
-  return <div className="security-dialog-backdrop" role="presentation"><section className="security-dialog" role="dialog" aria-modal="true" aria-label={remove ? `Remove ${type}` : `Set ${type}`}><header><div><p className="eyebrow">LIBRARY SECURITY</p><h2>{remove ? `Remove ${type === 'pin' ? 'PIN' : 'password'}?` : `${security?.[type === 'pin' ? 'hasPin' : 'hasPassword'] ? 'Change' : 'Add'} ${type === 'pin' ? 'PIN' : 'password'}`}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close security dialog"><X size={18} /></button></header><div className="security-dialog-content">{remove && <p className="security-dialog-warning">Removing the last credential decrypts your library. Confirm your active credentials below.</p>}{security?.hasPin && <label>Current PIN<input inputMode="numeric" pattern="[0-9]*" type="password" maxLength={security?.pinDigits ?? 6} value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, ''))} /></label>}{security?.hasPassword && <label>Current password<input type="password" maxLength={128} value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>}{!remove && <>{changingPin && <div className="pin-length-toggle"><button type="button" className={pinDigits === 4 ? 'active' : ''} onClick={() => setPinDigits(4)}>4 digits</button><button type="button" className={pinDigits === 6 ? 'active' : ''} onClick={() => setPinDigits(6)}>6 digits</button></div>}<label>New {type}<input autoFocus inputMode={changingPin ? 'numeric' : undefined} pattern={changingPin ? '[0-9]*' : undefined} type="password" maxLength={changingPin ? pinDigits : 128} value={value} onChange={(event) => setValue(changingPin ? event.target.value.replace(/\D/g, '') : event.target.value)} /></label><label>Confirm new {type}<input inputMode={changingPin ? 'numeric' : undefined} pattern={changingPin ? '[0-9]*' : undefined} type="password" maxLength={changingPin ? pinDigits : 128} value={confirmation} onChange={(event) => setConfirmation(changingPin ? event.target.value.replace(/\D/g, '') : event.target.value)} /></label></>}{error && <p className="security-form-error">{error}</p>}<div className="security-dialog-actions"><button className="button button-quiet" onClick={onClose}>Cancel</button><button className={remove ? 'button button-danger' : 'button button-primary'} disabled={!valid || saving} onClick={() => void submit()}>{saving ? 'Saving…' : remove ? `Remove ${type}` : `Save ${type}`}</button></div></div></section></div>
+  const submit = async () => {
+    if (!valid) return
+    setError('')
+    setSaving(true)
+    try {
+      const status = await api.updateLibrarySecurity({ currentPin: security?.hasPin ? currentPin : undefined, currentPassword: security?.hasPassword ? currentPassword : undefined, newPin: !remove && changingPin ? value : undefined, newPassword: !remove && !changingPin ? value : undefined, removePin: remove && changingPin, removePassword: remove && !changingPin })
+      onUpdated(status)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'SoFlo could not update security.')
+    } finally {
+      setSaving(false)
+    }
+  }
+  const label = type === 'pin' ? 'PIN' : 'password'
+  return <div className="security-dialog-backdrop" role="presentation"><section className="security-dialog" role="dialog" aria-modal="true" aria-label={remove ? `Remove ${label}` : `Set ${label}`}><header><div><p className="eyebrow">LIBRARY SECURITY</p><h2>{remove ? `Remove ${label}?` : `${security?.[type === 'pin' ? 'hasPin' : 'hasPassword'] ? 'Change' : 'Add'} ${label}`}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close security dialog"><X size={18} /></button></header><div className="security-dialog-content">{remove && <p className="security-dialog-warning">Removing the last credential decrypts your library. Confirm your active credentials below.</p>}{security?.hasPin && <label>Current PIN<input inputMode="numeric" pattern="[0-9]*" type="password" maxLength={security.pinDigits ?? 6} value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, ''))} /></label>}{security?.hasPassword && <label>Current password<input type="password" maxLength={128} value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>}{!remove && <>{changingPin && <div className="pin-length-toggle"><button type="button" className={pinDigits === 4 ? 'active' : ''} onClick={() => setPinDigits(4)}>4 digits</button><button type="button" className={pinDigits === 6 ? 'active' : ''} onClick={() => setPinDigits(6)}>6 digits</button></div>}<label>New {label}<input autoFocus inputMode={changingPin ? 'numeric' : undefined} pattern={changingPin ? '[0-9]*' : undefined} type="password" maxLength={changingPin ? pinDigits : 128} value={value} onChange={(event) => setValue(changingPin ? event.target.value.replace(/\D/g, '') : event.target.value)} /></label><label>Confirm new {label}<input inputMode={changingPin ? 'numeric' : undefined} pattern={changingPin ? '[0-9]*' : undefined} type="password" maxLength={changingPin ? pinDigits : 128} value={confirmation} onChange={(event) => setConfirmation(changingPin ? event.target.value.replace(/\D/g, '') : event.target.value)} /></label></>}{error && <p className="security-form-error">{error}</p>}<div className="security-dialog-actions"><button className="button button-quiet" onClick={onClose}>Cancel</button><button className={remove ? 'button button-danger' : 'button button-primary'} disabled={!valid || saving} onClick={() => void submit()}>{saving ? 'Saving...' : remove ? `Remove ${label}` : `Save ${label}`}</button></div></div></section></div>
 }

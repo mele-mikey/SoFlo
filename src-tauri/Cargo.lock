@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "soflo"
-version = "1.0.29"
+version = "1.0.33"
 dependencies = [
  "argon2",
  "chacha20poly1305",
