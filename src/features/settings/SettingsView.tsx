@@ -113,7 +113,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
 
     <section className="settings-section">
       <SectionHeading icon={<SpellCheck2 size={18} />} title="Editor" detail="Google Docs-style paper defaults, with room to customize." />
-      <SettingRow title="Spellcheck" detail="Use SoFlo's custom local spelling suggestions as you write. Enabled by default when AI is on."><Toggle checked={settings.spellcheck} onChange={(spellcheck) => void update({ spellcheck })} /></SettingRow>
+      <SettingRow title="Spellcheck" detail="Use the browser's simple spelling checks as you write. AI spellcheck replaces it when enabled."><Toggle checked={settings.spellcheck} onChange={(spellcheck) => void update({ spellcheck })} /></SettingRow>
       <SettingRow title="Default text size" detail="Arial, black text, and 11 pt are the Google Docs-style defaults."><select value={settings.editorFontSize} onChange={(event) => void update({ editorFontSize: Number(event.target.value) })} aria-label="Default text size">{[9, 10, 11, 12, 14, 16, 18].map((size) => <option key={size} value={size}>{size} pt</option>)}</select></SettingRow>
       <div className="reading-surface-setting"><div><h3>Reading surface</h3><p>Choose a page treatment that feels best for long study sessions.</p></div><ReadingSurfacePicker value={settings.editorCanvas} onChange={(editorCanvas) => void update({ editorCanvas })} /></div>
     </section>
@@ -137,13 +137,13 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     <section className="settings-section ai-section">
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
-      <SettingRow title="AI spelling & grammar" detail="Review papers and lectures on demand with the private local model. Enabled by default when AI is on."><Toggle checked={settings.aiGrammar} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
+      <SettingRow title="AI spelling & grammar" detail="Passively check basics while editing, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiGrammar} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
       <SettingRow title="Local model" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Upgrade to SoFlo's improved 4B model." : settings.aiModelPath || "Download SoFlo's compact 4B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpgradeNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpgradeNeeded ? 'Upgrade model' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
       {settings.aiEnabled && (!settings.aiModelPath || modelUpgradeNeeded) && <p className="ai-model-note">The current 4B model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.68" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.69" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
