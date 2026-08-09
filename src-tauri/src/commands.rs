@@ -294,7 +294,7 @@ fn refine_document_text_blocking(
     let system = if is_syllabus {
         "You are SoFlo's meticulous local syllabus formatter. Return only clean Markdown, never code fences or commentary. Preserve every source fact exactly and never invent, summarize away, reorder, correct, or omit material. This is a formatting task, not a rewriting task. Keep every policy, deadline, contact detail, grading rule, assignment, reading, schedule item, URL, percentage, and warning. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. If a PDF has a visual line break after every wrapped line, join those wrapped lines into complete paragraphs or list items rather than echoing each line separately. Use # only for the document title; use ## and ### only for genuine section headings; use bullets for true lists; use a table only when the source is genuinely tabular. Keep prose in complete paragraphs. Use **bold** sparingly for labels, dates, percentages, and warnings. Never use more than ###."
     } else {
-        "You are SoFlo's meticulous local paper formatter. Return only clean Markdown, never code fences or commentary. Preserve the source word for word: do not rewrite, proofread, summarize, alter punctuation, reorder text, or invent anything. This is a formatting task only. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. If a PDF has a visual line break after every wrapped line, join those wrapped lines into complete paragraphs or list items rather than echoing each line separately. Preserve the MLA heading block as four separate ordinary lines (student, instructor, course, date), then use # for the one actual title. Preserve every original paragraph boundary and citation exactly. Never turn a name, date, works-cited entry, or ordinary sentence into a heading. Use ## only for real source section headings such as Works Cited, and use **bold** only if it already appears in the source."
+        "You are SoFlo's meticulous local paper formatter. Think through the source layout silently before answering, then return only clean Markdown—never code fences, commentary, or a layout explanation. Preserve every source word, number, punctuation mark, date, URL, citation, and paragraph boundary: do not rewrite, proofread, summarize, reorder, or invent anything. This is a formatting task only. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. Do not assume an MLA template. Only retain a four-line MLA heading when the source genuinely contains one; otherwise do not manufacture a heading block, title, author, or date. Treat a date as ordinary text unless the source clearly uses it as metadata. Identify headings, lists, tables, quotations, and verse from the source's actual cues, never from a line's position alone. Join ordinary visual line wraps into complete paragraphs instead of echoing each PDF line. Keep intentional verse or quotations line by line using two trailing spaces for each intentional break. Use # for one actual document title only when one is evident, ## and ### only for genuine section headings, Markdown lists only for true lists, and tables only for genuinely tabular material. Preserve citations exactly, including Works Cited entries; never turn a name, date, citation, or ordinary sentence into a heading. Use **bold** or *italics* only when the source clearly indicates emphasis."
     };
     emit_ai_progress(&app, 6, "Starting your private local model");
     ensure_ai_server(&model_path, &app)?;
@@ -601,7 +601,9 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
         "--gpu-layers",
         AI_GPU_LAYERS,
         "--reasoning",
-        "off",
+        "on",
+        "--reasoning-budget",
+        "1024",
         "--no-webui",
     ]);
     #[cfg(windows)]
@@ -2200,4 +2202,16 @@ pub fn update_library_security(
 #[tauri::command]
 pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()> {
     database.sync_encrypted()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_visual_line_echo;
+
+    #[test]
+    fn detects_a_raw_visual_line_echo_without_rejecting_markdown_structure() {
+        let source = "Course packet\nThis paragraph was split\nacross visual lines\nin the PDF\nSchedule\nMonday reading\nWednesday discussion\nFriday quiz\nGrading\nParticipation 20 percent\nProjects 40 percent\nFinal 40 percent";
+        assert!(is_visual_line_echo(source, source));
+        assert!(!is_visual_line_echo(source, "# Course packet\n\nThis paragraph was split across visual lines in the PDF.\n\n## Schedule\n- Monday reading\n- Wednesday discussion\n- Friday quiz\n\n## Grading\n| Item | Weight |\n| --- | --- |\n| Participation | 20 percent |\n| Projects | 40 percent |\n| Final | 40 percent |"));
+    }
 }
