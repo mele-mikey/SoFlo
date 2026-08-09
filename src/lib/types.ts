@@ -162,6 +162,7 @@ export interface AppSettings {
   walkthroughExampleSemesterId: string
   hideOverviewBanner: boolean
   aiEnabled: boolean
+  aiGrammar: boolean
   aiModelPath: string
   defaultQuestionTypes: string[]
 }

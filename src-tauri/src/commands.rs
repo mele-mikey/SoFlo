@@ -220,6 +220,22 @@ pub fn is_installer_launch() -> bool {
     std::env::args().any(|argument| argument == "--installer")
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallerVersionInfo {
+    pub current_version: String,
+    pub target_version: String,
+}
+
+#[tauri::command]
+pub fn installer_version_info() -> InstallerVersionInfo {
+    let argument_value = |prefix: &str| std::env::args().find_map(|argument| argument.strip_prefix(prefix).map(str::to_string)).unwrap_or_default();
+    InstallerVersionInfo {
+        current_version: argument_value("--current-version="),
+        target_version: argument_value("--target-version="),
+    }
+}
+
 fn setup_executable_argument() -> CommandResult<PathBuf> {
     let path = std::env::args()
         .find_map(|argument| argument.strip_prefix("--setup-exe=").map(PathBuf::from))
@@ -479,6 +495,45 @@ pub async fn generate_flashcards_text(
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
+#[tauri::command]
+pub async fn review_grammar_text(
+    app: tauri::AppHandle,
+    model_path: String,
+    text: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || review_grammar_text_blocking(app, model_path, text))
+        .await
+        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text: String) -> CommandResult<String> {
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
+    let source = text.chars().take(18_000).collect::<String>();
+    if source.trim().len() < 3 {
+        return Ok("[]".into());
+    }
+    emit_ai_progress(&app, 12, "Reading your writing");
+    ensure_ai_server(&model_path, &app)?;
+    emit_ai_progress(&app, 45, "Checking spelling and grammar");
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(90)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
+        "messages": [
+            {"role":"system","content":"You are a precise academic grammar checker. Return only valid JSON: an array of at most 20 objects with string keys original, replacement, reason, and category. Find only high-confidence spelling, grammar, punctuation, agreement, or clarity errors. The original value must be an exact continuous excerpt from the input. Keep replacement minimal. Never rewrite a whole sentence, alter the writer's voice, flag citations, or flag a proper name just because it is unfamiliar. Return [] when there are no clear errors."},
+            {"role":"user","content":format!("Review this writing. Return JSON only.\n\n{}", source)}
+        ],
+        "chat_template_kwargs": { "enable_thinking": false },
+        "max_tokens": 1800,
+        "temperature": 0.1
+    })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not finish the grammar review: {}", error))?;
+    let body: serde_json::Value = response.json().map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    let output = body.get("choices").and_then(|value| value.get(0)).and_then(|value| value.get("message")).and_then(|value| value.get("content")).and_then(|value| value.as_str()).unwrap_or_default();
+    touch_ai_server();
+    emit_ai_progress(&app, 90, "Preparing suggestions");
+    let output = json_array_from_response(output).unwrap_or_else(|| "[]".into());
+    emit_ai_progress(&app, 100, "Grammar review ready");
+    Ok(output)
+}
+
 fn generate_flashcards_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
@@ -521,9 +576,9 @@ fn generate_flashcards_text_blocking(
     };
     let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
         "messages": [
-          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
+          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 40 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
           {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
-        ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 4096, "temperature": 0.2
+        ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 6144, "temperature": 0.2
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
     let body: serde_json::Value = response

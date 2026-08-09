@@ -13,6 +13,7 @@ const call = async <T>(command: string, arguments_?: Record<string, unknown>) =>
 
 export const api = {
   isInstallerLaunch: () => invoke<boolean>('is_installer_launch'),
+  installerVersionInfo: () => invoke<{ currentVersion: string; targetVersion: string }>('installer_version_info'),
   runInstallerWorker: () => invoke<void>('run_installer_worker'),
   launchInstalledSofloAndClose: () => invoke<void>('launch_installed_soflo_and_close'),
   bootstrap: () => call<BootstrapData>('bootstrap'),
@@ -81,5 +82,6 @@ export const api = {
   importWordText: (path: string) => call<string>('import_word_text', { path }),
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
+  reviewGrammarText: (modelPath: string, text: string) => call<string>('review_grammar_text', { modelPath, text }),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
 }

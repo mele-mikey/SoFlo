@@ -190,6 +190,8 @@ pub struct AppSettings {
     pub hide_overview_banner: bool,
     #[serde(default = "default_ai_enabled")]
     pub ai_enabled: bool,
+    #[serde(default = "default_ai_grammar")]
+    pub ai_grammar: bool,
     #[serde(default)]
     pub ai_model_path: String,
     pub default_question_types: Vec<String>,
@@ -202,6 +204,9 @@ fn default_theme_color() -> String {
     "purple".to_string()
 }
 fn default_ai_enabled() -> bool {
+    true
+}
+fn default_ai_grammar() -> bool {
     true
 }
 
@@ -223,6 +228,7 @@ impl Default for AppSettings {
             walkthrough_example_semester_id: String::new(),
             hide_overview_banner: false,
             ai_enabled: true,
+            ai_grammar: true,
             ai_model_path: String::new(),
             default_question_types: vec![
                 "multipleChoice".into(),

@@ -315,7 +315,8 @@ Section "Install SoFlo" InstallSection
     InitPluginsDir
     SetOutPath "$PLUGINSDIR"
     File /oname=SoFlo-SetupUI.exe "${APP_EXE}"
-    Exec '"$PLUGINSDIR\SoFlo-SetupUI.exe" --installer --setup-exe="$EXEPATH"'
+    ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+    Exec '"$PLUGINSDIR\SoFlo-SetupUI.exe" --installer --setup-exe="$EXEPATH" --current-version="$0" --target-version="${APP_VERSION}"'
     Quit
   ${EndIf}
 

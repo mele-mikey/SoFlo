@@ -11,12 +11,14 @@ type SetupState = 'welcome' | 'installing' | 'ready' | 'error'
 export function InstallerApp() {
   const [state, setState] = useState<SetupState>('welcome')
   const [error, setError] = useState('')
+  const [version, setVersion] = useState({ currentVersion: '', targetVersion: '' })
 
   useEffect(() => {
     const close = () => void invoke('close_window')
     window.addEventListener('soflo:request-close', close)
     return () => window.removeEventListener('soflo:request-close', close)
   }, [])
+  useEffect(() => { void api.installerVersionInfo().then(setVersion).catch(() => undefined) }, [])
 
   const install = async () => {
     setError('')
@@ -46,11 +48,11 @@ export function InstallerApp() {
       <section className="installer-card" aria-live="polite">
         {state === 'welcome' && <>
           <img className="installer-mark" src={sofloMark} alt="SoFlo" />
-          <p className="installer-eyebrow">SOFLO FOR WINDOWS</p>
-          <h1>A quieter place<br />for the work ahead.</h1>
-          <p className="installer-copy">Everything for class, from your first lecture to your final exam.</p>
-          <button className="installer-primary" onClick={() => void install()}><Download size={17} /> Install SoFlo</button>
-          <p className="installer-note">Installs just for this Windows account.</p>
+          <p className="installer-eyebrow">{version.currentVersion ? 'SOFLO UPDATE' : 'SOFLO FOR WINDOWS'}</p>
+          <h1>{version.currentVersion ? <>Ready to update<br />your workspace.</> : <>A quieter place<br />for the work ahead.</>}</h1>
+          <p className="installer-copy">{version.currentVersion ? <>SoFlo v{version.currentVersion} is already installed. This will upgrade it to v{version.targetVersion || 'the latest version'} while keeping your library, settings, and local model in place.</> : 'Everything for class, from your first lecture to your final exam.'}</p>
+          <button className="installer-primary" onClick={() => void install()}><Download size={17} /> {version.currentVersion ? `Upgrade to v${version.targetVersion || 'latest'}` : 'Install SoFlo'}</button>
+          <p className="installer-note">{version.currentVersion ? 'Your existing SoFlo data will not be changed.' : 'Installs just for this Windows account.'}</p>
         </>}
 
         {state === 'installing' && <>

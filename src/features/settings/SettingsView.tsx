@@ -137,12 +137,13 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     <section className="settings-section ai-section">
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
+      <SettingRow title="AI spelling & grammar" detail="Review papers and lectures on demand with the private local model. Enabled by default when AI is on."><Toggle checked={settings.aiGrammar} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
       <SettingRow title="Local model" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Upgrade to SoFlo's improved 4B model." : settings.aiModelPath || "Download SoFlo's compact 4B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpgradeNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpgradeNeeded ? 'Upgrade model' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
       {settings.aiEnabled && (!settings.aiModelPath || modelUpgradeNeeded) && <p className="ai-model-note">The current 4B model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.65" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.66" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>

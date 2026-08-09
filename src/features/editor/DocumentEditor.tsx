@@ -20,7 +20,7 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
-import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DocumentDetail } from '../../lib/types'
@@ -32,10 +32,15 @@ import { importPdfAsEditableNote } from './pdfImport'
 interface DocumentEditorProps {
   document: DocumentDetail
   spellcheck: boolean
+  aiEnabled: boolean
+  aiGrammarEnabled: boolean
   fontSize: number
   readingSurface: 'paper' | 'midnight' | 'slate' | 'sepia'
   saveState: 'saved' | 'saving' | 'error'
   onChange: (content: string, contentPlain: string, title: string) => void
+  onSpellcheckChange: (value: boolean) => void
+  onAiGrammarEnabledChange: (value: boolean) => void
+  onGrammarReview: (text: string) => Promise<string>
   onBack: () => void
   onDelete: () => void
   onDuplicate?: () => void
@@ -113,9 +118,48 @@ const PaperMeta = Extension.create({
   },
 })
 const paperPaginationKey = new PluginKey<DecorationSet>('paperPagination')
+const grammarReviewKey = new PluginKey<DecorationSet>('grammarReview')
 const paperGap = 34
 const usLetterWidthInches = 8.5
 const usLetterHeightInches = 11
+
+type GrammarIssue = { original: string; replacement: string; reason: string; category: string; from: number; to: number }
+const GrammarReview = Extension.create({
+  name: 'grammarReview',
+  addProseMirrorPlugins() {
+    return [new Plugin<DecorationSet>({
+      key: grammarReviewKey,
+      state: { init: () => DecorationSet.empty, apply: (transaction, old) => (transaction.getMeta(grammarReviewKey) as DecorationSet | undefined) ?? old.map(transaction.mapping, transaction.doc) },
+      props: { decorations: (state) => grammarReviewKey.getState(state) },
+    })]
+  },
+})
+function extractGrammarIssues(raw: string, editor: Editor): GrammarIssue[] {
+  let candidates: Array<{ original?: string; replacement?: string; reason?: string; category?: string }> = []
+  try { candidates = JSON.parse(raw) as typeof candidates } catch { return [] }
+  const issues: GrammarIssue[] = []
+  const used = new Set<string>()
+  for (const candidate of candidates.slice(0, 20)) {
+    const original = candidate.original?.trim()
+    const replacement = candidate.replacement?.trim()
+    if (!original || !replacement || original === replacement || original.length > 180) continue
+    let found: { from: number; to: number } | null = null
+    editor.state.doc.descendants((node, position) => {
+      if (found || !node.isText || !node.text) return
+      const match = node.text.toLocaleLowerCase().indexOf(original.toLocaleLowerCase())
+      if (match < 0) return
+      const key = `${position + match}:${original}`
+      if (used.has(key)) return
+      used.add(key)
+      found = { from: position + match, to: position + match + original.length }
+    })
+    if (found) {
+      const match = found as { from: number; to: number }
+      issues.push({ original, replacement, reason: candidate.reason?.trim() || 'Suggested correction.', category: candidate.category?.trim() || 'Writing', from: match.from, to: match.to })
+    }
+  }
+  return issues
+}
 
 function derivePaperTitle(editor: Editor) {
   let firstText = ''
@@ -328,7 +372,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, fontSize, readingSurface, saveState, onChange, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -349,6 +393,10 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const [linkPreview, setLinkPreview] = useState<{ href: string; label: string; x: number; y: number } | null>(null)
   const [imageDialog, setImageDialog] = useState<{ src: string } | null>(null)
   const [tableDialog, setTableDialog] = useState<{ rows: number; cols: number; withHeaderRow: boolean } | null>(null)
+  const [grammarIssues, setGrammarIssues] = useState<GrammarIssue[]>([])
+  const [grammarOpen, setGrammarOpen] = useState(false)
+  const [grammarReviewing, setGrammarReviewing] = useState(false)
+  const [grammarMessage, setGrammarMessage] = useState('')
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
@@ -372,7 +420,7 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
-      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperMeta, PaperPagination, Color, Highlight.configure({ multicolor: true }),
+      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperMeta, PaperPagination, GrammarReview, Color, Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
       Image.configure({ inline: false, allowBase64: true }), Table.configure({ resizable: true, allowTableNodeSelection: true }), TableRow, TableHeader, TableCell,
@@ -390,6 +438,10 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     if (!editor || currentId.current === document.id) return
     currentId.current = document.id
     editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
+    setGrammarIssues([])
+    setGrammarMessage('')
+    setGrammarOpen(false)
+    editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
   useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleLinkClick } }) }, [editor, spellcheck, fontSize])
   useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin, headerPages, footerPages, repeatHeader, repeatFooter])
@@ -515,6 +567,38 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
     const text = editor.state.doc.textBetween(from, to, '\n')
     try { await navigator.clipboard.writeText(text); if (action === 'cut') editor.commands.deleteSelection() } catch { /* The browser command is the best available fallback. */ }
   }
+  const setGrammarDecorations = (issues: GrammarIssue[]) => {
+    const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: 'ai-grammar-issue', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
+    editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
+  }
+  const reviewGrammar = async () => {
+    if (!aiEnabled || !aiGrammarEnabled || grammarReviewing) return
+    setGrammarReviewing(true)
+    setGrammarMessage('')
+    setGrammarDecorations([])
+    try {
+      const issues = extractGrammarIssues(await onGrammarReview(editor.getText()), editor)
+      setGrammarIssues(issues)
+      setGrammarDecorations(issues)
+      setGrammarOpen(true)
+    } catch (error) {
+      setGrammarIssues([])
+      setGrammarDecorations([])
+      setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review.')
+      setGrammarOpen(true)
+    } finally { setGrammarReviewing(false) }
+  }
+  const clearGrammar = () => { setGrammarIssues([]); setGrammarDecorations([]); setGrammarMessage(''); setGrammarOpen(false) }
+  const applyGrammarIssue = (issue: GrammarIssue) => {
+    const state = editor.state
+    const exact = state.doc.textBetween(issue.from, issue.to, ' ')
+    if (exact.toLocaleLowerCase() !== issue.original.toLocaleLowerCase()) return
+    const transaction = state.tr.insertText(issue.replacement, issue.from, issue.to).scrollIntoView()
+    editor.view.dispatch(transaction)
+    const remaining = grammarIssues.filter((current) => current !== issue).map((current) => ({ ...current, from: transaction.mapping.map(current.from, -1), to: transaction.mapping.map(current.to, 1) }))
+    setGrammarIssues(remaining)
+    setGrammarDecorations(remaining)
+  }
   const openLinkDialog = () => setLinkDialog({ url: (editor.getAttributes('link').href as string | undefined) ?? '', canRemove: editor.isActive('link') })
   const applyLink = (url: string) => {
     const href = url.trim()
@@ -622,18 +706,18 @@ export function DocumentEditor({ document, spellcheck, fontSize, readingSurface,
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
-      <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+      <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
-    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article></section>
+    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}>{grammarReviewing && <span className="grammar-sweep" aria-label="Checking spelling and grammar" />}<article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && <aside className="grammar-sidebar" aria-label="Writing suggestions"><header><div><p className="eyebrow">AI WRITING REVIEW</p><h2>{grammarIssues.length ? `${grammarIssues.length} suggestion${grammarIssues.length === 1 ? '' : 's'}` : grammarMessage ? 'Review unavailable' : 'Writing looks good'}</h2></div><button className="icon-button tiny" onClick={clearGrammar} aria-label="Close writing suggestions"><X size={16} /></button></header>{grammarIssues.length ? <div className="grammar-suggestions">{grammarIssues.map((issue) => <article key={`${issue.from}-${issue.to}-${issue.original}`}><small>{issue.category}</small><p><s>{issue.original}</s><strong>{issue.replacement}</strong></p><span>{issue.reason}</span><button className="button button-primary button-small" onClick={() => applyGrammarIssue(issue)}>Use suggestion</button></article>)}</div> : <p className="grammar-empty">{grammarMessage || 'No clear spelling or grammar issues were found in this review.'}</p>}</aside>}</section>
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}
     {imageDialog && <ImageDialog source={imageDialog.src} onClose={() => setImageDialog(null)} onSourceChange={(src) => setImageDialog({ src })} onInsert={insertImage} />}
     {tableDialog && <TableDialog table={tableDialog} onClose={() => setTableDialog(null)} onChange={setTableDialog} onInsert={insertTable} />}
     <button className="page-settings-button" aria-label="Page settings" title="Page settings" onClick={() => setPageSettingsOpen((open) => !open)}><Settings2 size={20} /></button>
-    {pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p><div className="page-settings-actions"><button className="button button-primary button-small" onClick={() => void exportPdf()}><FileDown size={15} /> Export PDF</button><button className="button button-quiet button-small" onClick={() => void importPdf()}><Import size={15} /> Import PDF text</button></div>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}<p className="page-settings-note">Export opens the native Print dialog. Choose <strong>Microsoft Print to PDF</strong> to save a properly sized Letter PDF.</p></div></aside>}
+    {pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}</div></aside>}
   </main>
 }
 
@@ -661,11 +745,15 @@ function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { lab
   return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
 }
 
-function EditorToolbar({ editor, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
+function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
   const pasteWithoutFormatting = async () => {
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
+    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF text</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <Divider />
+    <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled}><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'Review this writing'}</button></ToolbarMenu>
+    <Divider />
     <ToolbarMenu label="Paragraph"><button onClick={() => editor.chain().focus().setParagraph().run()}><Pilcrow size={15} />Paragraph</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}>Heading 1</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}>Heading 2</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}>Heading 3</button></ToolbarMenu>
     <Divider />
     <ToolButton label="Bold" active={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}><Bold size={16} /></ToolButton>
@@ -710,7 +798,7 @@ function ToolButton({ label, active = false, onClick, children }: { label: strin
   return <button type="button" className={active ? 'toolbar-button active' : 'toolbar-button'} title={label} aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={onClick}>{children}</button>
 }
 
-function ToolbarMenu({ label, icon, children }: { label: string; icon?: React.ReactNode; children: React.ReactNode }) {
+function ToolbarMenu({ label, icon, children, disabled = false, iconOnly = false }: { label: string; icon?: React.ReactNode; children: React.ReactNode; disabled?: boolean; iconOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   const anchor = useRef<HTMLButtonElement>(null)
   const popover = useRef<HTMLDivElement>(null)
@@ -729,7 +817,7 @@ function ToolbarMenu({ label, icon, children }: { label: string; icon?: React.Re
     globalThis.document.addEventListener('mousedown', dismiss)
     return () => globalThis.document.removeEventListener('mousedown', dismiss)
   }, [open])
-  return <div className="toolbar-menu"><button ref={anchor} className="toolbar-select" aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}>{icon}<span>{label}</span><ChevronDown size={13} /></button>{open && position && createPortal(<div ref={popover} className="toolbar-popover toolbar-popover-floating" style={position} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}>{children}</div>, globalThis.document.body)}</div>
+  return <div className="toolbar-menu"><button ref={anchor} className="toolbar-select" aria-label={label} title={label} disabled={disabled} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}>{icon}{!iconOnly && <span>{label}</span>}{!iconOnly && <ChevronDown size={13} />}</button>{open && position && createPortal(<div ref={popover} className="toolbar-popover toolbar-popover-floating" style={position} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}>{children}</div>, globalThis.document.body)}</div>
 }
 
 function Divider() { return <span className="toolbar-divider" /> }
