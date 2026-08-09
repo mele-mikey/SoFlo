@@ -283,6 +283,7 @@ function App() {
       await api.updateSettings(settings)
       if (input.pin || input.password) setSecurity(await api.updateLibrarySecurity({ newPin: input.pin, newPassword: input.password, removePin: false, removePassword: false }))
       setSettings(settings)
+      setView({ kind: 'help' })
     } catch (error) { showToast(error instanceof Error ? error.message : 'Your setup could not be saved.', 'error') }
   }
   const unlockLibrary = async (input: { pin?: string; password?: string }) => {
