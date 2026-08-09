@@ -34,6 +34,7 @@ interface DocumentEditorProps {
   spellcheck: boolean
   aiEnabled: boolean
   aiGrammarEnabled: boolean
+  aiModelReady: boolean
   fontSize: number
   readingSurface: 'paper' | 'midnight' | 'slate' | 'sepia'
   saveState: 'saved' | 'saving' | 'error'
@@ -410,7 +411,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onDefineWord, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, aiModelReady, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onDefineWord, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -456,6 +457,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
+  const grammarOpenedReviewRef = useRef('')
   // Browser spellcheck cannot be styled. When AI spelling is on, use SoFlo's
   // own straight, interactive marks instead of the platform squiggle.
   const customAiSpellcheck = aiEnabled && aiGrammarEnabled
@@ -656,6 +658,15 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [aiEnabled, aiGrammarEnabled, editor])
+  useEffect(() => {
+    if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarOpenedReviewRef.current === document.id) return
+    grammarOpenedReviewRef.current = document.id
+    if (editor.getText().trim().length < 3) return
+    const timer = window.setTimeout(() => {
+      if (globalThis.document.hasFocus() && !grammarRequestRef.current) grammarReviewRef.current(true)
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [aiEnabled, aiGrammarEnabled, aiModelReady, document.id, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
   useEffect(() => {
     const replaceFromWordReference = (event: MouseEvent) => {

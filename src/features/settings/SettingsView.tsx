@@ -9,6 +9,8 @@ interface SettingsViewProps {
   settings: AppSettings
   dataLocation: string
   security: SecurityStatus | null
+  wordAiModelReady: boolean
+  onModelsUpdated: () => void
   onSettingsChange: (settings: AppSettings) => void
   onSecurityChange: (security: SecurityStatus) => void
   onToast: (message: string, type?: 'success' | 'error') => void
@@ -21,7 +23,7 @@ const MODEL_INFORMATION_URL = 'https://huggingface.co/Qwen/Qwen3-4B-GGUF'
 const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
 const needsModelUpgrade = (path: string) => path.trim().toLocaleLowerCase().endsWith(LEGACY_DEFAULT_AI_MODEL)
 
-export function SettingsView({ settings, dataLocation, security, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
+export function SettingsView({ settings, dataLocation, security, wordAiModelReady, onModelsUpdated, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
   const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
@@ -29,6 +31,8 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
   const [aiInfoOpen, setAiInfoOpen] = useState(false)
   const modelUpgradeNeeded = needsModelUpgrade(settings.aiModelPath)
+  const modelPackageUpdateNeeded = Boolean(settings.aiModelPath) && !wordAiModelReady
+  const modelUpdateNeeded = modelUpgradeNeeded || modelPackageUpdateNeeded
 
   const update = async (partial: Partial<AppSettings>) => {
     const next = { ...settings, ...partial }
@@ -90,6 +94,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     try {
       const aiModelPath = await api.downloadDefaultAiModel()
       await update({ aiModelPath })
+      onModelsUpdated()
     } catch (error) {
       onToast(error instanceof Error ? error.message : 'The local AI model could not be downloaded.', 'error')
     } finally {
@@ -138,12 +143,12 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
       <SettingRow title="AI spelling & grammar" detail="Passively check basics while editing, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiGrammar} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
-      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Upgrade SoFlo's writing and word-reference model package." : settings.aiModelPath || "Download SoFlo's 4B writing model and fast word-reference model now, or let the first AI action download them."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpgradeNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpgradeNeeded ? 'Upgrade models' : settings.aiModelPath ? 'Change model' : 'Download models'}</button></SettingRow>
-      {settings.aiEnabled && (!settings.aiModelPath || modelUpgradeNeeded) && <p className="ai-model-note">The writing model and smaller word-reference model are not on this PC yet. Download them here, or wait until the first AI action.</p>}
+      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's writing and word-reference model package." : modelPackageUpdateNeeded ? "An AI model update is available: add SoFlo's smaller fast word-reference model." : settings.aiModelPath || "Download SoFlo's 4B writing model and fast word-reference model now, or let the first AI action download them."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpdateNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : settings.aiModelPath ? 'Change model' : 'Download models'}</button></SettingRow>
+      {settings.aiEnabled && (!settings.aiModelPath || modelUpdateNeeded) && <p className="ai-model-note">{modelPackageUpdateNeeded && !modelUpgradeNeeded ? 'A smaller fast word-reference model is ready to add to your current AI setup.' : 'The writing model and smaller word-reference model are not on this PC yet. Download them here, or wait until the first AI action.'}</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.73" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.74" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
