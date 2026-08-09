@@ -1,0 +1,62 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Generated desktop artifacts and local study data
+src-tauri/target/
+src-tauri/gen/
+tmp/
+*.sqlite3
+*.db
+*.gguf
+*.download
+
+# Never publish credentials or machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust and Tauri tooling
+Cargo.lock.orig
+**/*.rs.bk
+*.pdb
+*.dSYM/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Local package-manager and cache files
+.npm/
+.pnpm-store/
+.yarn/
+.parcel-cache/
+.vite/
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

@@ -1,0 +1,88 @@
+mod commands;
+mod database;
+mod models;
+
+use std::path::PathBuf;
+
+use database::Database;
+use tauri::Manager;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_directory: PathBuf = app
+                .path()
+                .app_data_dir()
+                .expect("could not determine app-data directory");
+            let database = Database::new(data_directory.join("soflo.sqlite3"))
+                .expect("could not initialize SoFlo database");
+            app.manage(database);
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::start_window_dragging,
+            commands::minimize_window,
+            commands::toggle_maximize_window,
+            commands::close_window,
+            commands::force_close_window,
+            commands::import_pdf_text,
+            commands::import_word_text,
+            commands::refine_document_text,
+            commands::generate_flashcards_text,
+            commands::download_default_ai_model,
+            commands::bootstrap,
+            commands::list_semesters,
+            commands::create_semester,
+            commands::update_semester,
+            commands::list_classes,
+            commands::create_class,
+            commands::update_class,
+            commands::list_documents,
+            commands::list_recent_documents,
+            commands::get_document,
+            commands::get_syllabus,
+            commands::create_document,
+            commands::save_document,
+            commands::set_document_syllabus,
+            commands::set_document_deleted,
+            commands::duplicate_document,
+            commands::rename_documents,
+            commands::set_document_pdf_link,
+            commands::list_document_folders,
+            commands::group_documents,
+            commands::remove_document_from_folder,
+            commands::move_document,
+            commands::list_flashcard_sets,
+            commands::create_flashcard_set,
+            commands::get_flashcard_set,
+            commands::save_flashcard_set,
+            commands::set_flashcard_set_deleted,
+            commands::duplicate_flashcard_set,
+            commands::save_flashcard,
+            commands::delete_flashcard,
+            commands::list_all_cards,
+            commands::record_card_response,
+            commands::save_test_attempt,
+            commands::get_settings_command,
+            commands::update_settings,
+            commands::empty_trash,
+            commands::get_security_status,
+            commands::unlock_library,
+            commands::update_library_security,
+            commands::sync_encrypted_library,
+            commands::search_library,
+            commands::backup_library,
+            commands::restore_library,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

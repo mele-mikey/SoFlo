@@ -1,0 +1,383 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Semester {
+    pub id: String,
+    pub name: String,
+    pub term: String,
+    pub year: i32,
+    pub position: i32,
+    pub archived_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseClass {
+    pub id: String,
+    pub semester_id: String,
+    pub name: String,
+    pub course_code: String,
+    pub professor: Option<String>,
+    pub location: Option<String>,
+    pub schedule: Option<String>,
+    pub icon: String,
+    pub accent_color: String,
+    pub position: i32,
+    pub archived_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSummary {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+    pub excerpt: String,
+    pub is_favorite: bool,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub is_syllabus: bool,
+    pub folder_id: Option<String>,
+    pub linked_pdf_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentDetail {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+    pub content: String,
+    pub content_plain: String,
+    pub is_favorite: bool,
+    pub revision: i32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub is_syllabus: bool,
+    pub folder_id: Option<String>,
+    pub linked_pdf_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentFolder {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashcardSetSummary {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub card_count: i32,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Flashcard {
+    pub id: String,
+    pub set_id: String,
+    pub front: String,
+    pub back: String,
+    pub notes: Option<String>,
+    pub image_path: Option<String>,
+    pub position: i32,
+    pub is_starred: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CardProgress {
+    pub card_id: String,
+    pub mastery: String,
+    pub correct_count: i32,
+    pub incorrect_count: i32,
+    pub consecutive_correct: i32,
+    pub last_seen_at: Option<String>,
+    pub due_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashcardSetDetail {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub cards: Vec<Flashcard>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default)]
+    pub user_name: String,
+    pub spellcheck: bool,
+    pub reduce_motion: bool,
+    pub editor_font_size: i32,
+    #[serde(default)]
+    pub editor_defaults_version: u8,
+    #[serde(default = "default_editor_canvas")]
+    pub editor_canvas: String,
+    #[serde(default = "default_theme_color")]
+    pub theme_color: String,
+    #[serde(default)]
+    pub onboarding_completed: bool,
+    #[serde(default)]
+    pub hide_overview_banner: bool,
+    #[serde(default = "default_ai_enabled")]
+    pub ai_enabled: bool,
+    #[serde(default)]
+    pub ai_model_path: String,
+    pub default_question_types: Vec<String>,
+}
+
+fn default_editor_canvas() -> String {
+    "paper".to_string()
+}
+fn default_theme_color() -> String {
+    "purple".to_string()
+}
+fn default_ai_enabled() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            user_name: String::new(),
+            spellcheck: true,
+            reduce_motion: false,
+            editor_font_size: 11,
+            editor_defaults_version: 1,
+            editor_canvas: default_editor_canvas(),
+            theme_color: default_theme_color(),
+            onboarding_completed: false,
+            hide_overview_banner: false,
+            ai_enabled: true,
+            ai_model_path: String::new(),
+            default_question_types: vec![
+                "multipleChoice".into(),
+                "written".into(),
+                "trueFalse".into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialMetadata {
+    pub salt: String,
+    #[serde(default)]
+    pub pin_digits: Option<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityMetadata {
+    pub version: u8,
+    pub pin: Option<CredentialMetadata>,
+    pub password: Option<CredentialMetadata>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityStatus {
+    pub configured: bool,
+    pub locked: bool,
+    pub has_pin: bool,
+    pub has_password: bool,
+    pub pin_digits: Option<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapData {
+    pub semesters: Vec<Semester>,
+    pub classes: Vec<CourseClass>,
+    pub settings: AppSettings,
+    pub data_location: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSemesterInput {
+    pub name: String,
+    pub term: String,
+    pub year: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSemesterInput {
+    pub id: String,
+    pub name: String,
+    pub term: String,
+    pub year: i32,
+    pub archived: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateClassInput {
+    pub semester_id: String,
+    pub name: String,
+    pub course_code: String,
+    pub professor: Option<String>,
+    pub location: Option<String>,
+    pub schedule: Option<String>,
+    pub icon: Option<String>,
+    pub accent_color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateClassInput {
+    pub id: String,
+    pub semester_id: String,
+    pub name: String,
+    pub course_code: String,
+    pub professor: Option<String>,
+    pub location: Option<String>,
+    pub schedule: Option<String>,
+    pub icon: String,
+    pub accent_color: String,
+    pub archived: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDocumentInput {
+    pub class_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveDocumentInput {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub content_plain: String,
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameDocumentEntry {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameDocumentsInput {
+    pub documents: Vec<RenameDocumentEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFlashcardSetInput {
+    pub class_id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFlashcardSetInput {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFlashcardInput {
+    pub id: Option<String>,
+    pub set_id: String,
+    pub front: String,
+    pub back: String,
+    pub notes: Option<String>,
+    pub image_path: Option<String>,
+    pub position: i32,
+    pub is_starred: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSettingsInput {
+    pub settings: AppSettings,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockLibraryInput {
+    pub pin: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibrarySecurityInput {
+    pub current_pin: Option<String>,
+    pub current_password: Option<String>,
+    pub new_pin: Option<String>,
+    pub new_password: Option<String>,
+    pub remove_pin: bool,
+    pub remove_password: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordCardResponseInput {
+    pub card_id: String,
+    pub is_correct: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTestAttemptInput {
+    pub set_id: String,
+    pub score: f64,
+    pub correct_count: i32,
+    pub question_count: i32,
+    pub answers_json: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TestAttemptSummary {
+    pub id: String,
+    pub set_id: String,
+    pub score: f64,
+    pub correct_count: i32,
+    pub question_count: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub kind: String,
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub subtitle: String,
+}

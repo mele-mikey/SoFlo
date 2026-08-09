@@ -1,0 +1,386 @@
+import { Color } from '@tiptap/extension-color'
+import Highlight from '@tiptap/extension-highlight'
+import Image from '@tiptap/extension-image'
+import Link from '@tiptap/extension-link'
+import Placeholder from '@tiptap/extension-placeholder'
+import Subscript from '@tiptap/extension-subscript'
+import Superscript from '@tiptap/extension-superscript'
+import { Table } from '@tiptap/extension-table'
+import TableCell from '@tiptap/extension-table-cell'
+import TableHeader from '@tiptap/extension-table-header'
+import TableRow from '@tiptap/extension-table-row'
+import TaskItem from '@tiptap/extension-task-item'
+import TaskList from '@tiptap/extension-task-list'
+import TextAlign from '@tiptap/extension-text-align'
+import { TextStyle } from '@tiptap/extension-text-style'
+import Typography from '@tiptap/extension-typography'
+import Underline from '@tiptap/extension-underline'
+import { Extension, type Editor } from '@tiptap/core'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { EditorContent, useEditor } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Palette, Pilcrow, Quote, Redo2, RemoveFormatting, Search, Settings2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, Unlink, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type { DocumentDetail } from '../../lib/types'
+import { open } from '@tauri-apps/plugin-dialog'
+import { api } from '../../lib/api'
+import { importPdfAsEditableNote } from './pdfImport'
+
+interface DocumentEditorProps {
+  document: DocumentDetail
+  spellcheck: boolean
+  fontSize: number
+  readingSurface: 'paper' | 'midnight' | 'slate' | 'sepia'
+  saveState: 'saved' | 'saving' | 'error'
+  onChange: (content: string, contentPlain: string, title: string) => void
+  onBack: () => void
+  onDelete: () => void
+  onDuplicate: () => void
+}
+
+const accentColors = ['#E7E9F0', '#F08B8B', '#F1BD6A', '#86C59A', '#7EB7ED', '#B79CF4']
+const highlights = ['#FFF0A3', '#F5B7D4', '#BFE9DA', '#C7DDF9', '#E6D4FF']
+const FontSize = Extension.create({
+  name: 'fontSize',
+  addGlobalAttributes() {
+    return [{ types: ['textStyle'], attributes: { fontSize: { default: null, parseHTML: (element: HTMLElement) => element.style.fontSize || null, renderHTML: (attributes: { fontSize?: string | null }) => attributes.fontSize ? { style: `font-size: ${attributes.fontSize}` } : {} } } }]
+  },
+})
+const OrderedListStyle = Extension.create({
+  name: 'orderedListStyle',
+  addGlobalAttributes() {
+    return [{ types: ['orderedList'], attributes: { listStyle: { default: null, parseHTML: (element: HTMLElement) => element.style.listStyleType || null, renderHTML: (attributes: { listStyle?: string | null }) => attributes.listStyle ? { style: `list-style-type: ${attributes.listStyle}` } : {} } } }]
+  },
+})
+function changeSelectedBlockIndent(editor: Editor, amount: 1 | -1) {
+  if (editor.isActive('table')) return false
+  const { from, to } = editor.state.selection
+  let transaction = editor.state.tr
+  let changed = false
+  editor.state.doc.nodesBetween(from, to, (node, position) => {
+    if (node.type.name !== 'paragraph' && node.type.name !== 'heading') return
+    const current = typeof node.attrs.indent === 'number' ? node.attrs.indent : 0
+    const next = Math.max(0, Math.min(8, current + amount))
+    if (next !== current) {
+      transaction = transaction.setNodeMarkup(position, undefined, { ...node.attrs, indent: next })
+      changed = true
+    }
+    return false
+  })
+  if (!changed) return false
+  editor.view.dispatch(transaction.scrollIntoView())
+  return true
+}
+function changeSelectedIndent(editor: Editor, amount: 1 | -1) {
+  if (editor.isActive('listItem')) return amount > 0 ? editor.commands.sinkListItem('listItem') : editor.commands.liftListItem('listItem')
+  return changeSelectedBlockIndent(editor, amount)
+}
+const PaperIndent = Extension.create({
+  name: 'paperIndent',
+  addGlobalAttributes() {
+    return [{ types: ['paragraph', 'heading'], attributes: { indent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.indent ?? '0', 10) || 0, renderHTML: (attributes: { indent?: number }) => attributes.indent ? { 'data-indent': attributes.indent, style: `margin-left: ${attributes.indent * .5}in` } : {} } } }]
+  },
+  addKeyboardShortcuts() {
+    return {
+      Tab: () => changeSelectedIndent(this.editor, 1),
+      'Shift-Tab': () => changeSelectedIndent(this.editor, -1),
+    }
+  },
+})
+const paperPaginationKey = new PluginKey<DecorationSet>('paperPagination')
+const paperGap = 34
+
+function derivePaperTitle(editor: Editor) {
+  let firstText = ''
+  let heading = ''
+  editor.state.doc.forEach((node) => {
+    const text = node.textContent.trim().replace(/\s+/g, ' ')
+    if (!text) return
+    if (!firstText) firstText = text
+    if (!heading && node.type.name === 'heading') heading = text
+  })
+  return (heading || firstText || 'Untitled paper').slice(0, 120)
+}
+
+function measurePaperBreaks(view: { state: { doc: { forEach: (callback: (node: unknown, offset: number) => void) => void } }; dom: HTMLElement; nodeDOM: (position: number) => Node | null | undefined }) {
+  const paper = view.dom.closest<HTMLElement>('.document-page')
+  if (!paper) return DecorationSet.empty
+  const paperStyle = window.getComputedStyle(paper)
+  const pageHeight = paper.clientWidth * 11 / 8.5
+  const topInset = Number.parseFloat(paperStyle.paddingTop) || 0
+  const bottomInset = Number.parseFloat(paperStyle.paddingBottom) || 0
+  const title = paper.querySelector<HTMLElement>('.document-title')
+  const titleStyle = title ? window.getComputedStyle(title) : null
+  const titleHeight = title ? title.getBoundingClientRect().height + (Number.parseFloat(titleStyle?.marginBottom ?? '0') || 0) : 0
+  const firstCapacity = Math.max(120, pageHeight - topInset - bottomInset - titleHeight)
+  const laterCapacity = Math.max(120, pageHeight - topInset - bottomInset)
+  let used = 0
+  let capacity = firstCapacity
+  const breaks: Decoration[] = []
+  view.state.doc.forEach((_node, offset) => {
+    const nodeDom = view.nodeDOM(offset)
+    if (!(nodeDom instanceof HTMLElement)) return
+    const style = window.getComputedStyle(nodeDom)
+    const blockHeight = nodeDom.getBoundingClientRect().height + (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0)
+    if (used > 0 && used + blockHeight > capacity) {
+      const remaining = Math.max(0, capacity - used)
+      const breakHeight = remaining + paperGap + topInset
+      breaks.push(Decoration.widget(offset, () => {
+        const element = document.createElement('span')
+        element.className = 'paper-page-break'
+        element.style.height = `${breakHeight}px`
+        element.style.setProperty('--paper-break-bottom', `${remaining}px`)
+        element.style.setProperty('--paper-break-gap', `${paperGap}px`)
+        return element
+      }, { key: `paper-break-${offset}-${Math.round(breakHeight)}`, side: -1, ignoreSelection: true }))
+      used = 0
+      capacity = laterCapacity
+    }
+    used += blockHeight
+  })
+  const tail = Math.max(0, capacity - used + bottomInset)
+  const documentSize = (view.state.doc as unknown as { content: { size: number } }).content.size
+  if (tail > 0) breaks.push(Decoration.widget(documentSize, () => {
+    const element = document.createElement('span')
+    element.className = 'paper-page-tail'
+    element.style.height = `${tail}px`
+    return element
+  }, { key: `paper-tail-${Math.round(tail)}`, side: 1, ignoreSelection: true }))
+  return DecorationSet.create(view.state.doc as never, breaks)
+}
+
+const PaperPagination = Extension.create({
+  name: 'paperPagination',
+  addProseMirrorPlugins() {
+    return [new Plugin<DecorationSet>({
+      key: paperPaginationKey,
+      state: {
+        init: () => DecorationSet.empty,
+        apply: (transaction, oldDecorations) => (transaction.getMeta(paperPaginationKey) as DecorationSet | undefined) ?? oldDecorations.map(transaction.mapping, transaction.doc),
+      },
+      props: { decorations: (state) => paperPaginationKey.getState(state) },
+      view: (view) => {
+        let animationFrame: number | null = null
+        const update = () => {
+          if (animationFrame !== null) window.cancelAnimationFrame(animationFrame)
+          animationFrame = window.requestAnimationFrame(() => {
+            animationFrame = null
+            const next = measurePaperBreaks(view)
+            const current = paperPaginationKey.getState(view.state) ?? DecorationSet.empty
+            const currentSignature = current.find().map((decoration) => `${decoration.from}:${decoration.spec.key}`).join('|')
+            const nextSignature = next.find().map((decoration) => `${decoration.from}:${decoration.spec.key}`).join('|')
+            if (currentSignature !== nextSignature) view.dispatch(view.state.tr.setMeta(paperPaginationKey, next))
+          })
+        }
+        const observer = new ResizeObserver(update)
+        observer.observe(view.dom)
+        update()
+        return { update, destroy: () => { observer.disconnect(); if (animationFrame !== null) window.cancelAnimationFrame(animationFrame) } }
+      },
+    })]
+  },
+})
+
+export function DocumentEditor({ document, spellcheck, fontSize, readingSurface, saveState, onChange, onBack, onDelete, onDuplicate }: DocumentEditorProps) {
+  const [findOpen, setFindOpen] = useState(false)
+  const [findValue, setFindValue] = useState('')
+  const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
+  const [pageMargin, setPageMargin] = useState<'normal' | 'narrow' | 'wide'>('normal')
+  const [lineSpacing, setLineSpacing] = useState<'single' | 'docs' | 'one-half' | 'double'>('docs')
+  const [pdfMessage, setPdfMessage] = useState<string | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const content = useMemo(() => safeContent(document.content), [document.content])
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({ codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
+      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperPagination, Color, Highlight.configure({ multicolor: true }),
+      TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
+      Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
+      Image.configure({ inline: false, allowBase64: false }), Table.configure({ resizable: true }), TableRow, TableHeader, TableCell,
+      Superscript, Subscript, Placeholder.configure({ placeholder: 'Start writing…' }), Typography,
+    ],
+    content,
+    editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` } },
+    onUpdate: ({ editor: nextEditor }) => onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), derivePaperTitle(nextEditor)),
+  })
+  const currentId = useRef(document.id)
+  useEffect(() => {
+    if (!editor || currentId.current === document.id) return
+    currentId.current = document.id
+    editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
+  }, [document.id, document.content, editor])
+  useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` } } }) }, [editor, spellcheck, fontSize])
+  useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin])
+  useEffect(() => {
+    const interceptFind = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        event.stopPropagation()
+        window.dispatchEvent(new Event('soflo:open-find'))
+      }
+    }
+    window.addEventListener('keydown', interceptFind, true)
+    return () => window.removeEventListener('keydown', interceptFind, true)
+  })
+  useEffect(() => {
+    if (findOpen) window.setTimeout(() => globalThis.document.getElementById('find-input')?.focus(), 20)
+  }, [findOpen])
+  useEffect(() => {
+    if (!contextMenu) return
+    const dismiss = () => setContextMenu(null)
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss() }
+    window.addEventListener('click', dismiss)
+    window.addEventListener('resize', dismiss)
+    window.addEventListener('scroll', dismiss, true)
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('click', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('scroll', dismiss, true); window.removeEventListener('keydown', onKeyDown) }
+  }, [contextMenu])
+
+  if (!editor) return <div className="editor-loading" />
+  const runFind = (value: string) => { setFindValue(value); const finder = (window as Window & { find?: (query: string, caseSensitive?: boolean, backwards?: boolean, wrapAround?: boolean) => boolean }).find; if (value && finder) finder(value, false, false, true) }
+  const exportPdf = () => {
+    setPdfMessage('Opening your PDF export dialog…')
+    try { globalThis.print() } catch { setPdfMessage('SoFlo could not open the PDF export dialog.') }
+  }
+  const importPdf = async () => {
+    const source = await open({ title: 'Import PDF text into this paper', multiple: false, directory: false, filters: [{ name: 'PDF document', extensions: ['pdf'] }] })
+    if (!source || Array.isArray(source)) return
+    setPdfMessage('Importing editable text…')
+    try {
+      const extracted = await api.importPdfText(source)
+      const imported = importPdfAsEditableNote(extracted, source)
+      editor.chain().focus().setTextSelection(editor.state.doc.content.size).insertContent(imported.document.content).run()
+      setPdfMessage('Structured PDF content added to the end of this paper.')
+    } catch (error) { setPdfMessage(error instanceof Error ? error.message : 'SoFlo could not import that PDF.') }
+  }
+  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 222), y: Math.min(event.clientY, window.innerHeight - 270) })
+  }
+  const runContextAction = async (action: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll') => {
+    setContextMenu(null)
+    if (action === 'undo') { editor.chain().focus().undo().run(); return }
+    if (action === 'redo') { editor.chain().focus().redo().run(); return }
+    if (action === 'selectAll') { editor.chain().focus().selectAll().run(); return }
+    editor.commands.focus()
+    if (action === 'paste') {
+      if (globalThis.document.execCommand('paste')) return
+      try { const plain = await navigator.clipboard.readText(); if (plain) editor.commands.insertContent(plain) } catch { /* Clipboard permission is controlled by the operating system. */ }
+      return
+    }
+    if (globalThis.document.execCommand(action)) return
+    const { from, to } = editor.state.selection
+    const text = editor.state.doc.textBetween(from, to, '\n')
+    try { await navigator.clipboard.writeText(text); if (action === 'cut') editor.commands.deleteSelection() } catch { /* The browser command is the best available fallback. */ }
+  }
+  return <main className="editor-view">
+    <header className="editor-topbar">
+      <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />Papers</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span></div>
+      <div className={`save-indicator ${saveState}`}><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</div>
+      <div className="editor-actions"><button className="editor-action" onClick={onDuplicate}>Duplicate</button><button className="editor-action danger" onClick={onDelete}>Move to trash</button></div>
+    </header>
+    <div className="editor-toolbar-wrap">
+      <EditorToolbar editor={editor} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} />
+    </div>
+    {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
+    <section className="editor-page-wrap"><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing}`}><EditorContent editor={editor} onContextMenu={openContextMenu} /></article></section>
+    {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
+    <button className="page-settings-button" aria-label="Page settings" title="Page settings" onClick={() => setPageSettingsOpen((open) => !open)}><Settings2 size={20} /></button>
+    {pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p><div className="page-settings-actions"><button className="button button-primary button-small" onClick={() => void exportPdf()}><FileDown size={15} /> Export PDF</button><button className="button button-quiet button-small" onClick={() => void importPdf()}><Import size={15} /> Import PDF text</button></div>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}<p className="page-settings-note">Export opens the native Print dialog. Choose <strong>Microsoft Print to PDF</strong> to save a properly sized Letter PDF.</p></div></aside>}
+  </main>
+}
+
+function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { label: string; shortcut: string; disabled?: boolean; onClick: () => void }) {
+  return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
+}
+
+function EditorToolbar({ editor, onFind }: { editor: NonNullable<ReturnType<typeof useEditor>>; onFind: () => void }) {
+  const addLink = () => {
+    const previousUrl = editor.getAttributes('link').href as string | undefined
+    const value = window.prompt('Paste a link', previousUrl ?? '')
+    if (value === null) return
+    if (!value.trim()) { editor.chain().focus().unsetLink().run(); return }
+    editor.chain().focus().extendMarkRange('link').setLink({ href: value.trim() }).run()
+  }
+  const addImage = () => {
+    const value = window.prompt('Paste an image URL')
+    if (value?.trim()) editor.chain().focus().setImage({ src: value.trim() }).run()
+  }
+  const pasteWithoutFormatting = async () => {
+    try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
+  }
+  return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
+    <ToolbarMenu label="Paragraph"><button onClick={() => editor.chain().focus().setParagraph().run()}><Pilcrow size={15} />Paragraph</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}>Heading 1</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}>Heading 2</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}>Heading 3</button></ToolbarMenu>
+    <Divider />
+    <ToolButton label="Bold" active={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}><Bold size={16} /></ToolButton>
+    <ToolButton label="Italic" active={editor.isActive('italic')} onClick={() => editor.chain().focus().toggleItalic().run()}><Italic size={16} /></ToolButton>
+    <ToolButton label="Underline" active={editor.isActive('underline')} onClick={() => editor.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16} /></ToolButton>
+    <ToolButton label="Strikethrough" active={editor.isActive('strike')} onClick={() => editor.chain().focus().toggleStrike().run()}><Strikethrough size={16} /></ToolButton>
+    <ToolbarMenu label="Text size"><button onClick={() => editor.chain().focus().setMark('textStyle', { fontSize: null }).run()}>Default (11 pt)</button>{[9, 10, 11, 12, 14, 16, 18].map((size) => <button onClick={() => editor.chain().focus().setMark('textStyle', { fontSize: `${size}pt` }).run()} key={size}>{size} pt</button>)}</ToolbarMenu>
+    <ToolbarMenu label="Text color" icon={<Palette size={16} />}>{accentColors.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().setColor(color).run()} key={color}><i style={{ background: color }} />{color === '#E7E9F0' ? 'Default' : color}</button>)}<button onClick={() => editor.chain().focus().unsetColor().run()}>Reset color</button></ToolbarMenu>
+    <ToolbarMenu label="Highlight" icon={<Highlighter size={16} />}>{highlights.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().toggleHighlight({ color }).run()} key={color}><i style={{ background: color }} />{color}</button>)}<button onClick={() => editor.chain().focus().unsetHighlight().run()}>Clear highlight</button></ToolbarMenu>
+    <Divider />
+    <ToolButton label="Bullet list" active={editor.isActive('bulletList')} onClick={() => editor.chain().focus().toggleBulletList().run()}><List size={17} /></ToolButton>
+    <ToolButton label="Numbered list" active={editor.isActive('orderedList')} onClick={() => editor.chain().focus().toggleOrderedList().updateAttributes('orderedList', { listStyle: 'decimal' }).run()}><ListOrdered size={17} /></ToolButton>
+    <ToolButton label="Alphabetical list" active={editor.isActive('orderedList', { listStyle: 'upper-alpha' })} onClick={() => editor.chain().focus().toggleOrderedList().updateAttributes('orderedList', { listStyle: 'upper-alpha' }).run()}>A.</ToolButton>
+    <ToolButton label="Checklist" active={editor.isActive('taskList')} onClick={() => editor.chain().focus().toggleTaskList().run()}><ListTodo size={17} /></ToolButton>
+    <ToolButton label="Indent selected lines (Tab)" onClick={() => { editor.commands.focus(); changeSelectedIndent(editor, 1) }}><IndentIncrease size={17} /></ToolButton>
+    <ToolButton label="Outdent selected lines (Shift+Tab)" onClick={() => { editor.commands.focus(); changeSelectedIndent(editor, -1) }}><IndentDecrease size={17} /></ToolButton>
+    <Divider />
+    <ToolButton label="Align left" active={editor.isActive({ textAlign: 'left' })} onClick={() => editor.chain().focus().setTextAlign('left').run()}><AlignLeft size={16} /></ToolButton>
+    <ToolButton label="Align center" active={editor.isActive({ textAlign: 'center' })} onClick={() => editor.chain().focus().setTextAlign('center').run()}><AlignCenter size={16} /></ToolButton>
+    <ToolButton label="Align right" active={editor.isActive({ textAlign: 'right' })} onClick={() => editor.chain().focus().setTextAlign('right').run()}><AlignRight size={16} /></ToolButton>
+    <Divider />
+    <ToolButton label="Quote" active={editor.isActive('blockquote')} onClick={() => editor.chain().focus().toggleBlockquote().run()}><Quote size={16} /></ToolButton>
+    <ToolButton label="Code block" active={editor.isActive('codeBlock')} onClick={() => editor.chain().focus().toggleCodeBlock().run()}><Code2 size={16} /></ToolButton>
+    <ToolButton label="Inline code" active={editor.isActive('code')} onClick={() => editor.chain().focus().toggleCode().run()}><Code2 size={14} /></ToolButton>
+    <ToolButton label="Superscript" active={editor.isActive('superscript')} onClick={() => editor.chain().focus().toggleSuperscript().run()}><SuperscriptIcon size={16} /></ToolButton>
+    <ToolButton label="Subscript" active={editor.isActive('subscript')} onClick={() => editor.chain().focus().toggleSubscript().run()}><SubscriptIcon size={16} /></ToolButton>
+    <Divider />
+    <ToolButton label="Add link" active={editor.isActive('link')} onClick={addLink}><Link2 size={16} /></ToolButton>
+    <ToolButton label="Remove link" onClick={() => editor.chain().focus().unsetLink().run()}><Unlink size={16} /></ToolButton>
+    <ToolButton label="Add image" onClick={addImage}><ImagePlus size={16} /></ToolButton>
+    <ToolButton label="Insert table" onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}><Table2 size={16} /></ToolButton>
+    <ToolButton label="Horizontal rule" onClick={() => editor.chain().focus().setHorizontalRule().run()}><Columns3 size={16} /></ToolButton>
+    <Divider />
+    <ToolButton label="Undo" onClick={() => editor.chain().focus().undo().run()}><Undo2 size={16} /></ToolButton>
+    <ToolButton label="Redo" onClick={() => editor.chain().focus().redo().run()}><Redo2 size={16} /></ToolButton>
+    <ToolButton label="Clear formatting" onClick={() => editor.chain().focus().unsetAllMarks().clearNodes().run()}><RemoveFormatting size={16} /></ToolButton>
+    <ToolButton label="Paste without formatting" onClick={() => void pasteWithoutFormatting()}><ClipboardPaste size={16} /></ToolButton>
+    <ToolButton label="Find" onClick={onFind}><Search size={16} /></ToolButton>
+  </div>
+}
+
+function ToolButton({ label, active = false, onClick, children }: { label: string; active?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" className={active ? 'toolbar-button active' : 'toolbar-button'} title={label} aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={onClick}>{children}</button>
+}
+
+function ToolbarMenu({ label, icon, children }: { label: string; icon?: React.ReactNode; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const anchor = useRef<HTMLButtonElement>(null)
+  const popover = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!open || !anchor.current) return
+    const place = () => { const bounds = anchor.current?.getBoundingClientRect(); if (bounds) setPosition({ top: bounds.bottom + 8, left: Math.min(bounds.left, window.innerWidth - 170) }) }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true) }
+  }, [open])
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: MouseEvent) => { const target = event.target as Node; if (!anchor.current?.contains(target) && !popover.current?.contains(target)) setOpen(false) }
+    globalThis.document.addEventListener('mousedown', dismiss)
+    return () => globalThis.document.removeEventListener('mousedown', dismiss)
+  }, [open])
+  return <div className="toolbar-menu"><button ref={anchor} className="toolbar-select" aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}>{icon}<span>{label}</span><ChevronDown size={13} /></button>{open && position && createPortal(<div ref={popover} className="toolbar-popover toolbar-popover-floating" style={position} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}>{children}</div>, globalThis.document.body)}</div>
+}
+
+function Divider() { return <span className="toolbar-divider" /> }
+
+function safeContent(content: string): object {
+  try { return JSON.parse(content) as object } catch { return { type: 'doc', content: [{ type: 'paragraph' }] } }
+}

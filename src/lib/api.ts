@@ -1,0 +1,62 @@
+import { invoke } from '@tauri-apps/api/core'
+import type {
+  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary,
+  Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, TestAttemptSummary,
+} from './types'
+
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'create_class', 'update_class', 'create_document', 'save_document', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'save_test_attempt', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
+  const result = await invoke<T>(command, arguments_)
+  if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
+  return result
+}
+
+export const api = {
+  bootstrap: () => call<BootstrapData>('bootstrap'),
+  listSemesters: (includeArchived = false) => call<Semester[]>('list_semesters', { includeArchived }),
+  createSemester: (input: { name: string; term: string; year: number }) => call<Semester>('create_semester', { input }),
+  updateSemester: (input: { id: string; name: string; term: string; year: number; archived: boolean }) => call<Semester>('update_semester', { input }),
+  listClasses: (includeArchived = false) => call<CourseClass[]>('list_classes', { includeArchived }),
+  createClass: (input: { semesterId: string; name: string; courseCode: string; professor?: string; location?: string; schedule?: string; icon?: string; accentColor?: string }) => call<CourseClass>('create_class', { input }),
+  updateClass: (input: { id: string; semesterId: string; name: string; courseCode: string; professor?: string | null; location?: string | null; schedule?: string | null; icon: string; accentColor: string; archived: boolean }) => call<CourseClass>('update_class', { input }),
+  listDocuments: (classId: string, includeDeleted = false) => call<DocumentSummary[]>('list_documents', { classId, includeDeleted }),
+  listRecentDocuments: () => call<DocumentSummary[]>('list_recent_documents'),
+  getDocument: (id: string) => call<DocumentDetail>('get_document', { id }),
+  getSyllabus: (classId: string) => call<DocumentDetail | null>('get_syllabus', { classId }),
+  createDocument: (input: { classId: string; title: string }) => call<DocumentDetail>('create_document', { input }),
+  saveDocument: (input: Pick<DocumentDetail, 'id' | 'title' | 'content' | 'contentPlain' | 'isFavorite'>) => call<DocumentDetail>('save_document', { input }),
+  setDocumentSyllabus: (id: string) => call<DocumentDetail>('set_document_syllabus', { id }),
+  setDocumentDeleted: (id: string, deleted: boolean) => call<void>('set_document_deleted', { id, deleted }),
+  duplicateDocument: (id: string, title?: string) => call<DocumentDetail>('duplicate_document', { id, title }),
+  renameDocuments: (documents: { id: string; title: string }[]) => call<void>('rename_documents', { input: { documents } }),
+  setDocumentPdfLink: (id: string, path: string | null) => call<void>('set_document_pdf_link', { id, path }),
+  listDocumentFolders: (classId: string) => call<DocumentFolder[]>('list_document_folders', { classId }),
+  groupDocuments: (id: string, targetId: string) => call<void>('group_documents', { id, targetId }),
+  removeDocumentFromFolder: (id: string) => call<void>('remove_document_from_folder', { id }),
+  moveDocument: (id: string, classId: string) => call<void>('move_document', { id, classId }),
+  listSets: (classId: string, includeDeleted = false) => call<FlashcardSetSummary[]>('list_flashcard_sets', { classId, includeDeleted }),
+  createSet: (input: { classId: string; title: string; description?: string }) => call<FlashcardSetDetail>('create_flashcard_set', { input }),
+  getSet: (id: string) => call<FlashcardSetDetail>('get_flashcard_set', { id }),
+  saveSet: (input: { id: string; title: string; description?: string | null }) => call<FlashcardSetDetail>('save_flashcard_set', { input }),
+  setSetDeleted: (id: string, deleted: boolean) => call<void>('set_flashcard_set_deleted', { id, deleted }),
+  duplicateSet: (id: string, title: string) => call<FlashcardSetDetail>('duplicate_flashcard_set', { id, title }),
+  saveCard: (input: { id?: string; setId: string; front: string; back: string; notes?: string | null; imagePath?: string | null; position: number; isStarred: boolean }) => call<Flashcard>('save_flashcard', { input }),
+  deleteCard: (id: string) => call<void>('delete_flashcard', { id }),
+  listAllCards: (classId: string) => call<Flashcard[]>('list_all_cards', { classId }),
+  recordCardResponse: (cardId: string, isCorrect: boolean) => call<CardProgress>('record_card_response', { input: { cardId, isCorrect } }),
+  saveTestAttempt: (input: { setId: string; score: number; correctCount: number; questionCount: number; answersJson: string }) => call<TestAttemptSummary>('save_test_attempt', { input }),
+  updateSettings: (settings: AppSettings) => call<AppSettings>('update_settings', { input: { settings } }),
+  emptyTrash: () => call<void>('empty_trash'),
+  getSecurityStatus: () => call<SecurityStatus>('get_security_status'),
+  unlockLibrary: (input: { pin?: string; password?: string }) => call<SecurityStatus>('unlock_library', { input }),
+  updateLibrarySecurity: (input: { currentPin?: string; currentPassword?: string; newPin?: string; newPassword?: string; removePin: boolean; removePassword: boolean }) => call<SecurityStatus>('update_library_security', { input }),
+  syncEncryptedLibrary: () => call<void>('sync_encrypted_library'),
+  search: (query: string) => call<SearchResult[]>('search_library', { query }),
+  backupLibrary: (destination: string) => call<void>('backup_library', { destination }),
+  restoreLibrary: (source: string) => call<void>('restore_library', { source }),
+  importPdfText: (path: string) => call<string>('import_pdf_text', { path }),
+  importWordText: (path: string) => call<string>('import_word_text', { path }),
+  refineDocumentText: (modelPath: string, text: string) => call<string>('refine_document_text', { modelPath, text }),
+  generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
+  downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
+}
