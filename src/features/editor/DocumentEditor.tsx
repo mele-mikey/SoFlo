@@ -418,7 +418,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
-  const nativeSpellcheck = spellcheck && !(aiEnabled && aiGrammarEnabled)
+  // Keep the immediate browser spellcheck available at all times. AI review is
+  // additive and can take a moment, so it must never remove basic feedback.
+  const nativeSpellcheck = spellcheck
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
