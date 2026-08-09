@@ -761,7 +761,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     try { globalThis.print() } catch { setPdfMessage('SoFlo could not open the PDF export dialog.') }
   }
   const importPdf = async () => {
-    const source = await open({ title: 'Import PDF text into this paper', multiple: false, directory: false, filters: [{ name: 'PDF document', extensions: ['pdf'] }] })
+    const source = await open({ title: 'Import PDF into this paper', multiple: false, directory: false, filters: [{ name: 'PDF document', extensions: ['pdf'] }] })
     if (!source || Array.isArray(source)) return
     setPdfMessage('Importing editable text…')
     try {
@@ -797,7 +797,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }
   const nextPassiveGrammarExcerpt = () => {
     const text = editor.getText()
-    const maximumLength = 5_200
+    // Background checks need to finish quickly enough to stay invisible to
+    // writing. Subsequent checks rotate through the remaining text.
+    const maximumLength = 2_200
     if (text.length <= maximumLength) return text
     let start = Math.min(grammarTextCursorRef.current, Math.max(0, text.length - 1))
     if (start > 0) {
@@ -1070,7 +1072,7 @@ function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, gramma
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
-    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF text</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button></ToolbarMenu>
     <Divider />
