@@ -15,6 +15,7 @@ AutoCloseWindow true
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 !include "FileFunc.nsh"
+!include "WordFunc.nsh"
 !include "WinMessages.nsh"
 
 !ifndef APP_EXE
@@ -109,6 +110,17 @@ Function .onInit
   ${EndIf}
   StrCpy $WorkerMode 1
   SetSilent silent
+
+  ; SoFlo installers are forward-only. The visible setup UI also checks this,
+  ; but the worker enforces it so command-line use cannot replace a newer app.
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  ${If} $0 != ""
+    ${VersionCompare} "$0" "${APP_VERSION}" $1
+    ${If} $1 != 2
+      SetErrorLevel 1
+      Quit
+    ${EndIf}
+  ${EndIf}
 
   ; Existing per-user install: preserve its location and installer preferences.
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"

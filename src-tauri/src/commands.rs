@@ -1319,9 +1319,10 @@ fn download_ai_model_file(
         .unwrap_or("model.gguf");
     let temporary = directory.join(format!("{}.download", filename));
     let mut response = reqwest::blocking::get(url)
-        .map_err(|_| "SoFlo could not start the local AI model download.".to_string())?
-        .error_for_status()
-        .map_err(|_| "SoFlo could not download the local AI model.".to_string())?;
+        .map_err(|_| "SoFlo could not start the local AI model download.".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("SoFlo could not download the local AI model (server returned {}).", response.status()));
+    }
     let total = response
         .content_length()
         .ok_or_else(|| "The AI model download did not report its size.".to_string())?;
@@ -1358,7 +1359,7 @@ pub async fn download_default_ai_model(
     let download_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         const MAIN_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
-        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true";
+        const WORD_MODEL_URL: &str = "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true";
         let configured = Path::new(configured_model_path.trim());
         let configured_is_legacy_default = configured
             .file_name()
