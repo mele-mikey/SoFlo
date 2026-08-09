@@ -146,7 +146,8 @@ const AI_GPU_LAYERS: &str = "32";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
-const WORD_AI_MODEL_NAME: &str = "Qwen3-0.6B-Q4_K_M.gguf";
+const WORD_AI_MODEL_NAME: &str = "Qwen3-0.6B-Q8_0.gguf";
+const WORD_AI_MINIMUM_BYTES: u64 = 500_000_000;
 const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
@@ -197,21 +198,25 @@ fn resolve_word_ai_model_path(app: &tauri::AppHandle) -> CommandResult<String> {
         .map_err(|error| error.to_string())?
         .join("models")
         .join(WORD_AI_MODEL_NAME);
-    if !model.is_file() {
+    if !is_complete_word_ai_model(&model) {
         return Err("SoFlo's fast word-reference model is not downloaded yet. Download the AI model package in Settings, then try again.".into());
     }
     Ok(model.to_string_lossy().to_string())
 }
 
+fn is_complete_word_ai_model(path: &Path) -> bool {
+    path.is_file() && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= WORD_AI_MINIMUM_BYTES)
+}
+
 #[tauri::command]
 pub fn word_ai_model_ready(app: tauri::AppHandle) -> CommandResult<bool> {
-    Ok(app
+    let model = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("models")
-        .join(WORD_AI_MODEL_NAME)
-        .is_file())
+        .join(WORD_AI_MODEL_NAME);
+    Ok(is_complete_word_ai_model(&model))
 }
 
 #[tauri::command]
@@ -969,9 +974,13 @@ fn download_ai_model_file(
     destination: &Path,
     progress_start: u8,
     progress_end: u8,
+    minimum_size: Option<u64>,
 ) -> CommandResult<()> {
     if destination.is_file() {
-        return Ok(());
+        if minimum_size.map_or(true, |minimum| fs::metadata(destination).is_ok_and(|metadata| metadata.len() >= minimum)) {
+            return Ok(());
+        }
+        fs::remove_file(destination).map_err(|error| error.to_string())?;
     }
     let directory = destination
         .parent()
@@ -1017,16 +1026,17 @@ pub async fn download_default_ai_model(
     database: State<'_, Database>,
 ) -> CommandResult<String> {
     let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
-    tauri::async_runtime::spawn_blocking(move || {
+    let download_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         const MAIN_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
-        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf?download=true";
+        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf?download=true";
         let configured = Path::new(configured_model_path.trim());
         let configured_is_legacy_default = configured
             .file_name()
             .and_then(|file| file.to_str())
             .is_some_and(|file| file.eq_ignore_ascii_case(LEGACY_DEFAULT_AI_MODEL_NAME));
         let destination = if configured_model_path.trim().is_empty() || configured_is_legacy_default {
-            app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(DEFAULT_AI_MODEL_NAME)
+            download_app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(DEFAULT_AI_MODEL_NAME)
         } else {
             if configured.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
                 configured.to_path_buf()
@@ -1034,18 +1044,22 @@ pub async fn download_default_ai_model(
                 configured.join(DEFAULT_AI_MODEL_NAME)
             }
         };
-        let word_destination = app
+        let word_destination = download_app
             .path()
             .app_data_dir()
             .map_err(|error| error.to_string())?
             .join("models")
             .join(WORD_AI_MODEL_NAME);
-        download_ai_model_file(&app, MAIN_MODEL_URL, &destination, 0, 83)?;
-        download_ai_model_file(&app, WORD_MODEL_URL, &word_destination, 83, 100)?;
-        let _ = app.emit("ai-download-progress", 100u8);
-        let _ = app.emit("ai-download-finished", ());
+        download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 83, None)?;
+        download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 83, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+        let _ = download_app.emit("ai-download-progress", 100u8);
+        let _ = download_app.emit("ai-download-finished", ());
         Ok(destination.to_string_lossy().to_string())
-    }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?
+    }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
+    if result.is_err() {
+        let _ = app.emit("ai-download-finished", ());
+    }
+    result
 }
 
 fn word_xml_to_text(xml: &str) -> String {

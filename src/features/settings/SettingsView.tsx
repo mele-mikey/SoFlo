@@ -148,7 +148,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.74" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.75" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -205,7 +205,7 @@ function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () =
           <div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div>
           <button type="button" className="text-button ai-model-link" onClick={() => setConfirmModelLinkOpen(true)}>Model information</button>
           <button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>
-          {detailsOpen && <dl className="ai-technical-details"><div><dt>Writing model</dt><dd>Qwen3-4B, Q4_K_M GGUF</dd></div><div><dt>Word reference model</dt><dd>Qwen3-0.6B, Q4_K_M GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
+          {detailsOpen && <dl className="ai-technical-details"><div><dt>Writing model</dt><dd>Qwen3-4B, Q4_K_M GGUF</dd></div><div><dt>Word reference model</dt><dd>Qwen3-0.6B, Q8_0 GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
         </div>
         <footer><button className="button button-primary" onClick={onClose}>Done</button></footer>
       </section>
