@@ -138,7 +138,9 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 const AI_SERVER_PORT: u16 = 19393;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 const AI_CONTEXT_SIZE: &str = "8192";
-const AI_GPU_LAYERS: &str = "20";
+// Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
+// the very slow half-CPU/half-GPU split that made generation drag on.
+const AI_GPU_LAYERS: &str = "32";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
@@ -521,7 +523,7 @@ fn generate_flashcards_text_blocking(
         "messages": [
           {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
           {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
-        ], "max_tokens": 8192, "temperature": 0.2
+        ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 4096, "temperature": 0.2
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
     let body: serde_json::Value = response
@@ -536,12 +538,49 @@ fn generate_flashcards_text_blocking(
         .unwrap_or_default()
         .trim()
         .to_string();
+    let output = json_array_from_response(&output).unwrap_or_default();
     touch_ai_server();
     if output.is_empty() {
         return Err("The local AI model returned no flashcards.".into());
     }
     emit_ai_progress(&app, 100, "Finishing your flashcard set");
     Ok(output)
+}
+
+fn json_array_from_response(output: &str) -> Option<String> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in output.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '[' if start.is_none() => { start = Some(index); depth = 1; }
+            '[' if start.is_some() => depth += 1,
+            ']' if start.is_some() => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate = &output[start?..=index];
+                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_array()) {
+                        return Some(candidate.to_string());
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn emit_ai_progress(app: &tauri::AppHandle, progress: u8, message: &str) {
@@ -2240,12 +2279,18 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 
 #[cfg(test)]
 mod tests {
-    use super::is_visual_line_echo;
+    use super::{is_visual_line_echo, json_array_from_response};
 
     #[test]
     fn detects_a_raw_visual_line_echo_without_rejecting_markdown_structure() {
         let source = "Course packet\nThis paragraph was split\nacross visual lines\nin the PDF\nSchedule\nMonday reading\nWednesday discussion\nFriday quiz\nGrading\nParticipation 20 percent\nProjects 40 percent\nFinal 40 percent";
         assert!(is_visual_line_echo(source, source));
         assert!(!is_visual_line_echo(source, "# Course packet\n\nThis paragraph was split across visual lines in the PDF.\n\n## Schedule\n- Monday reading\n- Wednesday discussion\n- Friday quiz\n\n## Grading\n| Item | Weight |\n| --- | --- |\n| Participation | 20 percent |\n| Projects | 40 percent |\n| Final | 40 percent |"));
+    }
+
+    #[test]
+    fn extracts_only_the_valid_flashcard_json_array_from_a_model_response() {
+        let response = "Here are the cards:\n```json\n[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]\n```";
+        assert_eq!(json_array_from_response(response).as_deref(), Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]"));
     }
 }
