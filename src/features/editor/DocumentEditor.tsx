@@ -507,9 +507,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarLastAutomaticReviewAt = useRef(0)
   const grammarOpenedReviewRef = useRef('')
   const grammarTextCursorRef = useRef(0)
-  // Keep the platform spellcheck on as a reliable baseline. AI adds SoFlo's
-  // straight, interactive marks when it has a more useful correction.
-  const nativeSpellcheck = spellcheck
+  // When AI spelling is enabled, it owns the marks so the editor never mixes
+  // its straight interactive underlines with the browser's red squiggles.
+  const customAiSpellcheck = aiEnabled && aiGrammarEnabled
+  const nativeSpellcheck = spellcheck && !customAiSpellcheck
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {

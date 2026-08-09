@@ -553,8 +553,7 @@ fn review_grammar_text_blocking(
     quick: bool,
 ) -> CommandResult<String> {
     // The editor sends a rotating excerpt for quiet checks so long papers are
-    // covered over time. Keep that excerpt comfortably inside the writing
-    // model's context window instead of silently dropping its latter half.
+    // covered over time instead of silently dropping the latter half.
     let source = text
         .chars()
         .take(if quick { 5_400 } else { 18_000 })
@@ -568,15 +567,12 @@ fn review_grammar_text_blocking(
         "You are SoFlo's rigorous academic writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning. reason must say specifically why the replacement is more formal, precise, clear, or grammatically correct. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
     emit_ai_progress(&app, 12, "Reading your writing");
-    let server_port = if quick {
-        let writing_model_path = resolve_word_ai_model_path(&app)?;
-        ensure_word_ai_server(&writing_model_path, &app)?;
-        WORD_AI_SERVER_PORT
-    } else {
-        let general_model_path = resolve_ai_model_path(&app, &model_path)?;
-        ensure_ai_server(&general_model_path, &app)?;
-        AI_SERVER_PORT
-    };
+    // A quiet spelling pass needs the same reasoning quality as a deliberate
+    // review. The compact companion remains dedicated to word definitions;
+    // the 4B model produces the actual custom spelling marks.
+    let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+    ensure_ai_server(&general_model_path, &app)?;
+    let server_port = AI_SERVER_PORT;
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(if quick { 45 } else { 90 }))
@@ -601,11 +597,7 @@ fn review_grammar_text_blocking(
         .and_then(|value| value.get("content"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if quick {
-        touch_word_ai_server();
-    } else {
-        touch_ai_server();
-    }
+    touch_ai_server();
     emit_ai_progress(&app, 90, "Preparing suggestions");
     let output = json_array_from_response(output).unwrap_or_else(|| "[]".into());
     emit_ai_progress(&app, 100, "Grammar review ready");

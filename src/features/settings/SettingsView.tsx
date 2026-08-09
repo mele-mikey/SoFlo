@@ -148,7 +148,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.82" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.83" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -201,13 +201,13 @@ function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () =
         <header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header>
         <div className="paper-dialog-content">
           <div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo runs its AI prompts through llama.cpp on this computer at 127.0.0.1. Regular AI actions do not send your papers or study material to SoFlo servers or Hugging Face for inference.</p></div>
-          <div className="ai-info-copy"><strong>Two local AI models</strong><p>The 4B general model handles imports, flashcards, AI Review, and Research & Grade. A separate 1.7B writing model handles quick spelling checks, definitions, and formal related words. Both models stay on this computer.</p></div>
+          <div className="ai-info-copy"><strong>Two local AI models</strong><p>The 4B general model handles imports, flashcards, AI Review, Research & Grade, and custom spelling checks. A separate 1.7B writing model handles quick definitions and formal related words. Both models stay on this computer.</p></div>
           <div className="ai-info-copy"><strong>Online research is different</strong><p>AI Research & Grade first creates a short topic query locally, then sends that query — not your paper — to Crossref for scholarly metadata. Open and evaluate each suggested source before citing it.</p></div>
           <div className="ai-info-copy"><strong>Model download</strong><p>A fresh default download installs both models together. An update keeps any general model you chose and adds the writing companion. Downloads need an internet connection; once installed, local inference stays on your computer.</p></div>
           <div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div>
           <button type="button" className="text-button ai-model-link" onClick={() => setConfirmModelLinkOpen(true)}>Model information</button>
           <button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>
-          {detailsOpen && <dl className="ai-technical-details"><div><dt>General SoFlo model</dt><dd>Qwen3-4B, Q4_K_M GGUF — imports, flashcards, AI Review, and Research & Grade</dd></div><div><dt>Writing model</dt><dd>Qwen3-1.7B, Q4_K_M GGUF — passive spelling checks, definitions, and related words</dd></div><div><dt>Online research index</dt><dd>Crossref — topic-query metadata only</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
+          {detailsOpen && <dl className="ai-technical-details"><div><dt>General SoFlo model</dt><dd>Qwen3-4B, Q4_K_M GGUF — imports, flashcards, AI Review, Research & Grade, and custom spelling checks</dd></div><div><dt>Writing model</dt><dd>Qwen3-1.7B, Q4_K_M GGUF — definitions and related words</dd></div><div><dt>Online research index</dt><dd>Crossref — topic-query metadata only</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
         </div>
         <footer><button className="button button-primary" onClick={onClose}>Done</button></footer>
       </section>
