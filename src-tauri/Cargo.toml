@@ -1,6 +1,6 @@
 [package]
 name = "soflo"
-version = "1.0.78"
+version = "1.0.79"
 description = "A local-first notes and study workspace"
 authors = ["Mikey M."]
 license = "PolyForm-Noncommercial-1.0.0"

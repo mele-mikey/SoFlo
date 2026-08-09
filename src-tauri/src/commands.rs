@@ -64,8 +64,7 @@ impl pdf_extract::OutputDev for FlowTextOutput {
         let size = font_size.abs().max(1.0);
         if self.has_character && self.first_character_in_word {
             let vertical_change = (y - self.last_y).abs();
-            if vertical_change > size * 0.45
-                || (x < self.last_end && vertical_change > size * 0.2)
+            if vertical_change > size * 0.45 || (x < self.last_end && vertical_change > size * 0.2)
             {
                 if self.preserve_vertical_gaps && vertical_change > size * 1.35 {
                     if !self.text.ends_with("\n\n") {
@@ -139,15 +138,15 @@ const AI_SERVER_PORT: u16 = 19393;
 const WORD_AI_SERVER_PORT: u16 = 19394;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 const AI_CONTEXT_SIZE: &str = "8192";
-const WORD_AI_CONTEXT_SIZE: &str = "2048";
+const WORD_AI_CONTEXT_SIZE: &str = "4096";
 // Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
 // the very slow half-CPU/half-GPU split that made generation drag on.
 const AI_GPU_LAYERS: &str = "32";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
-const WORD_AI_MODEL_NAME: &str = "Qwen3-0.6B-Q8_0.gguf";
-const WORD_AI_MINIMUM_BYTES: u64 = 500_000_000;
+const WORD_AI_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
+const WORD_AI_MINIMUM_BYTES: u64 = 1_000_000_000;
 const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
@@ -205,7 +204,8 @@ fn resolve_word_ai_model_path(app: &tauri::AppHandle) -> CommandResult<String> {
 }
 
 fn is_complete_word_ai_model(path: &Path) -> bool {
-    path.is_file() && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= WORD_AI_MINIMUM_BYTES)
+    path.is_file()
+        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= WORD_AI_MINIMUM_BYTES)
 }
 
 #[tauri::command]
@@ -262,7 +262,11 @@ pub struct InstallerVersionInfo {
 
 #[tauri::command]
 pub fn installer_version_info() -> InstallerVersionInfo {
-    let argument_value = |prefix: &str| std::env::args().find_map(|argument| argument.strip_prefix(prefix).map(str::to_string)).unwrap_or_default();
+    let argument_value = |prefix: &str| {
+        std::env::args()
+            .find_map(|argument| argument.strip_prefix(prefix).map(str::to_string))
+            .unwrap_or_default()
+    };
     InstallerVersionInfo {
         current_version: argument_value("--current-version="),
         target_version: argument_value("--target-version="),
@@ -535,14 +539,23 @@ pub async fn review_grammar_text(
     text: String,
     quick: bool,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || review_grammar_text_blocking(app, model_path, text, quick))
-        .await
-        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        review_grammar_text_blocking(app, model_path, text, quick)
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
-fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text: String, quick: bool) -> CommandResult<String> {
-    let model_path = resolve_ai_model_path(&app, &model_path)?;
-    let source = text.chars().take(if quick { 6_000 } else { 18_000 }).collect::<String>();
+fn review_grammar_text_blocking(
+    app: tauri::AppHandle,
+    model_path: String,
+    text: String,
+    quick: bool,
+) -> CommandResult<String> {
+    let source = text
+        .chars()
+        .take(if quick { 6_000 } else { 18_000 })
+        .collect::<String>();
     if source.trim().len() < 3 {
         return Ok("[]".into());
     }
@@ -552,10 +565,21 @@ fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text:
         "You are SoFlo's rigorous academic writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning. reason must say specifically why the replacement is more formal, precise, clear, or grammatically correct. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
     emit_ai_progress(&app, 12, "Reading your writing");
-    ensure_ai_server(&model_path, &app)?;
+    let server_port = if quick {
+        let writing_model_path = resolve_word_ai_model_path(&app)?;
+        ensure_word_ai_server(&writing_model_path, &app)?;
+        WORD_AI_SERVER_PORT
+    } else {
+        let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+        ensure_ai_server(&general_model_path, &app)?;
+        AI_SERVER_PORT
+    };
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(if quick { 45 } else { 90 })).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(if quick { 45 } else { 90 }))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", server_port)).json(&serde_json::json!({
         "messages": [
             {"role":"system","content":system_instruction},
             {"role":"user","content":format!("Review this writing. Return JSON only.\n\n{}", source)}
@@ -564,13 +588,285 @@ fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text:
         "max_tokens": if quick { 1000 } else { 2200 },
         "temperature": 0.0
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not finish the grammar review: {}", error))?;
-    let body: serde_json::Value = response.json().map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    let output = body.get("choices").and_then(|value| value.get(0)).and_then(|value| value.get("message")).and_then(|value| value.get("content")).and_then(|value| value.as_str()).unwrap_or_default();
-    touch_ai_server();
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    let output = body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if quick {
+        touch_word_ai_server();
+    } else {
+        touch_ai_server();
+    }
     emit_ai_progress(&app, 90, "Preparing suggestions");
     let output = json_array_from_response(output).unwrap_or_else(|| "[]".into());
     emit_ai_progress(&app, 100, "Grammar review ready");
     Ok(output)
+}
+
+#[tauri::command]
+pub async fn research_and_grade_text(
+    app: tauri::AppHandle,
+    model_path: String,
+    text: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        research_and_grade_text_blocking(app, model_path, text)
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+fn local_chat_text(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    system: &str,
+    prompt: &str,
+    max_tokens: u16,
+) -> CommandResult<String> {
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .json(&serde_json::json!({
+            "messages": [{"role":"system","content":system},{"role":"user","content":prompt}],
+            "chat_template_kwargs": { "enable_thinking": false },
+            "max_tokens": max_tokens,
+            "temperature": 0.1
+        }))
+        .send()
+        .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
+        .error_for_status()
+        .map_err(|error| {
+            format!(
+                "SoFlo's local AI model could not complete this review: {}",
+                error
+            )
+        })?;
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    Ok(body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
+}
+
+fn fallback_research_query(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|word| word.chars().count() >= 4)
+        .take(12)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn academic_research_leads(query: &str, perspective: &str) -> Vec<serde_json::Value> {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(18))
+        .user_agent("SoFlo/1.0 (local academic research helper)")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Vec::new(),
+    };
+    let response = match client
+        .get("https://api.crossref.org/works")
+        .query(&[("query.bibliographic", query), ("rows", "8")])
+        .send()
+        .and_then(|response| response.error_for_status())
+    {
+        Ok(response) => response,
+        Err(_) => return Vec::new(),
+    };
+    let payload: serde_json::Value = match response.json() {
+        Ok(payload) => payload,
+        Err(_) => return Vec::new(),
+    };
+    payload
+        .pointer("/message/items")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let source_type = item.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+            if !matches!(source_type, "journal-article" | "proceedings-article" | "book-chapter" | "reference-book") {
+                return None;
+            }
+            let title = item.get("title").and_then(|value| value.as_array()).and_then(|titles| titles.first()).and_then(|value| value.as_str())?.trim();
+            let doi = item.get("DOI").and_then(|value| value.as_str())?.trim();
+            if title.is_empty() || doi.is_empty() {
+                return None;
+            }
+            let publication = item.get("container-title").and_then(|value| value.as_array()).and_then(|titles| titles.first()).and_then(|value| value.as_str()).unwrap_or_default().trim();
+            let year = item.pointer("/published-print/date-parts/0/0")
+                .or_else(|| item.pointer("/published-online/date-parts/0/0"))
+                .and_then(|value| value.as_i64())
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "title": title,
+                "publication": publication,
+                "year": year,
+                "type": source_type,
+                "perspective": perspective,
+                "citations": item.get("is-referenced-by-count").and_then(|value| value.as_i64()).unwrap_or(0),
+                "url": format!("https://doi.org/{}", doi),
+            }))
+        })
+        .take(5)
+        .collect()
+}
+
+fn research_and_grade_text_blocking(
+    app: tauri::AppHandle,
+    model_path: String,
+    text: String,
+) -> CommandResult<String> {
+    let source = text.chars().take(18_000).collect::<String>();
+    if source.trim().chars().count() < 80 {
+        return Err(
+            "Write a little more before asking SoFlo to research and grade this paper.".into(),
+        );
+    }
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
+    emit_ai_progress(&app, 8, "Reading your paper locally");
+    ensure_ai_server(&model_path, &app)?;
+    let local_client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    emit_ai_progress(&app, 25, "Identifying a focused research topic");
+    let query_output = local_chat_text(
+        &local_client,
+        AI_SERVER_PORT,
+        "You turn a student's paper into concise academic database searches. Return only a JSON object with topicQuery and counterQuery. Each query must be 5 to 14 keywords. topicQuery should preserve the paper's topic and central claim. counterQuery should seek a relevant alternate perspective, limitation, or counterargument; if the paper is not making an argument, use a complementary scholarly perspective instead. Do not include personal names unless essential.",
+        &format!("Create two research queries for this paper:\n\n{}", source.chars().take(7_000).collect::<String>()),
+        120,
+    )?;
+    let query_object = json_object_from_response(&query_output)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let research_query = query_object
+        .as_ref()
+        .and_then(|value| value.get("topicQuery").or_else(|| value.get("query")))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_research_query(&source));
+    let counter_query = query_object
+        .as_ref()
+        .and_then(|value| value.get("counterQuery"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|query| !query.is_empty() && *query != research_query)
+        .map(str::to_string);
+    if research_query.is_empty() {
+        return Err("SoFlo could not identify a topic to research from this paper.".into());
+    }
+    emit_ai_progress(&app, 45, "Checking scholarly research leads online");
+    let mut sources = academic_research_leads(&research_query, "Related scholarship");
+    if let Some(query) = counter_query.as_deref() {
+        sources.extend(academic_research_leads(query, "Alternate perspective"));
+    }
+    sources.sort_by(|left, right| {
+        left.get("url")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("url").and_then(|value| value.as_str()))
+    });
+    sources.dedup_by(|left, right| {
+        left.get("url").and_then(|value| value.as_str())
+            == right.get("url").and_then(|value| value.as_str())
+    });
+    sources.truncate(6);
+    for source in &mut sources {
+        let perspective = source
+            .get("perspective")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let publication = source
+            .get("publication")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if !perspective.is_empty() {
+            let label = if publication.is_empty() {
+                perspective.to_string()
+            } else {
+                format!("{} - {}", perspective, publication)
+            };
+            if let Some(object) = source.as_object_mut() {
+                object.insert("publication".into(), serde_json::Value::String(label));
+            }
+        }
+    }
+    emit_ai_progress(&app, 64, "Comparing evidence and reasoning");
+    let source_context = if sources.is_empty() {
+        "No scholarly metadata was returned. Grade the paper without outside leads and explain what evidence would strengthen it.".to_string()
+    } else {
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                format!(
+                    "{}. {} — {} ({})",
+                    index + 1,
+                    source
+                        .get("title")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default(),
+                    source
+                        .get("publication")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default(),
+                    source
+                        .get("year")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let grade_output = local_chat_text(
+        &local_client,
+        AI_SERVER_PORT,
+        "You are a constructive college writing instructor. Grade a student paper approximately, not officially. Use the supplied scholarly research leads only as leads: never claim a source proves something unless its metadata makes that clear. Return only a JSON object with keys grade, overview, strengths, improvements, evidence, reasoning, writingCraft, and researchAdvice. strengths, improvements, and researchAdvice must be arrays of 2 to 5 short strings. writingCraft must be an object with sentenceOpeners, topicSentences, organization, creativity, and length; each is a concise sentence. Clearly discuss the paper's claim, evidence, reasoning, counterarguments or missing perspectives, and practical ways to improve it. Do not write the paper for the student.",
+        &format!("PAPER:\n{}\n\nSCHOLARLY RESEARCH LEADS (metadata only):\n{}", source, source_context),
+        1800,
+    )?;
+    touch_ai_server();
+    emit_ai_progress(&app, 91, "Preparing your research and grade report");
+    let mut report = json_object_from_response(&grade_output)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({
+            "grade": "—",
+            "overview": grade_output,
+            "strengths": [],
+            "improvements": [],
+            "evidence": "The local model returned an unstructured review. Use the research leads below to strengthen your evidence.",
+            "reasoning": "Review the paper's claim and support before treating this as a final grade.",
+            "writingCraft": {},
+            "researchAdvice": []
+        }));
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "researchQuery".into(),
+            serde_json::Value::String(research_query),
+        );
+        object.insert("sources".into(), serde_json::Value::Array(sources));
+        object.insert("sourceNote".into(), serde_json::Value::String("Research leads come from Crossref metadata, including related and alternate-perspective searches. Open each DOI and evaluate the full source before citing it.".into()));
+    }
+    emit_ai_progress(&app, 100, "Research and grade report ready");
+    Ok(report.to_string())
 }
 
 #[tauri::command]
@@ -584,7 +880,11 @@ pub async fn define_word(
         .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
-fn define_word_blocking(app: tauri::AppHandle, model_path: String, word: String) -> CommandResult<String> {
+fn define_word_blocking(
+    app: tauri::AppHandle,
+    model_path: String,
+    word: String,
+) -> CommandResult<String> {
     let word = word.trim();
     if word.is_empty() || word.chars().count() > 80 {
         return Err("Select one ordinary word to look it up.".into());
@@ -622,7 +922,8 @@ fn define_word_blocking(app: tauri::AppHandle, model_path: String, word: String)
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     touch_word_ai_server();
-    json_object_from_response(output).ok_or_else(|| "SoFlo could not prepare a word reference.".into())
+    json_object_from_response(output)
+        .ok_or_else(|| "SoFlo could not prepare a word reference.".into())
 }
 
 fn generate_flashcards_text_blocking(
@@ -711,13 +1012,18 @@ fn json_array_from_response(output: &str) -> Option<String> {
         }
         match character {
             '"' => in_string = true,
-            '[' if start.is_none() => { start = Some(index); depth = 1; }
+            '[' if start.is_none() => {
+                start = Some(index);
+                depth = 1;
+            }
             '[' if start.is_some() => depth += 1,
             ']' if start.is_some() => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let candidate = &output[start?..=index];
-                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_array()) {
+                    if serde_json::from_str::<serde_json::Value>(candidate)
+                        .is_ok_and(|value| value.is_array())
+                    {
                         return Some(candidate.to_string());
                     }
                     start = None;
@@ -747,13 +1053,18 @@ fn json_object_from_response(output: &str) -> Option<String> {
         }
         match character {
             '"' => in_string = true,
-            '{' if start.is_none() => { start = Some(index); depth = 1; }
+            '{' if start.is_none() => {
+                start = Some(index);
+                depth = 1;
+            }
             '{' if start.is_some() => depth += 1,
             '}' if start.is_some() => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let candidate = &output[start?..=index];
-                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_object()) {
+                    if serde_json::from_str::<serde_json::Value>(candidate)
+                        .is_ok_and(|value| value.is_object())
+                    {
                         return Some(candidate.to_string());
                     }
                     start = None;
@@ -818,11 +1129,25 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
-    ensure_model_server(&AI_SERVER, model_path, app, AI_SERVER_PORT, AI_CONTEXT_SIZE, "on")
+    ensure_model_server(
+        &AI_SERVER,
+        model_path,
+        app,
+        AI_SERVER_PORT,
+        AI_CONTEXT_SIZE,
+        "on",
+    )
 }
 
 fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
-    ensure_model_server(&WORD_AI_SERVER, model_path, app, WORD_AI_SERVER_PORT, WORD_AI_CONTEXT_SIZE, "off")
+    ensure_model_server(
+        &WORD_AI_SERVER,
+        model_path,
+        app,
+        WORD_AI_SERVER_PORT,
+        WORD_AI_CONTEXT_SIZE,
+        "off",
+    )
 }
 
 fn ensure_model_server(
@@ -977,7 +1302,9 @@ fn download_ai_model_file(
     minimum_size: Option<u64>,
 ) -> CommandResult<()> {
     if destination.is_file() {
-        if minimum_size.map_or(true, |minimum| fs::metadata(destination).is_ok_and(|metadata| metadata.len() >= minimum)) {
+        if minimum_size.map_or(true, |minimum| {
+            fs::metadata(destination).is_ok_and(|metadata| metadata.len() >= minimum)
+        }) {
             return Ok(());
         }
         fs::remove_file(destination).map_err(|error| error.to_string())?;
@@ -1009,7 +1336,9 @@ fn download_ai_model_file(
             break;
         }
         use std::io::Write;
-        output.write_all(&buffer[..count]).map_err(|error| error.to_string())?;
+        output
+            .write_all(&buffer[..count])
+            .map_err(|error| error.to_string())?;
         downloaded += count as u64;
         let span = u64::from(progress_end.saturating_sub(progress_start));
         let progress = u64::from(progress_start) + downloaded.saturating_mul(span) / total;
@@ -1029,12 +1358,15 @@ pub async fn download_default_ai_model(
     let download_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         const MAIN_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
-        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf?download=true";
+        const WORD_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true";
         let configured = Path::new(configured_model_path.trim());
         let configured_is_legacy_default = configured
             .file_name()
             .and_then(|file| file.to_str())
             .is_some_and(|file| file.eq_ignore_ascii_case(LEGACY_DEFAULT_AI_MODEL_NAME));
+        let use_existing_custom_model = configured.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+            && configured.is_file()
+            && !configured_is_legacy_default;
         let destination = if configured_model_path.trim().is_empty() || configured_is_legacy_default {
             download_app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(DEFAULT_AI_MODEL_NAME)
         } else {
@@ -1050,8 +1382,12 @@ pub async fn download_default_ai_model(
             .map_err(|error| error.to_string())?
             .join("models")
             .join(WORD_AI_MODEL_NAME);
-        download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 83, None)?;
-        download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 83, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+        if use_existing_custom_model || destination.is_file() {
+            download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 0, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+        } else {
+            download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 68, None)?;
+            download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 68, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+        }
         let _ = download_app.emit("ai-download-progress", 100u8);
         let _ = download_app.emit("ai-download-finished", ());
         Ok(destination.to_string_lossy().to_string())
@@ -2561,12 +2897,19 @@ mod tests {
     #[test]
     fn extracts_only_the_valid_flashcard_json_array_from_a_model_response() {
         let response = "Here are the cards:\n```json\n[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]\n```";
-        assert_eq!(json_array_from_response(response).as_deref(), Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]"));
+        assert_eq!(
+            json_array_from_response(response).as_deref(),
+            Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]")
+        );
     }
 
     #[test]
     fn extracts_a_complete_word_reference_object_from_a_model_response() {
-        let response = "```json\n{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}\n```";
-        assert_eq!(json_object_from_response(response).as_deref(), Some("{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}"));
+        let response =
+            "```json\n{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}\n```";
+        assert_eq!(
+            json_object_from_response(response).as_deref(),
+            Some("{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}")
+        );
     }
 }

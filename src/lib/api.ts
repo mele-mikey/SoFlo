@@ -83,6 +83,7 @@ export const api = {
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
   reviewGrammarText: (modelPath: string, text: string, quick: boolean) => call<string>('review_grammar_text', { modelPath, text, quick }),
+  researchAndGradeText: (modelPath: string, text: string) => call<string>('research_and_grade_text', { modelPath, text }),
   defineWord: (modelPath: string, word: string) => call<string>('define_word', { modelPath, word }),
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
   stopAiServer: () => call<void>('stop_ai_server'),
