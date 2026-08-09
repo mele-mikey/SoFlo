@@ -40,7 +40,9 @@ interface DocumentEditorProps {
   onChange: (content: string, contentPlain: string, title: string) => void
   onSpellcheckChange: (value: boolean) => void
   onAiGrammarEnabledChange: (value: boolean) => void
-  onGrammarReview: (text: string) => Promise<string>
+  grammarProgress: { progress: number; message: string } | null
+  onGrammarReview: (text: string, quick: boolean) => Promise<string>
+  onReleaseAi: () => Promise<void>
   onBack: () => void
   onDelete: () => void
   onDuplicate?: () => void
@@ -123,7 +125,7 @@ const paperGap = 34
 const usLetterWidthInches = 8.5
 const usLetterHeightInches = 11
 
-type GrammarIssue = { original: string; replacement: string; reason: string; category: string; from: number; to: number }
+type GrammarIssue = { original: string; replacement: string; reason: string; category: string; partOfSpeech: string; definition: string; useCase: string; synonyms: string[]; from: number; to: number }
 const GrammarReview = Extension.create({
   name: 'grammarReview',
   addProseMirrorPlugins() {
@@ -135,14 +137,18 @@ const GrammarReview = Extension.create({
   },
 })
 function extractGrammarIssues(raw: string, editor: Editor): GrammarIssue[] {
-  let candidates: Array<{ original?: string; replacement?: string; reason?: string; category?: string }> = []
+  let candidates: Array<{ original?: string; replacement?: string; reason?: string; category?: string; partOfSpeech?: string; definition?: string; useCase?: string; synonyms?: unknown }> = []
   try { candidates = JSON.parse(raw) as typeof candidates } catch { return [] }
   const issues: GrammarIssue[] = []
   const used = new Set<string>()
   for (const candidate of candidates.slice(0, 20)) {
-    const original = candidate.original?.trim()
-    const replacement = candidate.replacement?.trim()
-    if (!original || !replacement || original === replacement || original.length > 180) continue
+    const suppliedOriginal = typeof candidate.original === 'string' ? candidate.original : ''
+    const suppliedReplacement = typeof candidate.replacement === 'string' ? candidate.replacement : ''
+    const original = suppliedOriginal.trim() || (/^\s{2,3}$/.test(suppliedOriginal) ? suppliedOriginal : '')
+    const replacement = suppliedReplacement.trim() || (/^\s{1,3}$/.test(suppliedReplacement) ? suppliedReplacement : '')
+    const originalWords = original.trim().split(/\s+/).filter(Boolean)
+    const replacementWords = replacement.trim().split(/\s+/).filter(Boolean)
+    if (!original || !replacement || original === replacement || original.length > 64 || originalWords.length > 3 || replacementWords.length > 3) continue
     let found: { from: number; to: number } | null = null
     editor.state.doc.descendants((node, position) => {
       if (found || !node.isText || !node.text) return
@@ -155,7 +161,7 @@ function extractGrammarIssues(raw: string, editor: Editor): GrammarIssue[] {
     })
     if (found) {
       const match = found as { from: number; to: number }
-      issues.push({ original, replacement, reason: candidate.reason?.trim() || 'Suggested correction.', category: candidate.category?.trim() || 'Writing', from: match.from, to: match.to })
+      issues.push({ original, replacement, reason: candidate.reason?.trim() || 'Suggested correction.', category: candidate.category?.trim() || 'Writing', partOfSpeech: candidate.partOfSpeech?.trim() || '', definition: candidate.definition?.trim() || '', useCase: candidate.useCase?.trim() || '', synonyms: Array.isArray(candidate.synonyms) ? candidate.synonyms.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean).slice(0, 3) : [], from: match.from, to: match.to })
     }
   }
   return issues
@@ -372,7 +378,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -397,10 +403,16 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [grammarOpen, setGrammarOpen] = useState(false)
   const [grammarReviewing, setGrammarReviewing] = useState(false)
   const [grammarMessage, setGrammarMessage] = useState('')
+  const [selectedGrammarIssue, setSelectedGrammarIssue] = useState<GrammarIssue | null>(null)
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
   const activeRunningElementRef = useRef<HTMLElement | null>(null)
+  const grammarRequestRef = useRef(false)
+  const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
+  const grammarLastInputAt = useRef(0)
+  const grammarTypingStartedAt = useRef<number | null>(null)
+  const grammarLastAutomaticReviewAt = useRef(0)
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
@@ -416,6 +428,17 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setActiveLinkPreview({ href: anchor.href, label: anchor.textContent?.trim() || anchor.href, x: Math.max(12, Math.min(bounds.left, window.innerWidth - 348)), y: Math.min(bounds.bottom + 9, window.innerHeight - 86) })
     return true
   }
+  const handleEditorClick = (view: unknown, position: number, event: MouseEvent) => {
+    const marked = event.target instanceof Element ? event.target.closest<HTMLElement>('.ai-grammar-issue') : null
+    const issueIndex = Number(marked?.dataset.grammarIssue)
+    if (Number.isInteger(issueIndex) && grammarIssues[issueIndex]) {
+      event.preventDefault()
+      setSelectedGrammarIssue(grammarIssues[issueIndex])
+      setGrammarOpen(true)
+      return true
+    }
+    return handleLinkClick(view, position, event)
+  }
   const content = useMemo(() => safeContent(document.content), [document.content])
   const editor = useEditor({
     extensions: [
@@ -429,9 +452,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     content,
     editorProps: {
       attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` },
-      handleClick: handleLinkClick,
+      handleClick: handleEditorClick,
     },
-    onUpdate: ({ editor: nextEditor }) => onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title),
+    onUpdate: ({ editor: nextEditor }) => {
+      const now = Date.now()
+      if (now - grammarLastInputAt.current > 8_000) grammarTypingStartedAt.current = now
+      grammarLastInputAt.current = now
+      onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
+    },
   })
   const currentId = useRef(document.id)
   useEffect(() => {
@@ -441,9 +469,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setGrammarIssues([])
     setGrammarMessage('')
     setGrammarOpen(false)
+    setSelectedGrammarIssue(null)
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
-  useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleLinkClick } }) }, [editor, spellcheck, fontSize])
+  useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(spellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleEditorClick } }) }, [editor, spellcheck, fontSize, grammarIssues])
   useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin, headerPages, footerPages, repeatHeader, repeatFooter])
   useEffect(() => {
     if (!editor) return
@@ -529,6 +558,20 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('click', dismiss); window.removeEventListener('resize', dismiss); window.removeEventListener('scroll', dismiss, true); window.removeEventListener('keydown', onKeyDown) }
   }, [contextMenu])
+  useEffect(() => {
+    if (!editor || !aiEnabled || !aiGrammarEnabled) return
+    const timer = window.setInterval(() => {
+      const now = Date.now()
+      const typingStartedAt = grammarTypingStartedAt.current
+      const recentlyTyped = now - grammarLastInputAt.current < 6_000
+      if (!globalThis.document.hasFocus() || !editor.isFocused || grammarRequestRef.current || !recentlyTyped || !typingStartedAt) return
+      if (now - typingStartedAt < 30_000 || now - grammarLastAutomaticReviewAt.current < 30_000) return
+      grammarLastAutomaticReviewAt.current = now
+      grammarReviewRef.current(true)
+    }, 3_000)
+    return () => window.clearInterval(timer)
+  }, [aiEnabled, aiGrammarEnabled, editor])
+  useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
 
   if (!editor) return <div className="editor-loading" />
   const runFind = (value: string) => { setFindValue(value); const finder = (window as Window & { find?: (query: string, caseSensitive?: boolean, backwards?: boolean, wrapAround?: boolean) => boolean }).find; if (value && finder) finder(value, false, false, true) }
@@ -571,24 +614,26 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: 'ai-grammar-issue', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
   }
-  const reviewGrammar = async () => {
-    if (!aiEnabled || !aiGrammarEnabled || grammarReviewing) return
+  const reviewGrammar = async (quick = false) => {
+    if (!aiEnabled || !aiGrammarEnabled || grammarRequestRef.current) return
+    grammarRequestRef.current = true
     setGrammarReviewing(true)
     setGrammarMessage('')
     setGrammarDecorations([])
+    editor.view.dom.classList.add('ai-grammar-scanning')
     try {
-      const issues = extractGrammarIssues(await onGrammarReview(editor.getText()), editor)
+      const issues = extractGrammarIssues(await onGrammarReview(editor.getText(), quick), editor)
       setGrammarIssues(issues)
       setGrammarDecorations(issues)
-      setGrammarOpen(true)
+      setGrammarOpen(false)
+      setSelectedGrammarIssue(null)
     } catch (error) {
       setGrammarIssues([])
       setGrammarDecorations([])
       setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review.')
-      setGrammarOpen(true)
-    } finally { setGrammarReviewing(false) }
+    } finally { editor.view.dom.classList.remove('ai-grammar-scanning'); grammarRequestRef.current = false; setGrammarReviewing(false) }
   }
-  const clearGrammar = () => { setGrammarIssues([]); setGrammarDecorations([]); setGrammarMessage(''); setGrammarOpen(false) }
+  grammarReviewRef.current = (quick) => { void reviewGrammar(quick) }
   const applyGrammarIssue = (issue: GrammarIssue) => {
     const state = editor.state
     const exact = state.doc.textBetween(issue.from, issue.to, ' ')
@@ -598,6 +643,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const remaining = grammarIssues.filter((current) => current !== issue).map((current) => ({ ...current, from: transaction.mapping.map(current.from, -1), to: transaction.mapping.map(current.to, 1) }))
     setGrammarIssues(remaining)
     setGrammarDecorations(remaining)
+    setGrammarOpen(false)
+    setSelectedGrammarIssue(null)
   }
   const openLinkDialog = () => setLinkDialog({ url: (editor.getAttributes('link').href as string | undefined) ?? '', canRemove: editor.isActive('link') })
   const applyLink = (url: string) => {
@@ -706,11 +753,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
-      <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+      <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
-    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}>{grammarReviewing && <span className="grammar-sweep" aria-label="Checking spelling and grammar" />}<article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && <aside className="grammar-sidebar" aria-label="Writing suggestions"><header><div><p className="eyebrow">AI WRITING REVIEW</p><h2>{grammarIssues.length ? `${grammarIssues.length} suggestion${grammarIssues.length === 1 ? '' : 's'}` : grammarMessage ? 'Review unavailable' : 'Writing looks good'}</h2></div><button className="icon-button tiny" onClick={clearGrammar} aria-label="Close writing suggestions"><X size={16} /></button></header>{grammarIssues.length ? <div className="grammar-suggestions">{grammarIssues.map((issue) => <article key={`${issue.from}-${issue.to}-${issue.original}`}><small>{issue.category}</small><p><s>{issue.original}</s><strong>{issue.replacement}</strong></p><span>{issue.reason}</span><button className="button button-primary button-small" onClick={() => applyGrammarIssue(issue)}>Use suggestion</button></article>)}</div> : <p className="grammar-empty">{grammarMessage || 'No clear spelling or grammar issues were found in this review.'}</p>}</aside>}</section>
+    <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar" aria-label="Writing suggestion"><header><div><p className="eyebrow">AI WRITING REVIEW</p><h2>Writing suggestion</h2></div><button className="icon-button tiny" onClick={() => { setGrammarOpen(false); setSelectedGrammarIssue(null) }} aria-label="Close writing suggestion"><X size={16} /></button></header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p><section><h3>What to fix</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}<button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Use suggestion</button></div></aside>}</section>
+    {grammarReviewing && <div className="grammar-review-notice" role="status" aria-live="polite"><i /><div><strong>Checking your writing</strong><span>{grammarProgress?.message || 'Reviewing spelling and grammar locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
+    {grammarMessage && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>Grammar review paused</strong><span>{grammarMessage}</span></div><button className="icon-button tiny" onClick={() => setGrammarMessage('')} aria-label="Dismiss grammar review message"><X size={15} /></button></div>}
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}

@@ -500,29 +500,30 @@ pub async fn review_grammar_text(
     app: tauri::AppHandle,
     model_path: String,
     text: String,
+    quick: bool,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || review_grammar_text_blocking(app, model_path, text))
+    tauri::async_runtime::spawn_blocking(move || review_grammar_text_blocking(app, model_path, text, quick))
         .await
         .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
-fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text: String) -> CommandResult<String> {
+fn review_grammar_text_blocking(app: tauri::AppHandle, model_path: String, text: String, quick: bool) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
-    let source = text.chars().take(18_000).collect::<String>();
+    let source = text.chars().take(if quick { 6_000 } else { 18_000 }).collect::<String>();
     if source.trim().len() < 3 {
         return Ok("[]".into());
     }
     emit_ai_progress(&app, 12, "Reading your writing");
     ensure_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(90)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(if quick { 45 } else { 90 })).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
         "messages": [
-            {"role":"system","content":"You are a precise academic grammar checker. Return only valid JSON: an array of at most 20 objects with string keys original, replacement, reason, and category. Find only high-confidence spelling, grammar, punctuation, agreement, or clarity errors. The original value must be an exact continuous excerpt from the input. Keep replacement minimal. Never rewrite a whole sentence, alter the writer's voice, flag citations, or flag a proper name just because it is unfamiliar. Return [] when there are no clear errors."},
+            {"role":"system","content":"You are a precise academic spelling and mechanics checker. Return only valid JSON: an array of at most 20 objects with string keys original, replacement, reason, category, partOfSpeech, definition, useCase, and synonyms. synonyms must be an array of at most three strings. Find only high-confidence spelling, apostrophe, capitalization, hyphenation, duplicated-space, and basic punctuation errors. Every original and replacement must be one to three words at most, or a short punctuation/space sequence. The original must be an exact continuous excerpt from the input. Keep the replacement minimal. Never rewrite a sentence, suggest a style or sentence-fluidity change, alter the writer's voice, flag citations, or flag a proper name merely because it is unfamiliar. Explain why the correction is needed in reason. For word corrections, provide the corrected word's part of speech, a brief definition, a short use case, and up to three related synonyms when useful; use empty strings and [] for mechanics where those do not apply. Return [] when there are no clear errors."},
             {"role":"user","content":format!("Review this writing. Return JSON only.\n\n{}", source)}
         ],
         "chat_template_kwargs": { "enable_thinking": false },
-        "max_tokens": 1800,
+        "max_tokens": if quick { 720 } else { 1800 },
         "temperature": 0.1
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not finish the grammar review: {}", error))?;
     let body: serde_json::Value = response.json().map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
@@ -798,6 +799,19 @@ fn touch_ai_server() {
             }
         }
     });
+}
+
+#[tauri::command]
+pub fn stop_ai_server() -> CommandResult<()> {
+    if let Some(state) = AI_SERVER.get() {
+        if let Ok(mut guard) = state.lock() {
+            if let Some(mut server) = guard.take() {
+                let _ = server.child.kill();
+                let _ = server.child.wait();
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

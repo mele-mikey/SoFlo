@@ -82,6 +82,7 @@ export const api = {
   importWordText: (path: string) => call<string>('import_word_text', { path }),
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
-  reviewGrammarText: (modelPath: string, text: string) => call<string>('review_grammar_text', { modelPath, text }),
+  reviewGrammarText: (modelPath: string, text: string, quick: boolean) => call<string>('review_grammar_text', { modelPath, text, quick }),
+  stopAiServer: () => call<void>('stop_ai_server'),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
 }
