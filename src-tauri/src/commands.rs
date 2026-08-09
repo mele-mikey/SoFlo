@@ -17,6 +17,94 @@ use crate::{database::Database, models::*};
 
 type CommandResult<T> = Result<T, String>;
 
+/// `pdf-extract`'s stock text writer is intentionally conservative when it
+/// decides that a gap is a word space. Some Google Docs PDFs position glyphs
+/// individually, which made words such as "your" arrive as "y ou". This writer
+/// uses the PDF's word boundaries first and a less eager spatial fallback.
+#[derive(Default)]
+struct FlowTextOutput {
+    text: String,
+    last_end: f64,
+    last_y: f64,
+    first_character_in_word: bool,
+    has_character: bool,
+}
+
+impl pdf_extract::OutputDev for FlowTextOutput {
+    fn begin_page(
+        &mut self,
+        _page_num: u32,
+        _media_box: &pdf_extract::MediaBox,
+        _art_box: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), pdf_extract::OutputError> {
+        if self.has_character && !self.text.ends_with('\u{000c}') {
+            self.text.push('\u{000c}');
+        }
+        self.last_end = f64::MAX;
+        self.last_y = 0.0;
+        self.first_character_in_word = false;
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn output_character(
+        &mut self,
+        trm: &pdf_extract::Transform,
+        width: f64,
+        _spacing: f64,
+        font_size: f64,
+        character: &str,
+    ) -> Result<(), pdf_extract::OutputError> {
+        let x = trm.m31;
+        let y = trm.m32;
+        let size = font_size.abs().max(1.0);
+        if self.has_character && self.first_character_in_word {
+            if (y - self.last_y).abs() > size * 0.45
+                || (x < self.last_end && (y - self.last_y).abs() > size * 0.2)
+            {
+                if !self.text.ends_with('\n') {
+                    self.text.push('\n');
+                }
+            } else if x > self.last_end + size * 0.22
+                && !matches!(self.text.chars().last(), Some(' ' | '\n' | '\u{000c}'))
+            {
+                self.text.push(' ');
+            }
+        }
+        self.text.push_str(character);
+        self.has_character = true;
+        self.first_character_in_word = false;
+        self.last_y = y;
+        self.last_end = x + width * size;
+        Ok(())
+    }
+
+    fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        self.first_character_in_word = true;
+        Ok(())
+    }
+
+    fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+}
+
+fn extract_pdf_text(bytes: &[u8]) -> CommandResult<String> {
+    let document = pdf_extract::Document::load_mem(bytes)
+        .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
+    let mut output = FlowTextOutput::default();
+    pdf_extract::output_doc(&document, &mut output)
+        .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
+    Ok(output.text)
+}
+
 fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
     connection.execute("DELETE FROM documents WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM flashcard_sets WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
@@ -25,7 +113,12 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 
 const AI_SERVER_PORT: u16 = 19393;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
-const DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
+const AI_CONTEXT_SIZE: &str = "8192";
+const AI_GPU_LAYERS: &str = "20";
+const AI_PARALLEL_REQUESTS: &str = "1";
+const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
+const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
     model_path: String,
@@ -41,12 +134,22 @@ fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> Comman
         .map_err(|error| error.to_string())?
         .join("models")
         .join(DEFAULT_AI_MODEL_NAME);
-    let model = if requested.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) && requested.is_file() {
+    let requested_is_legacy_default = requested
+        .file_name()
+        .and_then(|file| file.to_str())
+        .is_some_and(|file| file.eq_ignore_ascii_case(LEGACY_DEFAULT_AI_MODEL_NAME));
+    let model = if requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+        && requested.is_file()
+        && !requested_is_legacy_default
+    {
         requested.to_path_buf()
     } else if default_path.is_file() {
         default_path
     } else {
-        return Err("SoFlo could not find a local AI model. Download the compact model in Settings, then try again.".into());
+        return Err("SoFlo could not find the current local AI model. Download the 4B model in Settings, then try again.".into());
     };
     let size = fs::metadata(&model)
         .map_err(|_| "SoFlo could not read the local AI model.".to_string())?
@@ -120,7 +223,10 @@ pub fn launch_installed_soflo_and_close(app: tauri::AppHandle) -> CommandResult<
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "Windows could not find the local application folder.".to_string())?;
-    let installed_app = local_app_data.join("Programs").join("SoFlo").join("SoFlo.exe");
+    let installed_app = local_app_data
+        .join("Programs")
+        .join("SoFlo")
+        .join("SoFlo.exe");
     if !installed_app.is_file() {
         return Err("SoFlo was installed, but its app file could not be found.".into());
     }
@@ -134,8 +240,7 @@ pub fn launch_installed_soflo_and_close(app: tauri::AppHandle) -> CommandResult<
 #[tauri::command]
 pub fn import_pdf_text(path: String) -> CommandResult<String> {
     let bytes = fs::read(path).map_err(|_| "SoFlo could not read that PDF file.".to_string())?;
-    let text = pdf_extract::extract_text_from_mem(&bytes)
-        .map_err(|_| "SoFlo could not extract editable text from that PDF.".to_string())?;
+    let text = extract_pdf_text(&bytes)?;
     if text.trim().is_empty() {
         return Err("That PDF has no selectable text. Scanned PDFs need OCR before they can be imported as editable notes.".into());
     }
@@ -167,9 +272,10 @@ pub async fn refine_document_text(
     app: tauri::AppHandle,
     model_path: String,
     text: String,
+    document_kind: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        refine_document_text_blocking(app, model_path, text)
+        refine_document_text_blocking(app, model_path, text, document_kind)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -179,36 +285,107 @@ fn refine_document_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
     text: String,
+    document_kind: String,
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
-    let source = text.chars().take(80_000).collect::<String>();
-    let system = "You are SoFlo's careful local document formatter. Preserve every factual detail and never invent text. Return only clean Markdown—never wrap it in ```markdown fences. For an essay or paper: preserve the MLA heading block exactly as separate normal lines (student, instructor, course, date); then use # for the one actual title; preserve the original paragraph boundaries and body text. Never turn a name, date, or ordinary sentence into a heading. For a syllabus, accuracy and readable hierarchy are critical: include every policy, deadline, contact detail, grading rule, assignment, and schedule item from the source. Use # only for its actual title, ## or ### for real section headings, bullets for lists, and tables only when the source is truly tabular. Use **bold** only for essential labels, deadlines, percentages, and warnings. Never use more than ###. Do not add commentary or explanations.";
+    let source_text = text.chars().take(80_000).collect::<String>();
+    let source_chunks = split_source_for_ai(&source_text, AI_SOURCE_CHUNK_CHARS);
+    let is_syllabus = document_kind.eq_ignore_ascii_case("syllabus");
+    let system = if is_syllabus {
+        "You are SoFlo's meticulous local syllabus formatter. Return only clean Markdown, never code fences or commentary. Preserve every source fact exactly and never invent, summarize away, reorder, correct, or omit material. This is a formatting task, not a rewriting task. Keep every policy, deadline, contact detail, grading rule, assignment, reading, schedule item, URL, percentage, and warning. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. If a PDF has a visual line break after every wrapped line, join those wrapped lines into complete paragraphs or list items rather than echoing each line separately. Use # only for the document title; use ## and ### only for genuine section headings; use bullets for true lists; use a table only when the source is genuinely tabular. Keep prose in complete paragraphs. Use **bold** sparingly for labels, dates, percentages, and warnings. Never use more than ###."
+    } else {
+        "You are SoFlo's meticulous local paper formatter. Return only clean Markdown, never code fences or commentary. Preserve the source word for word: do not rewrite, proofread, summarize, alter punctuation, reorder text, or invent anything. This is a formatting task only. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. If a PDF has a visual line break after every wrapped line, join those wrapped lines into complete paragraphs or list items rather than echoing each line separately. Preserve the MLA heading block as four separate ordinary lines (student, instructor, course, date), then use # for the one actual title. Preserve every original paragraph boundary and citation exactly. Never turn a name, date, works-cited entry, or ordinary sentence into a heading. Use ## only for real source section headings such as Works Cited, and use **bold** only if it already appears in the source."
+    };
     emit_ai_progress(&app, 6, "Starting your private local model");
     ensure_ai_server(&model_path, &app)?;
-    emit_ai_progress(&app, 42, "Reading and organizing the document");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let source_kind = if is_syllabus { "syllabus" } else { "paper" };
+    let mut formatted_chunks = Vec::with_capacity(source_chunks.len());
+    for (index, source) in source_chunks.iter().enumerate() {
+        let progress = 42 + ((index as u8).saturating_mul(42) / source_chunks.len().max(1) as u8);
+        emit_ai_progress(
+            &app,
+            progress,
+            &format!(
+                "Formatting section {} of {}",
+                index + 1,
+                source_chunks.len()
+            ),
+        );
+        let request = format!(
+            "Format section {} of {} from this extracted {} without changing its content:\n\n{}",
+            index + 1,
+            source_chunks.len(),
+            source_kind,
+            source
+        );
+        let mut formatted = request_document_format(&client, system, &request)
+            .map_err(|error| format!("{} for section {}.", error, index + 1))?;
+        if is_visual_line_echo(source, &formatted) {
+            emit_ai_progress(
+                &app,
+                progress.saturating_add(4),
+                "Rebuilding the document structure",
+            );
+            let retry = format!(
+                "The previous response was rejected because it merely echoed visual PDF lines. Format section {} of {} again as a complete Markdown {}. Preserve every word, number, date, URL, warning, and paragraph boundary. Join ordinary visual line wraps into logical paragraphs. Use headings only for genuine headings, Markdown lists only for genuine lists, and Markdown tables only for real tables. Keep intentional poetry, quotations, or verse line by line using two trailing spaces for each intentional line break. Return Markdown only, with no code fences or explanation.\n\nSOURCE:\n{}",
+                index + 1,
+                source_chunks.len(),
+                source_kind,
+                source,
+            );
+            formatted = request_document_format(&client, system, &retry)
+                .map_err(|error| format!("{} while rebuilding section {}.", error, index + 1))?;
+        }
+        if formatted.is_empty() {
+            return Err(format!(
+                "The local AI model returned no formatted text for section {}.",
+                index + 1
+            ));
+        }
+        formatted_chunks.push(formatted);
+    }
+    emit_ai_progress(&app, 86, "Turning the result into your editable paper");
+    let formatted = formatted_chunks.join("\n\n");
+    touch_ai_server();
+    emit_ai_progress(&app, 100, "Finishing up");
+    Ok(formatted)
+}
+
+fn request_document_format(
+    client: &reqwest::blocking::Client,
+    system: &str,
+    request: &str,
+) -> CommandResult<String> {
     let response = client
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT))
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            AI_SERVER_PORT
+        ))
         .json(&serde_json::json!({
             "messages": [
                 { "role": "system", "content": system },
-                { "role": "user", "content": format!("Format this extracted document:\n\n{}", source) }
+                { "role": "user", "content": request }
             ],
-            "max_tokens": 8192,
+            "max_tokens": 4096,
             "temperature": 0.1
         }))
         .send()
         .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
         .error_for_status()
-        .map_err(|error| format!("SoFlo's local AI model could not finish this import: {}", error))?;
-    emit_ai_progress(&app, 86, "Turning the result into your editable paper");
+        .map_err(|error| {
+            format!(
+                "SoFlo's local AI model could not finish this import: {}",
+                error
+            )
+        })?;
     let body: serde_json::Value = response
         .json()
         .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    let formatted = body
+    Ok(body
         .get("choices")
         .and_then(|value| value.get(0))
         .and_then(|value| value.get("message"))
@@ -216,13 +393,40 @@ fn refine_document_text_blocking(
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .trim()
-        .to_string();
-    touch_ai_server();
-    if formatted.is_empty() {
-        return Err("The local AI model returned no formatted text.".into());
+        .to_string())
+}
+
+fn is_visual_line_echo(source: &str, formatted: &str) -> bool {
+    let source_lines = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let formatted_lines = formatted
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if source_lines.len() < 12 || formatted_lines.len() * 100 < source_lines.len() * 80 {
+        return false;
     }
-    emit_ai_progress(&app, 100, "Finishing up");
-    Ok(formatted)
+    let has_markdown_structure = formatted_lines.iter().any(|line| {
+        line.starts_with('#')
+            || line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.starts_with("+ ")
+            || line.starts_with('|')
+            || line
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+                && line.contains(". ")
+    });
+    let matching_lines = formatted_lines
+        .iter()
+        .filter(|line| source_lines.iter().any(|source_line| source_line == *line))
+        .count();
+    !has_markdown_structure && matching_lines * 100 >= formatted_lines.len() * 75
 }
 
 #[tauri::command]
@@ -255,7 +459,10 @@ fn generate_flashcards_text_blocking(
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let source = materials.chars().take(120_000).collect::<String>();
     if source.trim().is_empty() {
-        return Err("Add a topic, pasted study text, or an uploaded document before creating flashcards.".into());
+        return Err(
+            "Add a topic, pasted study text, or an uploaded document before creating flashcards."
+                .into(),
+        );
     }
     let source_kind = if materials.trim_start().starts_with("TOPIC OR PROMPT:") {
         "topic"
@@ -264,7 +471,11 @@ fn generate_flashcards_text_blocking(
     } else {
         "source-material"
     };
-    eprintln!("[SoFlo AI] flashcard generation source={} characters={}", source_kind, source.chars().count());
+    eprintln!(
+        "[SoFlo AI] flashcard generation source={} characters={}",
+        source_kind,
+        source.chars().count()
+    );
     let request_instruction = if source_kind == "topic" {
         "No source document was supplied. Use your general academic knowledge to make accurate flashcards directly about this topic or instruction."
     } else if source_kind == "text-or-topic" {
@@ -306,6 +517,51 @@ fn emit_ai_progress(app: &tauri::AppHandle, progress: u8, message: &str) {
     );
 }
 
+fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
+    let normalized = text.replace('\r', "");
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for block in normalized
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+    {
+        let candidate = if current.is_empty() {
+            block.trim().to_string()
+        } else {
+            format!("{}\n\n{}", current, block.trim())
+        };
+        if candidate.chars().count() <= max_chars {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+        let mut remainder = block.trim();
+        while remainder.chars().count() > max_chars {
+            let byte_limit = remainder
+                .char_indices()
+                .nth(max_chars)
+                .map(|(index, _)| index)
+                .unwrap_or(remainder.len());
+            let split_at = remainder[..byte_limit]
+                .rfind(char::is_whitespace)
+                .filter(|index| *index > byte_limit / 2)
+                .unwrap_or(byte_limit);
+            chunks.push(remainder[..split_at].trim().to_string());
+            remainder = remainder[split_at..].trim_start();
+        }
+        current = remainder.to_string();
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
+}
+
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
     let state = AI_SERVER.get_or_init(|| Mutex::new(None));
     let mut guard = state
@@ -338,6 +594,14 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<(
         "127.0.0.1",
         "--port",
         &port,
+        "--ctx-size",
+        AI_CONTEXT_SIZE,
+        "--parallel",
+        AI_PARALLEL_REQUESTS,
+        "--gpu-layers",
+        AI_GPU_LAYERS,
+        "--reasoning",
+        "off",
         "--no-webui",
     ]);
     #[cfg(windows)]
@@ -407,14 +671,21 @@ fn touch_ai_server() {
 }
 
 #[tauri::command]
-pub async fn download_default_ai_model(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<String> {
+pub async fn download_default_ai_model(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<String> {
     let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
     tauri::async_runtime::spawn_blocking(move || {
-        const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf?download=true";
-        let destination = if configured_model_path.trim().is_empty() {
+        const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
+        let configured = Path::new(configured_model_path.trim());
+        let configured_is_legacy_default = configured
+            .file_name()
+            .and_then(|file| file.to_str())
+            .is_some_and(|file| file.eq_ignore_ascii_case(LEGACY_DEFAULT_AI_MODEL_NAME));
+        let destination = if configured_model_path.trim().is_empty() || configured_is_legacy_default {
             app.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join(DEFAULT_AI_MODEL_NAME)
         } else {
-            let configured = Path::new(configured_model_path.trim());
             if configured.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
                 configured.to_path_buf()
             } else {
@@ -613,7 +884,10 @@ fn read_card_progress(row: &Row<'_>) -> rusqlite::Result<CardProgress> {
     })
 }
 
-fn get_settings(connection: &Connection, installer_model_path: Option<&str>) -> CommandResult<AppSettings> {
+fn get_settings(
+    connection: &Connection,
+    installer_model_path: Option<&str>,
+) -> CommandResult<AppSettings> {
     let raw: Option<String> = connection
         .query_row(
             "SELECT value FROM app_settings WHERE key = 'settings'",
@@ -798,13 +1072,25 @@ pub fn update_class(
 #[tauri::command]
 pub fn delete_class(database: State<'_, Database>, id: String) -> CommandResult<()> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     transaction.execute("DELETE FROM test_attempts WHERE set_id IN (SELECT id FROM flashcard_sets WHERE class_id=?1)", [&id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM lectures WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM documents WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM flashcard_sets WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM document_folders WHERE class_id=?1", [&id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM classes WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM lectures WHERE class_id=?1", [&id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM documents WHERE class_id=?1", [&id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM flashcard_sets WHERE class_id=?1", [&id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM document_folders WHERE class_id=?1", [&id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM classes WHERE id=?1", [&id])
+        .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -813,7 +1099,11 @@ pub fn delete_class(database: State<'_, Database>, id: String) -> CommandResult<
 pub fn delete_semester(database: State<'_, Database>, id: String) -> CommandResult<()> {
     let connection = database.open()?;
     let class_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM classes WHERE semester_id=?1", [&id], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM classes WHERE semester_id=?1",
+            [&id],
+            |row| row.get(0),
+        )
         .map_err(|error| error.to_string())?;
     if class_count > 0 {
         return Err("Remove the classes in this semester before removing it.".into());
@@ -925,8 +1215,11 @@ pub fn list_lectures(
 ) -> CommandResult<Vec<LectureSummary>> {
     let connection = database.open()?;
     let mut statement = connection.prepare("SELECT id, class_id, course_code, course_name, lecture_date, scheduled_start, scheduled_end, professor_snapshot, title, substr(content_plain, 1, 180), updated_at, created_at FROM lectures WHERE class_id=?1 ORDER BY lecture_date DESC, created_at DESC").map_err(|error| error.to_string())?;
-    let rows = statement.query_map([class_id], read_lecture_summary).map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    let rows = statement
+        .query_map([class_id], read_lecture_summary)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -961,9 +1254,21 @@ pub fn save_lecture(
         return Err("Lecture titles cannot be empty.".into());
     }
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let (existing, revision): (String, i32) = transaction.query_row("SELECT content, revision FROM lectures WHERE id=?1", [&input.id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| error.to_string())?;
-    let next_revision = if existing != input.content { revision + 1 } else { revision };
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let (existing, revision): (String, i32) = transaction
+        .query_row(
+            "SELECT content, revision FROM lectures WHERE id=?1",
+            [&input.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let next_revision = if existing != input.content {
+        revision + 1
+    } else {
+        revision
+    };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     get_lecture(database, input.id)
@@ -971,7 +1276,10 @@ pub fn save_lecture(
 
 #[tauri::command]
 pub fn delete_lecture(database: State<'_, Database>, id: String) -> CommandResult<()> {
-    let changed = database.open()?.execute("DELETE FROM lectures WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    let changed = database
+        .open()?
+        .execute("DELETE FROM lectures WHERE id=?1", [&id])
+        .map_err(|error| error.to_string())?;
     if changed == 0 {
         return Err("That lecture could not be found.".into());
     }
@@ -1118,6 +1426,32 @@ pub fn list_document_folders(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn rename_document_folder(
+    database: State<'_, Database>,
+    id: String,
+    title: String,
+) -> CommandResult<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A paper group needs a name.".into());
+    }
+    if title.chars().count() > 120 {
+        return Err("Paper group names can be up to 120 characters.".into());
+    }
+    let changed = database
+        .open()?
+        .execute(
+            "UPDATE document_folders SET title=?1 WHERE id=?2",
+            params![title, id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("That paper group is no longer available.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1279,7 +1613,11 @@ pub fn get_flashcard_set(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let mut progress_statement = connection.prepare("SELECT card_id, mastery, correct_count, incorrect_count, consecutive_correct, last_seen_at, due_at FROM card_progress WHERE card_id IN (SELECT id FROM flashcards WHERE set_id=?1)").map_err(|error| error.to_string())?;
-    let progress = progress_statement.query_map([&id], read_card_progress).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let progress = progress_statement
+        .query_map([&id], read_card_progress)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     Ok(FlashcardSetDetail {
         id,
         class_id,
@@ -1321,20 +1659,41 @@ pub fn set_flashcard_set_deleted(
 }
 
 fn flashcard_export_cell(value: &str) -> String {
-    value.replace(['\t', '\r', '\n'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    value
+        .replace(['\t', '\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn flashcard_export_filename(title: &str) -> String {
     let name: String = title
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || character == ' ' || character == '-' || character == '_' { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric()
+                || character == ' '
+                || character == '-'
+                || character == '_'
+            {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect();
     let name = name.trim_matches([' ', '_', '-']);
-    if name.is_empty() { "SoFlo flashcards".into() } else { format!("SoFlo flashcards - {}", name) }
+    if name.is_empty() {
+        "SoFlo flashcards".into()
+    } else {
+        format!("SoFlo flashcards - {}", name)
+    }
 }
 
 #[tauri::command]
-pub fn export_flashcard_set_text(database: State<'_, Database>, set_id: String) -> CommandResult<String> {
+pub fn export_flashcard_set_text(
+    database: State<'_, Database>,
+    set_id: String,
+) -> CommandResult<String> {
     let set = get_flashcard_set(database, set_id)?;
     let download_dir = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -1342,7 +1701,18 @@ pub fn export_flashcard_set_text(database: State<'_, Database>, set_id: String) 
         .join("Downloads");
     fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
     let path = download_dir.join(format!("{}.txt", flashcard_export_filename(&set.title)));
-    let content = set.cards.iter().map(|card| format!("{}\t{}", flashcard_export_cell(&card.front), flashcard_export_cell(&card.back))).collect::<Vec<_>>().join("\r\n");
+    let content = set
+        .cards
+        .iter()
+        .map(|card| {
+            format!(
+                "{}\t{}",
+                flashcard_export_cell(&card.front),
+                flashcard_export_cell(&card.back)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
     fs::write(&path, content).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
@@ -1350,7 +1720,11 @@ pub fn export_flashcard_set_text(database: State<'_, Database>, set_id: String) 
 #[tauri::command]
 pub fn read_text_file(path: String) -> CommandResult<String> {
     let source = PathBuf::from(path);
-    if !source.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) {
+    if !source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+    {
         return Err("Choose a .txt file to import flashcards.".into());
     }
     fs::read_to_string(&source)
@@ -1481,7 +1855,18 @@ pub fn record_card_response(
     } else {
         "learning"
     };
-    let review_days = if input.is_correct { match streak { 0 | 1 => 1, 2 => 3, 3 => 7, 4 => 14, 5 => 30, _ => 45 } } else { 1 };
+    let review_days = if input.is_correct {
+        match streak {
+            0 | 1 => 1,
+            2 => 3,
+            3 => 7,
+            4 => 14,
+            5 => 30,
+            _ => 45,
+        }
+    } else {
+        1
+    };
     // Keep this in SQLite's native timestamp form so the due-card query can compare
     // values correctly without a timezone-string lexical mismatch.
     let due_at = (chrono::Utc::now() + chrono::Duration::days(review_days))
@@ -1503,33 +1888,110 @@ pub fn record_card_response(
 }
 
 #[tauri::command]
-pub fn start_study_session(database: State<'_, Database>, input: StartStudySessionInput) -> CommandResult<StudySessionSummary> {
+pub fn start_study_session(
+    database: State<'_, Database>,
+    input: StartStudySessionInput,
+) -> CommandResult<StudySessionSummary> {
     let connection = database.open()?;
-    let class_id: String = connection.query_row("SELECT class_id FROM flashcard_sets WHERE id=?1", [&input.set_id], |row| row.get(0)).map_err(|_| "That study set could not be found.".to_string())?;
+    let class_id: String = connection
+        .query_row(
+            "SELECT class_id FROM flashcard_sets WHERE id=?1",
+            [&input.set_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "That study set could not be found.".to_string())?;
     let id = Uuid::new_v4().to_string();
-    connection.execute("INSERT INTO study_sessions (id, set_id, class_id, mode) VALUES (?1,?2,?3,?4)", params![id, input.set_id, class_id, input.mode]).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO study_sessions (id, set_id, class_id, mode) VALUES (?1,?2,?3,?4)",
+            params![id, input.set_id, class_id, input.mode],
+        )
+        .map_err(|error| error.to_string())?;
     connection.query_row("SELECT id, set_id, class_id, mode, started_at, completed_at FROM study_sessions WHERE id=?1", [&id], |row| Ok(StudySessionSummary { id: row.get(0)?, set_id: row.get(1)?, class_id: row.get(2)?, mode: row.get(3)?, started_at: row.get(4)?, completed_at: row.get(5)? })).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn complete_study_session(database: State<'_, Database>, input: CompleteStudySessionInput) -> CommandResult<()> {
-    database.open()?.execute("UPDATE study_sessions SET completed_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.id]).map_err(|error| error.to_string())?;
+pub fn complete_study_session(
+    database: State<'_, Database>,
+    input: CompleteStudySessionInput,
+) -> CommandResult<()> {
+    database
+        .open()?
+        .execute(
+            "UPDATE study_sessions SET completed_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.id],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_study_insights(database: State<'_, Database>, class_id: String) -> CommandResult<StudyInsights> {
+pub fn get_study_insights(
+    database: State<'_, Database>,
+    class_id: String,
+) -> CommandResult<StudyInsights> {
     let connection = database.open()?;
     let mut counts = [0_i32; 6];
     let mut statement = connection.prepare("SELECT COALESCE(p.mastery, 'new'), COUNT(*) FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL GROUP BY COALESCE(p.mastery, 'new')").map_err(|error| error.to_string())?;
-    let rows = statement.query_map([&class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))).map_err(|error| error.to_string())?;
-    for row in rows { let (mastery, count) = row.map_err(|error| error.to_string())?; match mastery.as_str() { "learning" => counts[1] = count, "familiar" => counts[2] = count, "mastered" => counts[3] = count, "needsWork" => counts[4] = count, _ => counts[0] = count } }
+    let rows = statement
+        .query_map([&class_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (mastery, count) = row.map_err(|error| error.to_string())?;
+        match mastery.as_str() {
+            "learning" => counts[1] = count,
+            "familiar" => counts[2] = count,
+            "mastered" => counts[3] = count,
+            "needsWork" => counts[4] = count,
+            _ => counts[0] = count,
+        }
+    }
     counts[5] = connection.query_row("SELECT COUNT(*) FROM card_progress p INNER JOIN flashcards c ON c.id=p.card_id INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND datetime(p.due_at) <= CURRENT_TIMESTAMP", [&class_id], |row| row.get(0)).unwrap_or(0);
     let mut card_statement = connection.prepare("SELECT c.id, c.set_id, c.front, COALESCE(p.mastery,'new'), COALESCE(p.correct_count,0), COALESCE(p.incorrect_count,0), p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL ORDER BY CASE COALESCE(p.mastery,'new') WHEN 'needsWork' THEN 0 WHEN 'learning' THEN 1 WHEN 'new' THEN 2 WHEN 'familiar' THEN 3 ELSE 4 END, (COALESCE(p.incorrect_count,0) - COALESCE(p.correct_count,0)) DESC, COALESCE(p.last_seen_at,'') ASC LIMIT 8").map_err(|error| error.to_string())?;
-    let weak_cards = card_statement.query_map([&class_id], |row| Ok(StudyInsightCard { card_id: row.get(0)?, set_id: row.get(1)?, term: row.get(2)?, mastery: row.get(3)?, correct_count: row.get(4)?, incorrect_count: row.get(5)?, due_at: row.get(6)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let weak_cards = card_statement
+        .query_map([&class_id], |row| {
+            Ok(StudyInsightCard {
+                card_id: row.get(0)?,
+                set_id: row.get(1)?,
+                term: row.get(2)?,
+                mastery: row.get(3)?,
+                correct_count: row.get(4)?,
+                incorrect_count: row.get(5)?,
+                due_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let mut strong_statement = connection.prepare("SELECT c.id, c.set_id, c.front, p.mastery, p.correct_count, p.incorrect_count, p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id INNER JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND p.mastery IN ('mastered', 'familiar') ORDER BY CASE p.mastery WHEN 'mastered' THEN 0 ELSE 1 END, p.consecutive_correct DESC LIMIT 3").map_err(|error| error.to_string())?;
-    let strong_cards = strong_statement.query_map([&class_id], |row| Ok(StudyInsightCard { card_id: row.get(0)?, set_id: row.get(1)?, term: row.get(2)?, mastery: row.get(3)?, correct_count: row.get(4)?, incorrect_count: row.get(5)?, due_at: row.get(6)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    Ok(StudyInsights { total_cards: counts[0] + counts[1] + counts[2] + counts[3] + counts[4], new_cards: counts[0], learning_cards: counts[1], familiar_cards: counts[2], mastered_cards: counts[3], needs_work_cards: counts[4], due_cards: counts[5], weak_cards, strong_cards })
+    let strong_cards = strong_statement
+        .query_map([&class_id], |row| {
+            Ok(StudyInsightCard {
+                card_id: row.get(0)?,
+                set_id: row.get(1)?,
+                term: row.get(2)?,
+                mastery: row.get(3)?,
+                correct_count: row.get(4)?,
+                incorrect_count: row.get(5)?,
+                due_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(StudyInsights {
+        total_cards: counts[0] + counts[1] + counts[2] + counts[3] + counts[4],
+        new_cards: counts[0],
+        learning_cards: counts[1],
+        familiar_cards: counts[2],
+        mastered_cards: counts[3],
+        needs_work_cards: counts[4],
+        due_cards: counts[5],
+        weak_cards,
+        strong_cards,
+    })
 }
 
 #[tauri::command]
@@ -1544,16 +2006,27 @@ pub fn save_test_attempt(
 }
 
 #[tauri::command]
-pub fn get_match_best_time(database: State<'_, Database>, set_id: String) -> CommandResult<Option<i32>> {
+pub fn get_match_best_time(
+    database: State<'_, Database>,
+    set_id: String,
+) -> CommandResult<Option<i32>> {
     database
         .open()?
-        .query_row("SELECT best_seconds FROM match_records WHERE set_id=?1", [&set_id], |row| row.get(0))
+        .query_row(
+            "SELECT best_seconds FROM match_records WHERE set_id=?1",
+            [&set_id],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn save_match_time(database: State<'_, Database>, set_id: String, seconds: i32) -> CommandResult<i32> {
+pub fn save_match_time(
+    database: State<'_, Database>,
+    set_id: String,
+    seconds: i32,
+) -> CommandResult<i32> {
     if seconds < 1 {
         return Err("A Match time must be at least one second.".into());
     }
@@ -1565,7 +2038,11 @@ pub fn save_match_time(database: State<'_, Database>, set_id: String, seconds: i
         )
         .map_err(|error| error.to_string())?;
     connection
-        .query_row("SELECT best_seconds FROM match_records WHERE set_id=?1", [&set_id], |row| row.get(0))
+        .query_row(
+            "SELECT best_seconds FROM match_records WHERE set_id=?1",
+            [&set_id],
+            |row| row.get(0),
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -1666,7 +2143,13 @@ pub fn default_soflo_export_path() -> CommandResult<String> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?);
     let downloads = base.join("Downloads");
-    Ok(downloads.join(format!("SoFlo Library {}.soflo", chrono::Local::now().format("%Y-%m-%d"))).display().to_string())
+    Ok(downloads
+        .join(format!(
+            "SoFlo Library {}.soflo",
+            chrono::Local::now().format("%Y-%m-%d")
+        ))
+        .display()
+        .to_string())
 }
 
 #[tauri::command]

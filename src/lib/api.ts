@@ -4,7 +4,7 @@ import type {
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -41,6 +41,7 @@ export const api = {
   renameDocuments: (documents: { id: string; title: string }[]) => call<void>('rename_documents', { input: { documents } }),
   setDocumentPdfLink: (id: string, path: string | null) => call<void>('set_document_pdf_link', { id, path }),
   listDocumentFolders: (classId: string) => call<DocumentFolder[]>('list_document_folders', { classId }),
+  renameDocumentFolder: (id: string, title: string) => call<void>('rename_document_folder', { id, title }),
   groupDocuments: (id: string, targetId: string) => call<void>('group_documents', { id, targetId }),
   removeDocumentFromFolder: (id: string) => call<void>('remove_document_from_folder', { id }),
   moveDocument: (id: string, classId: string) => call<void>('move_document', { id, classId }),
@@ -77,7 +78,7 @@ export const api = {
   wipeSofloDataAndRestart: () => call<void>('wipe_soflo_data_and_restart'),
   importPdfText: (path: string) => call<string>('import_pdf_text', { path }),
   importWordText: (path: string) => call<string>('import_word_text', { path }),
-  refineDocumentText: (modelPath: string, text: string) => call<string>('refine_document_text', { modelPath, text }),
+  refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
 }

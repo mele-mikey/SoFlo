@@ -33,7 +33,7 @@ AutoCloseWindow true
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SoFlo"
 !define PRODUCT_KEY "Software\SoFlo"
 !define APP_DATA "$APPDATA\edu.soflo.desktop"
-!define MODEL_FILE "qwen2.5-3b-instruct-q4_k_m.gguf"
+!define MODEL_FILE "Qwen3-4B-Q4_K_M.gguf"
 !define MUI_ICON "..\src-tauri\icons\icon.ico"
 !define MUI_UNICON "..\src-tauri\icons\icon.ico"
 !define MUI_ABORTWARNING

@@ -85,7 +85,11 @@ function changeSelectedIndent(editor: Editor, amount: 1 | -1) {
 const PaperIndent = Extension.create({
   name: 'paperIndent',
   addGlobalAttributes() {
-    return [{ types: ['paragraph', 'heading'], attributes: { indent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.indent ?? '0', 10) || 0, renderHTML: (attributes: { indent?: number }) => attributes.indent ? { 'data-indent': attributes.indent, style: `margin-left: ${attributes.indent * .5}in` } : {} } } }]
+    return [{ types: ['paragraph', 'heading'], attributes: {
+      indent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.indent ?? '0', 10) || 0, renderHTML: (attributes: { indent?: number }) => attributes.indent ? { 'data-indent': attributes.indent, style: `margin-left: ${attributes.indent * .5}in` } : {} },
+      firstLineIndent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.firstLineIndent ?? '0', 10) || 0, renderHTML: (attributes: { firstLineIndent?: number }) => attributes.firstLineIndent ? { 'data-first-line-indent': attributes.firstLineIndent } : {} },
+      hangingIndent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.hangingIndent ?? '0', 10) || 0, renderHTML: (attributes: { hangingIndent?: number }) => attributes.hangingIndent ? { 'data-hanging-indent': attributes.hangingIndent } : {} },
+    } }]
   },
   addKeyboardShortcuts() {
     return {

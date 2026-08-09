@@ -1,5 +1,6 @@
 import { AlertTriangle, Bot, Check, Database, Download, Info, KeyRound, LockKeyhole, Moon, Palette, ShieldAlert, ShieldCheck, SpellCheck2, Upload, X } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { useState, type ReactNode } from 'react'
 import { api } from '../../lib/api'
 import type { AppSettings, SecurityStatus } from '../../lib/types'
@@ -16,6 +17,10 @@ interface SettingsViewProps {
 
 type BusyAction = 'export' | 'import' | 'wipe' | null
 
+const MODEL_INFORMATION_URL = 'https://huggingface.co/Qwen/Qwen3-4B-GGUF'
+const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
+const needsModelUpgrade = (path: string) => path.trim().toLocaleLowerCase().endsWith(LEGACY_DEFAULT_AI_MODEL)
+
 export function SettingsView({ settings, dataLocation, security, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
@@ -23,6 +28,7 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
   const [downloadingModel, setDownloadingModel] = useState(false)
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
   const [aiInfoOpen, setAiInfoOpen] = useState(false)
+  const modelUpgradeNeeded = needsModelUpgrade(settings.aiModelPath)
 
   const update = async (partial: Partial<AppSettings>) => {
     const next = { ...settings, ...partial }
@@ -131,12 +137,12 @@ export function SettingsView({ settings, dataLocation, security, onSettingsChang
     <section className="settings-section ai-section">
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
-      <SettingRow title="Local model" detail={settings.aiModelPath || "Download SoFlo's compact 3B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (settings.aiModelPath ? chooseAiModel() : downloadAiModel())}>{downloadingModel ? 'Downloading...' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
-      {settings.aiEnabled && !settings.aiModelPath && <p className="ai-model-note">The model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
+      <SettingRow title="Local model" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Upgrade to SoFlo's improved 4B model." : settings.aiModelPath || "Download SoFlo's compact 4B model now, or let the first AI action download it."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpgradeNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpgradeNeeded ? 'Upgrade model' : settings.aiModelPath ? 'Change model' : 'Download model'}</button></SettingRow>
+      {settings.aiEnabled && (!settings.aiModelPath || modelUpgradeNeeded) && <p className="ai-model-note">The current 4B model is not on this PC yet. You can download it here, or wait until the first AI action.</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.55" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.0.62" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -174,7 +180,42 @@ function ConfirmDialog({ eyebrow, title, copy, confirmLabel, busy = false, onClo
 
 function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () => void }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-info-dialog" role="dialog" aria-modal="true" aria-label="About SoFlo AI"><header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo sends AI prompts only to a llama.cpp server running on this computer at 127.0.0.1. Your papers and study material are not sent to SoFlo servers or Hugging Face for inference.</p></div><div className="ai-info-copy"><strong>Model download</strong><p>When you choose to download the default model, SoFlo downloads Qwen2.5-3B-Instruct GGUF from Hugging Face. That download needs an internet connection; local inference does not.</p></div><div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div><a className="text-button ai-model-link" href="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF" target="_blank" rel="noreferrer">Model information</a><button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>{detailsOpen && <dl className="ai-technical-details"><div><dt>Model</dt><dd>Qwen2.5-3B-Instruct, Q4_K_M GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}</div><footer><button className="button button-primary" onClick={onClose}>Done</button></footer></section></div>
+  const [confirmModelLinkOpen, setConfirmModelLinkOpen] = useState(false)
+
+  const openModelInformation = () => {
+    setConfirmModelLinkOpen(false)
+    void openUrl(MODEL_INFORMATION_URL).catch(() => {
+      globalThis.open(MODEL_INFORMATION_URL, '_blank', 'noopener,noreferrer')
+    })
+  }
+
+  return <>
+    <div className="paper-dialog-backdrop" role="presentation">
+      <section className="paper-dialog ai-info-dialog" role="dialog" aria-modal="true" aria-label="About SoFlo AI">
+        <header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header>
+        <div className="paper-dialog-content">
+          <div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo sends AI prompts only to a llama.cpp server running on this computer at 127.0.0.1. Your papers and study material are not sent to SoFlo servers or Hugging Face for inference.</p></div>
+          <div className="ai-info-copy"><strong>Model download</strong><p>When you choose to download the default model, SoFlo downloads Qwen3-4B GGUF from Hugging Face. That download needs an internet connection; local inference does not.</p></div>
+          <div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div>
+          <button type="button" className="text-button ai-model-link" onClick={() => setConfirmModelLinkOpen(true)}>Model information</button>
+          <button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>
+          {detailsOpen && <dl className="ai-technical-details"><div><dt>Model</dt><dd>Qwen3-4B, Q4_K_M GGUF</dd></div><div><dt>Runtime</dt><dd>llama.cpp (llama-server)</dd></div><div><dt>Execution</dt><dd>Local loopback server</dd></div><div><dt>Storage</dt><dd>{modelPath || 'SoFlo app data folder after download'}</dd></div></dl>}
+        </div>
+        <footer><button className="button button-primary" onClick={onClose}>Done</button></footer>
+      </section>
+    </div>
+    {confirmModelLinkOpen && <ExternalLinkConfirmDialog onClose={() => setConfirmModelLinkOpen(false)} onConfirm={openModelInformation} />}
+  </>
+}
+
+function ExternalLinkConfirmDialog({ onClose, onConfirm }: { onClose: () => void; onConfirm: () => void }) {
+  return <div className="paper-dialog-backdrop ai-link-confirm-backdrop" role="presentation">
+    <section className="paper-dialog ai-link-confirm-dialog" role="dialog" aria-modal="true" aria-label="Open model information">
+      <header><div><p className="eyebrow">LEAVING SOFLO</p><h2>Open model information?</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header>
+      <div className="paper-dialog-content"><p>This will open the model page in your default browser.</p><p className="external-link-url">huggingface.co/Qwen/Qwen3-4B-GGUF</p></div>
+      <footer><button className="button button-quiet" onClick={onClose}>Stay in SoFlo</button><button className="button button-primary" onClick={onConfirm}>Open browser</button></footer>
+    </section>
+  </div>
 }
 
 function SecurityDialog({ security, type, remove, onClose, onUpdated }: { security: SecurityStatus | null; type: 'pin' | 'password'; remove: boolean; onClose: () => void; onUpdated: (status: SecurityStatus) => void }) {

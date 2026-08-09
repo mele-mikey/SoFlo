@@ -13,7 +13,7 @@ import { api } from './lib/api'
 import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureSummary, SecurityStatus, Semester } from './lib/types'
 import { ClassView } from './features/classes/ClassView'
 import { DocumentEditor } from './features/editor/DocumentEditor'
-import { importAiFormattedNote, importPdfAsEditableNote } from './features/editor/pdfImport'
+import { importAiFormattedNote, importPdfAsEditableNote, isLikelyMlaPaperImport } from './features/editor/pdfImport'
 import { FlashcardSetEditor } from './features/flashcards/FlashcardSetEditor'
 import { HomeView } from './features/home/HomeView'
 import { CalendarView } from './features/calendar/CalendarView'
@@ -25,11 +25,14 @@ import { SettingsView } from './features/settings/SettingsView'
 import { HelpView } from './features/help/HelpView'
 import { StudyView } from './features/study/StudyView'
 
-type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | null
+type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
 type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed' }
 type AiProgress = { progress: number; message: string }
+
+const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
+const needsDefaultAiModelUpgrade = (path: string) => path.trim().toLocaleLowerCase().endsWith(LEGACY_DEFAULT_AI_MODEL)
 
 function aiFailureMessage(error: unknown) {
   if (error instanceof Error && error.message) return error.message
@@ -268,7 +271,7 @@ function App() {
   const closeAiConsent = (proceed: boolean) => { setAiConsentOpen(false); aiConsentResolver.current?.(proceed); aiConsentResolver.current = null }
   const ensureAiModel = async () => {
     if (!library?.settings.aiEnabled) return ''
-    if (library.settings.aiModelPath) return library.settings.aiModelPath
+    if (library.settings.aiModelPath && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)) return library.settings.aiModelPath
     if (!await requestAiConsent()) throw new Error('AI import was cancelled.')
     setAiDownloadProgress(0)
     try {
@@ -279,12 +282,16 @@ function App() {
       return aiModelPath
     } finally { setAiDownloadProgress(null) }
   }
-  const formatImportedText = async (text: string, source: string) => {
+  const formatImportedText = async (text: string, source: string, documentKind: 'paper' | 'syllabus') => {
+    // Text-native papers (including the standard Google Docs/MLA layout) are
+    // more accurately preserved by the source-aware parser than by a model.
+    // The AI path remains for syllabi and non-standard documents.
+    if (documentKind === 'paper' && isLikelyMlaPaperImport(text)) return importPdfAsEditableNote(text, source)
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) return importPdfAsEditableNote(text, source)
     setAiWorking(true)
     setAiProgress({ progress: 3, message: 'Preparing your document' })
-    try { return importAiFormattedNote(await api.refineDocumentText(aiModelPath, text), source) } finally { setAiWorking(false); setAiProgress(null) }
+    try { return importAiFormattedNote(await api.refineDocumentText(aiModelPath, text, documentKind), source, text) } finally { setAiWorking(false); setAiProgress(null) }
   }
   const importPdfAsNewNote = async () => {
     if (!classId) { showToast('Open a class before importing a PDF.', 'error'); return }
@@ -292,7 +299,7 @@ function App() {
     if (!source || Array.isArray(source)) return
     try {
       const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importPdfText(source)
-      const imported = await formatImportedText(text, source)
+      const imported = await formatImportedText(text, source, 'paper')
       const created = await api.createDocument({ classId, title: imported.title })
       const saved = await api.saveDocument({ id: created.id, title: imported.title, content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: created.isFavorite })
       await loadClassContent(classId)
@@ -306,7 +313,7 @@ function App() {
     if (!source || Array.isArray(source)) return
     try {
       const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importPdfText(source)
-      const imported = await formatImportedText(text, source)
+      const imported = await formatImportedText(text, source, 'syllabus')
       if (syllabus) await api.setDocumentDeleted(syllabus.id, true)
       const created = await api.createDocument({ classId, title: imported.title || 'Class syllabus' })
       await api.saveDocument({ id: created.id, title: imported.title || 'Class syllabus', content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: false })
@@ -364,8 +371,10 @@ function App() {
   }
   const archiveActiveClass = async () => {
     if (!activeCourse) return
-    await api.updateClass({ ...activeCourse, archived: true })
-    await loadLibrary(); navigate({ kind: 'home' }); showToast(`${activeCourse.name} has been archived.`)
+    try {
+      await api.updateClass({ ...activeCourse, archived: true })
+      await loadLibrary(); navigate({ kind: 'home' }); showToast(`${activeCourse.name} has been archived.`)
+    } catch (error) { showToast(error instanceof Error ? error.message : 'That class could not be archived.', 'error') }
   }
   const restoreClass = async (course: CourseClass) => { await api.updateClass({ ...course, archived: false }); await loadLibrary(); setArchivedClasses((current) => current.filter((item) => item.id !== course.id)); showToast(`${course.name} has been restored.`) }
   const deleteDocument = async () => { if (!activeDocument) return; await flushDocument(); await api.setDocumentDeleted(activeDocument.id, true); await loadClassContent(activeDocument.classId); navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' }); showToast('Paper moved to trash.') }
@@ -385,6 +394,7 @@ function App() {
   const bulkRenamePapers = async (papers: { id: string; title: string }[]) => { if (!classId) return; await api.renameDocuments(papers); await loadClassContent(classId); showToast(`${papers.length} ${papers.length === 1 ? 'paper' : 'papers'} renamed.`) }
   const groupPapers = async (id: string, targetId: string) => { if (!classId) return; await api.groupDocuments(id, targetId); await loadClassContent(classId); showToast('Papers grouped.') }
   const ungroupPaper = async (id: string) => { if (!classId) return; await api.removeDocumentFromFolder(id); await loadClassContent(classId); showToast('Paper removed from group.') }
+  const renamePaperFolder = async (id: string, title: string) => { if (!classId) return; try { await api.renameDocumentFolder(id, title); await loadClassContent(classId); showToast('Paper group renamed.') } catch (error) { showToast(error instanceof Error ? error.message : 'That paper group could not be renamed.', 'error') } }
   const deleteSet = async () => { if (!activeSet) return; await api.setSetDeleted(activeSet.id, true); await loadClassContent(activeSet.classId); navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' }); showToast('Flashcard set moved to trash.') }
   const trashSet = async (set: FlashcardSetSummary) => { await api.setSetDeleted(set.id, true); await loadClassContent(set.classId); showToast('Flashcard set moved to trash.') }
   const duplicateSet = async (set: FlashcardSetSummary, title: string) => { const copy = await api.duplicateSet(set.id, title); await loadClassContent(set.classId); navigate({ kind: 'flashcardSet', classId: copy.classId, setId: copy.id }); showToast('Flashcard set duplicated.') }
@@ -513,7 +523,7 @@ function App() {
         {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} onStartWalkthrough={() => library.settings.walkthroughExampleClassId ? setModal({ type: 'restartWalkthrough' }) : void startWalkthrough()} />}
         {view.kind === 'help' && <HelpView />}
         {view.kind === 'archive' && <ArchiveView semesters={archivedSemesters} classes={archivedClasses} onRestore={(course) => void restoreClass(course)} />}
-        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setId, mode: 'learn', cardIds })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => void archiveActiveClass()} />}
+        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onRenameDocumentFolder={(id, title) => void renamePaperFolder(id, title)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setId, mode: 'learn', cardIds })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
         {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
@@ -526,6 +536,7 @@ function App() {
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
     {modal?.type === 'importSet' && <ImportSetDialog onClose={() => setModal(null)} onImport={(title, text) => importSet(modal.classId, title, text)} />}
     {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(request) => void generateAiSet(modal.classId, request)} />}
+    {modal?.type === 'archiveClass' && activeCourse && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Archive class"><header><div><p className="eyebrow">ARCHIVE CLASS</p><h2>Archive {activeCourse.name}?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>This removes the class from your active library but keeps its papers, lectures, flashcards, and study history safely in Archive. You can restore it whenever you need it.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => { setModal(null); void archiveActiveClass() }}>Archive class</button></footer></section></div>}
     {modal?.type === 'restartWalkthrough' && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Restart walkthrough"><header><div><p className="eyebrow">RESTART WALKTHROUGH</p><h2>Replace the old example class?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>You kept the example class from the last walkthrough. Starting again will permanently remove that example and create a fresh one for this walkthrough. Your own classes and papers will not be changed.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => void startWalkthrough(true)}>Start walkthrough</button></footer></section></div>}
     {lectureToDelete && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Delete lecture"><header><div><p className="eyebrow">PERMANENT ACTION</p><h2>Delete this lecture?</h2></div><button className="icon-button" onClick={() => setLectureToDelete(null)} aria-label="Cancel deletion"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{lectureToDelete.title}</strong> and its notes will be permanently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setLectureToDelete(null)}>Cancel</button><button className="button button-danger" onClick={() => void deleteLecture(lectureToDelete)}>Delete lecture</button></footer></section></div>}
     {toast && <div className={`toast ${toast.type}`} role="status">{toast.type === 'success' ? <Plus size={15} /> : <X size={15} />}{toast.message}</div>}

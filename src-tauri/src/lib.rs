@@ -73,6 +73,7 @@ pub fn run() {
             commands::rename_documents,
             commands::set_document_pdf_link,
             commands::list_document_folders,
+            commands::rename_document_folder,
             commands::group_documents,
             commands::remove_document_from_folder,
             commands::move_document,
