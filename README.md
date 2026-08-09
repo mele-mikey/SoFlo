@@ -1,6 +1,6 @@
 # SoFlo
 
-Copyright © 2026 Mikey M. · PolyForm Noncommercial 1.0.0.
+© 2026 Mikey M. — shared under the PolyForm Noncommercial 1.0.0 license.
 
 I made SoFlo because I wanted one calm place to keep up with college: classes, papers, lecture notes, syllabi, flashcards, and study sessions. It is built for Windows and keeps your library on your own computer. There is no account to make and no required cloud service.
 
@@ -54,8 +54,6 @@ You will find the finished installer in `src-tauri/target/release/bundle/nsis-cu
 
 ## Credit and license
 
-I’m Mikey M., and I created SoFlo. Copyright © 2026 Mikey M.
+I’m Mikey M., and I made SoFlo. © 2026 Mikey M.
 
-SoFlo is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). You are welcome to use, change, and share it for non-commercial purposes as long as you keep the required credit and license notice. If you want to use it commercially, please ask me first.
-
-This is not OSI open source, because the license does not allow commercial use without permission.
+I’m sharing SoFlo under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). You’re welcome to use it, learn from it, modify it, and share your changes for non-commercial purposes—just keep my credit and the license notice with it. If you want to use SoFlo commercially, reach out to me first.
