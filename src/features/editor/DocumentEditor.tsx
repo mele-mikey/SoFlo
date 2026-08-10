@@ -17,12 +17,15 @@ import Typography from '@tiptap/extension-typography'
 import Underline from '@tiptap/extension-underline'
 import { Extension, Node as TiptapNode, type Editor } from '@tiptap/core'
 import { NodeSelection, Plugin, PluginKey } from '@tiptap/pm/state'
+import type { Node as ProseMirrorNode, Schema } from '@tiptap/pm/model'
+import { Transform } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
-import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, Check, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pencil, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, RotateCcw, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
+import { ChangeSet, simplifyChanges } from 'prosemirror-changeset'
 import type { DocumentDetail, RevisionHistoryEntry } from '../../lib/types'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -48,6 +51,8 @@ interface DocumentEditorProps {
   onDefineWord: (word: string) => Promise<string>
   onAiThesaurus: (word: string) => Promise<string>
   onVersionHistory: () => Promise<RevisionHistoryEntry[]>
+  onNameVersion?: (revisionId: string, name: string) => Promise<void>
+  onRestoreVersion?: (revisionId: string) => Promise<Pick<DocumentDetail, 'title' | 'content' | 'contentPlain' | 'revision' | 'updatedAt'>>
   onReleaseAi: () => Promise<void>
   onBack: () => void
   onDelete: () => void
@@ -72,6 +77,17 @@ const OrderedListStyle = Extension.create({
     return [{ types: ['orderedList'], attributes: { listStyle: { default: null, parseHTML: (element: HTMLElement) => element.style.listStyleType || null, renderHTML: (attributes: { listStyle?: string | null }) => attributes.listStyle ? { style: `list-style-type: ${attributes.listStyle}` } : {} } } }]
   },
 })
+function citationPlaceholderText(label: string) {
+  const lower = label.toLocaleLowerCase()
+  if (lower.includes('last name')) return 'Last'
+  if (lower.includes('first name')) return 'First'
+  if (lower.includes('initial')) return 'Initials'
+  if (lower.includes('title')) return 'Title'
+  if (lower.includes('container')) return 'Container'
+  if (lower.includes('publisher')) return 'Publisher'
+  if (lower.includes('publication')) return lower.includes('day') ? 'Day' : lower.includes('month') ? 'Month' : lower.includes('year') ? 'Year' : 'Source'
+  return 'Field'
+}
 const CitationPlaceholder = TiptapNode.create({
   name: 'citationPlaceholder',
   group: 'inline',
@@ -80,8 +96,8 @@ const CitationPlaceholder = TiptapNode.create({
   selectable: true,
   addAttributes() { return { label: { default: 'Citation detail' } } },
   parseHTML() { return [{ tag: 'span[data-citation-placeholder]' }] },
-  renderHTML({ node }) { return ['span', { class: 'citation-placeholder', 'data-citation-placeholder': '', 'data-citation-label': String(node.attrs.label || 'Citation detail') }, 'Null'] },
-  renderText() { return 'Null' },
+  renderHTML({ node }) { const label = String(node.attrs.label || 'Citation detail'); return ['span', { class: 'citation-placeholder', 'data-citation-placeholder': '', 'data-citation-label': label }, citationPlaceholderText(label)] },
+  renderText({ node }) { return citationPlaceholderText(String(node.attrs.label || 'Citation detail')) },
 })
 function changeSelectedBlockIndent(editor: Editor, amount: 1 | -1) {
   if (editor.isActive('table')) return false
@@ -138,6 +154,7 @@ const PaperMeta = Extension.create({
 })
 const paperPaginationKey = new PluginKey<DecorationSet>('paperPagination')
 const grammarReviewKey = new PluginKey<DecorationSet>('grammarReview')
+const historyDiffKey = new PluginKey<DecorationSet>('historyDiff')
 const paperGap = 34
 const usLetterWidthInches = 8.5
 const usLetterHeightInches = 11
@@ -148,22 +165,100 @@ type WordSense = { partOfSpeech: string; definition: string; example: string }
 type WordReference = { word: string; pronunciation: string; senses: WordSense[]; synonyms: string[] }
 type ThesaurusResult = { query: string; close: string[]; related: string[]; broad: string[] }
 function formatRevisionTime(value: string) {
-  const parsed = new Date(`${value.replace(' ', 'T')}Z`)
+  const parsed = parseRevisionDate(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
-function wordCount(value: string) { return value.trim() ? value.trim().split(/\s+/).length : 0 }
-function revisionChangeDetail(newer: string, older: string) {
-  if (newer === older) return { added: '', removed: '', summary: 'No text changed in this save.' }
-  let start = 0
-  while (start < newer.length && start < older.length && newer[start] === older[start]) start += 1
-  let newerEnd = newer.length
-  let olderEnd = older.length
-  while (newerEnd > start && olderEnd > start && newer[newerEnd - 1] === older[olderEnd - 1]) { newerEnd -= 1; olderEnd -= 1 }
-  const added = newer.slice(start, newerEnd).trim()
-  const removed = older.slice(start, olderEnd).trim()
-  const delta = wordCount(newer) - wordCount(older)
-  const summary = delta > 0 ? `${delta} word${delta === 1 ? '' : 's'} added` : delta < 0 ? `${Math.abs(delta)} word${delta === -1 ? '' : 's'} removed` : added || removed ? 'Wording changed' : 'Spacing or formatting changed'
-  return { added, removed, summary }
+function parseRevisionDate(value: string) {
+  return new Date(`${value.replace(' ', 'T')}Z`)
+}
+function revisionTimeOnly(value: string) {
+  const parsed = parseRevisionDate(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+function revisionDayLabel(value: string) {
+  const parsed = parseRevisionDate(value)
+  if (Number.isNaN(parsed.getTime())) return 'Earlier'
+  const today = new Date(); const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1)
+  if (parsed.toDateString() === today.toDateString()) return 'Today'
+  if (parsed.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return parsed.toLocaleDateString([], { month: 'long', day: 'numeric', year: parsed.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
+}
+function normalizedRevisionText(content: string, fallback: string) {
+  const textForNode = (value: unknown): string => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+    const node = value as { type?: unknown; text?: unknown; attrs?: unknown; content?: unknown }
+    if (node.type === 'text') return typeof node.text === 'string' ? node.text : ''
+    if (node.type === 'citationPlaceholder') {
+      const label = node.attrs && typeof node.attrs === 'object' && typeof (node.attrs as { label?: unknown }).label === 'string' ? String((node.attrs as { label: string }).label) : 'Citation detail'
+      return citationPlaceholderText(label)
+    }
+    if (node.type === 'hardBreak') return '\n'
+    const children = Array.isArray(node.content) ? node.content.map(textForNode).join('') : ''
+    return ['paragraph', 'heading', 'listItem', 'codeBlock', 'blockquote'].includes(String(node.type)) ? `${children}\n` : children
+  }
+  try {
+    const parsed = JSON.parse(content) as unknown
+    return textForNode(parsed).replace(/\n{3,}/g, '\n\n').trimEnd()
+  } catch {
+    return fallback.replace(/\b(?:undefined|\[object Object\])\b/g, '').trimEnd()
+  }
+}
+function revisionSummary(entry: RevisionHistoryEntry, older?: RevisionHistoryEntry) {
+  if (!older) return 'Starting point'
+  const current = normalizedRevisionText(entry.content, entry.contentPlain)
+  const previous = normalizedRevisionText(older.content, older.contentPlain)
+  if (current === previous) return entry.title !== older.title ? 'Title changed' : 'Formatting changed'
+  const currentWords = current.match(/\S+/g)?.length ?? 0
+  const previousWords = previous.match(/\S+/g)?.length ?? 0
+  const delta = currentWords - previousWords
+  if (delta > 0) return `${delta} word${delta === 1 ? '' : 's'} added`
+  if (delta < 0) return `${Math.abs(delta)} word${delta === -1 ? '' : 's'} removed`
+  return 'Words revised'
+}
+type RevisionCluster = { id: string; entries: RevisionHistoryEntry[] }
+type RevisionDay = { label: string; clusters: RevisionCluster[] }
+function groupRevisionTimeline(entries: RevisionHistoryEntry[]): RevisionDay[] {
+  const days: RevisionDay[] = []
+  for (const entry of entries) {
+    const label = revisionDayLabel(entry.createdAt)
+    let day = days.at(-1)
+    if (!day || day.label !== label) { day = { label, clusters: [] }; days.push(day) }
+    const prior = day.clusters.at(-1)
+    const latest = prior?.entries.at(-1)
+    const closeInTime = latest && Math.abs(parseRevisionDate(latest.createdAt).getTime() - parseRevisionDate(entry.createdAt).getTime()) <= 3 * 60 * 1000
+    if (entry.id === 'current' || entry.name || !prior || !closeInTime || prior.entries.some((candidate) => candidate.id === 'current' || Boolean(candidate.name))) {
+      day.clusters.push({ id: `${label}-${entry.id}`, entries: [entry] })
+    } else prior.entries.push(entry)
+  }
+  return days
+}
+function historyDiffDecorations(doc: ProseMirrorNode, olderContent: string, timestamp: string, schema: Schema) {
+  try {
+  let olderDocument: ProseMirrorNode
+  try { olderDocument = schema.nodeFromJSON(safeContent(olderContent)) } catch { return DecorationSet.empty }
+  const transform = new Transform(olderDocument)
+  transform.replaceWith(0, olderDocument.content.size, doc.content)
+  const changes = simplifyChanges(ChangeSet.create(olderDocument).addSteps(doc, transform.mapping.maps, 'history').changes, doc)
+  const decorations: Decoration[] = []
+  const leafText = (node: ProseMirrorNode) => node.type.name === 'citationPlaceholder' ? citationPlaceholderText(String(node.attrs.label || 'Citation detail')) : ''
+  for (const change of changes) {
+    const addedText = doc.textBetween(change.fromB, change.toB, ' ', leafText).trim()
+    const removedText = olderDocument.textBetween(change.fromA, change.toA, ' ', leafText).trim()
+    if (change.toB > change.fromB) {
+      const words = addedText.match(/\S+/g)?.length ?? 0
+      decorations.push(Decoration.inline(change.fromB, change.toB, { class: 'history-diff-added', 'data-history-tooltip': `Added ${timestamp}${words ? ` · ${words} word${words === 1 ? '' : 's'}` : ''}` }))
+    }
+    if (removedText) {
+      const words = removedText.match(/\S+/g)?.length ?? 0
+      const position = Math.max(0, Math.min(doc.content.size, change.fromB))
+      decorations.push(Decoration.widget(position, () => { const element = globalThis.document.createElement('span'); element.className = 'history-diff-removed'; element.textContent = removedText; element.dataset.historyTooltip = `Removed ${timestamp}${words ? ` · ${words} word${words === 1 ? '' : 's'}` : ''}`; element.contentEditable = 'false'; return element }, { side: -1, key: `removed-${change.fromA}-${change.toA}-${removedText}` }))
+    }
+  }
+  return DecorationSet.create(doc, decorations)
+  } catch {
+    // Legacy or partially migrated snapshots should never be able to blank the editor.
+    return DecorationSet.empty
+  }
 }
 type WordSelection = { word: string; from: number; to: number }
 type ResearchSource = { title: string; publication: string; year: string; type: string; perspective: string; citations: number; url: string }
@@ -178,6 +273,16 @@ const GrammarReview = Extension.create({
       key: grammarReviewKey,
       state: { init: () => DecorationSet.empty, apply: (transaction, old) => (transaction.getMeta(grammarReviewKey) as DecorationSet | undefined) ?? old.map(transaction.mapping, transaction.doc) },
       props: { decorations: (state) => grammarReviewKey.getState(state) },
+    })]
+  },
+})
+const HistoryDiff = Extension.create({
+  name: 'historyDiff',
+  addProseMirrorPlugins() {
+    return [new Plugin<DecorationSet>({
+      key: historyDiffKey,
+      state: { init: () => DecorationSet.empty, apply: (transaction, old) => (transaction.getMeta(historyDiffKey) as DecorationSet | undefined) ?? old.map(transaction.mapping, transaction.doc) },
+      props: { decorations: (state) => historyDiffKey.getState(state) },
     })]
   },
 })
@@ -367,6 +472,7 @@ function makeDecoratedRunningRegion(element: HTMLSpanElement, region: RunningReg
   setRunningFieldMarkup(element, template, page, pageCount)
   element.tabIndex = 0
   element.addEventListener('dblclick', (event) => {
+    if (element.closest('.version-history-mode')) return
     event.preventDefault()
     event.stopPropagation()
     element.contentEditable = 'true'
@@ -502,7 +608,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, aiModelReady, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onResearchAndGrade, onDefineWord, onAiThesaurus, onVersionHistory, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, aiModelReady, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onResearchAndGrade, onDefineWord, onAiThesaurus, onVersionHistory, onNameVersion, onRestoreVersion, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -547,6 +653,16 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [versionHistorySelectedId, setVersionHistorySelectedId] = useState('current')
   const [versionHistoryLoading, setVersionHistoryLoading] = useState(false)
   const [versionHistoryError, setVersionHistoryError] = useState('')
+  const [expandedVersionGroups, setExpandedVersionGroups] = useState(() => new Set<string>())
+  const [namingVersionId, setNamingVersionId] = useState<string | null>(null)
+  const [versionName, setVersionName] = useState('')
+  const [versionRestoring, setVersionRestoring] = useState(false)
+  const currentHistoryEntry = useMemo<RevisionHistoryEntry>(() => ({ id: 'current', revision: document.revision, title: document.title, content: document.content, contentPlain: normalizedRevisionText(document.content, document.contentPlain), createdAt: document.updatedAt, name: null, source: 'user' }), [document.content, document.contentPlain, document.revision, document.title, document.updatedAt])
+  const historyTimeline = useMemo(() => [currentHistoryEntry, ...versionHistory.map((entry) => ({ ...entry, contentPlain: normalizedRevisionText(entry.content, entry.contentPlain) }))], [currentHistoryEntry, versionHistory])
+  const historyDays = useMemo(() => groupRevisionTimeline(historyTimeline), [historyTimeline])
+  const selectedHistoryIndex = Math.max(0, historyTimeline.findIndex((entry) => entry.id === versionHistorySelectedId))
+  const selectedHistoryEntry = historyTimeline[selectedHistoryIndex] ?? currentHistoryEntry
+  const historyWasOpenRef = useRef(false)
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
@@ -655,7 +771,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
-      Underline, TextStyle, FontSize, OrderedListStyle, CitationPlaceholder, PaperIndent, PaperMeta, PaperPagination, GrammarReview, Color, Highlight.configure({ multicolor: true }),
+      Underline, TextStyle, FontSize, OrderedListStyle, CitationPlaceholder, PaperIndent, PaperMeta, PaperPagination, GrammarReview, HistoryDiff, Color, Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
       Image.configure({ inline: false, allowBase64: true }), Table.configure({ resizable: true, allowTableNodeSelection: true }), TableRow, TableHeader, TableCell,
@@ -858,6 +974,40 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     window.addEventListener('soflo:open-citation', openCitationMenu)
     return () => window.removeEventListener('soflo:open-citation', openCitationMenu)
   }, [])
+  useEffect(() => {
+    if (!editor) return
+    const syncRunningMetadata = () => {
+      const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean }
+      const nextHeader = attributes.headerText ?? ''
+      const nextFooter = attributes.footerText ?? ''
+      const nextHeaderPages = parseRunningPageMap(attributes.headerPages)
+      const nextFooterPages = parseRunningPageMap(attributes.footerPages)
+      setHeaderText(nextHeader); setFooterText(nextFooter)
+      setHeaderPages(Object.keys(nextHeaderPages).length ? nextHeaderPages : nextHeader ? { '1': nextHeader } : {})
+      setFooterPages(Object.keys(nextFooterPages).length ? nextFooterPages : nextFooter ? { '1': nextFooter } : {})
+      setRepeatHeader(Boolean(attributes.repeatHeader)); setRepeatFooter(Boolean(attributes.repeatFooter)); setShowPageNumbers(Boolean(attributes.showPageNumbers))
+    }
+    if (!versionHistoryOpen) {
+      if (!historyWasOpenRef.current) return
+      historyWasOpenRef.current = false
+      editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
+      editor.setEditable(true)
+      editor.view.dispatch(editor.state.tr.setMeta(historyDiffKey, DecorationSet.empty))
+      syncRunningMetadata()
+      return
+    }
+    historyWasOpenRef.current = true
+    editor.setEditable(false)
+    editor.commands.setContent(safeContent(selectedHistoryEntry.content), { emitUpdate: false })
+    syncRunningMetadata()
+    if (selectedHistoryEntry.id === 'current') {
+      editor.view.dispatch(editor.state.tr.setMeta(historyDiffKey, DecorationSet.empty))
+      return
+    }
+    const older = historyTimeline[selectedHistoryIndex + 1]
+    const decorations = older ? historyDiffDecorations(editor.state.doc, older.content, formatRevisionTime(selectedHistoryEntry.createdAt), editor.schema) : DecorationSet.empty
+    editor.view.dispatch(editor.state.tr.setMeta(historyDiffKey, decorations))
+  }, [document.content, editor, historyTimeline, selectedHistoryEntry, selectedHistoryIndex, versionHistoryOpen])
   if (!editor) return <div className="editor-loading" />
   const runFind = (value: string) => { setFindValue(value); const finder = (window as Window & { find?: (query: string, caseSensitive?: boolean, backwards?: boolean, wrapAround?: boolean) => boolean }).find; if (value && finder) finder(value, false, false, true) }
   const exportPdf = () => {
@@ -913,11 +1063,38 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setCitationMenuOpen(false)
   }
   const openVersionHistory = async () => {
+    setGrammarOpen(false); setSelectedGrammarIssue(null); setResearchGrade(null); setThesaurusOpen(false); setWordReference(null)
+    setEditingRegion(null); setFindOpen(false); setPageSettingsOpen(false); setContextMenu(null); setCitationMenuOpen(false)
     setVersionHistoryOpen(true)
     setVersionHistorySelectedId('current')
     setVersionHistoryLoading(true)
     setVersionHistoryError('')
     try { setVersionHistory(await onVersionHistory()) } catch (error) { setVersionHistoryError(error instanceof Error ? error.message : 'Version history could not be loaded.') } finally { setVersionHistoryLoading(false) }
+  }
+  const closeVersionHistory = () => {
+    setVersionHistoryOpen(false)
+    setVersionHistorySelectedId('current')
+    setNamingVersionId(null)
+  }
+  const saveVersionName = async (entry: RevisionHistoryEntry) => {
+    try {
+      if (onNameVersion) await onNameVersion(entry.id, versionName.trim())
+      else if (collectionLabel === 'Lectures') await api.nameLectureRevision(entry.id, versionName.trim())
+      else await api.nameDocumentRevision(entry.id, versionName.trim())
+      setVersionHistory(await onVersionHistory())
+      setNamingVersionId(null)
+    } catch (error) { setVersionHistoryError(error instanceof Error ? error.message : 'That version could not be named.') }
+  }
+  const restoreSelectedVersion = async () => {
+    if (selectedHistoryEntry.id === 'current' || versionRestoring) return
+    setVersionRestoring(true)
+    setVersionHistoryError('')
+    try {
+      const restored = onRestoreVersion ? await onRestoreVersion(selectedHistoryEntry.id) : collectionLabel === 'Lectures' ? await api.restoreLectureRevision(document.id, selectedHistoryEntry.id) : await api.restoreDocumentRevision(document.id, selectedHistoryEntry.id)
+      onChange(restored.content, restored.contentPlain, restored.title)
+      setVersionHistory(await onVersionHistory())
+      setVersionHistorySelectedId('current')
+    } catch (error) { setVersionHistoryError(error instanceof Error ? error.message : 'That version could not be restored.') } finally { setVersionRestoring(false) }
   }
   const setGrammarDecorations = (issues: GrammarIssue[]) => {
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
@@ -1173,24 +1350,23 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const value = runningTextForPage(region === 'header' ? headerPages : footerPages, region === 'header' ? headerText : footerText, region === 'header' ? repeatHeader : repeatFooter, 1)
     const active = editingRegion?.region === region && editingRegion.page === 1
     const Ref = region === 'header' ? headerRef : footerRef
-    return <div ref={Ref} className={`paper-running-${region}${active ? ' editing' : ''}${value || active ? '' : ' empty'}`} contentEditable={active} suppressContentEditableWarning onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); beginRunningEdit(region, 1, event.currentTarget, event.clientX, event.clientY) }} onBlur={(event) => saveRunningRegion(region, 1, serializeRunningRegion(event.currentTarget))} />
+    return <div ref={Ref} className={`paper-running-${region}${active && !versionHistoryOpen ? ' editing' : ''}${value || active ? '' : ' empty'}`} contentEditable={active && !versionHistoryOpen} suppressContentEditableWarning onDoubleClick={(event) => { if (versionHistoryOpen) return; event.preventDefault(); event.stopPropagation(); beginRunningEdit(region, 1, event.currentTarget, event.clientX, event.clientY) }} onBlur={(event) => { if (!versionHistoryOpen) saveRunningRegion(region, 1, serializeRunningRegion(event.currentTarget)) }} />
   }
-  const currentHistoryEntry: RevisionHistoryEntry = { id: 'current', revision: document.revision, title: document.title, contentPlain: document.contentPlain, createdAt: document.updatedAt }
-  const historyTimeline = [currentHistoryEntry, ...versionHistory]
-  const selectedHistoryIndex = Math.max(0, historyTimeline.findIndex((entry) => entry.id === versionHistorySelectedId))
-  const selectedHistoryEntry = historyTimeline[selectedHistoryIndex] ?? currentHistoryEntry
-  const olderHistoryEntry = selectedHistoryIndex === 0 ? historyTimeline[1] ?? currentHistoryEntry : selectedHistoryEntry
-  const newerHistoryEntry = selectedHistoryIndex === 0 ? currentHistoryEntry : historyTimeline[selectedHistoryIndex - 1] ?? currentHistoryEntry
-  const selectedHistoryChanges = revisionChangeDetail(newerHistoryEntry.contentPlain, olderHistoryEntry.contentPlain)
-  return <main className="editor-view">
-    <header className="editor-topbar">
+  const renderVersionEntry = (entry: RevisionHistoryEntry, nested = false) => {
+    const index = historyTimeline.findIndex((candidate) => candidate.id === entry.id)
+    const older = historyTimeline[index + 1]
+    const selected = entry.id === versionHistorySelectedId
+    return <div className={`version-entry${selected ? ' selected' : ''}${nested ? ' nested' : ''}`} key={entry.id}><button className="version-entry-main" onClick={() => setVersionHistorySelectedId(entry.id)}><i /><span><strong>{entry.id === 'current' ? 'Current version' : entry.name || revisionTimeOnly(entry.createdAt)}</strong><small>{entry.id === 'current' ? 'Latest saved work' : revisionSummary(entry, older)}</small>{entry.name && <time>{revisionTimeOnly(entry.createdAt)}</time>}</span></button>{entry.id !== 'current' && <button className="version-name-button" aria-label={`Name version ${entry.revision}`} onClick={() => { setNamingVersionId(entry.id); setVersionName(entry.name ?? '') }}><Pencil size={12} /></button>}{namingVersionId === entry.id && <form className="version-name-form" onSubmit={(event) => { event.preventDefault(); void saveVersionName(entry) }}><input autoFocus value={versionName} onChange={(event) => setVersionName(event.target.value)} placeholder="e.g. First Draft" /><button type="submit"><Check size={12} /></button><button type="button" onClick={() => setNamingVersionId(null)}><X size={12} /></button></form>}</div>
+  }
+  return <main className={`editor-view${versionHistoryOpen ? ' version-history-mode' : ''}`}>
+    {versionHistoryOpen ? <header className="history-mode-topbar"><div><p className="eyebrow">{collectionLabel === 'Lectures' ? 'LECTURE HISTORY' : 'PAPER HISTORY'}</p><h1>Version history</h1><span>{selectedHistoryEntry.id === 'current' ? 'Current version' : selectedHistoryEntry.name || revisionTimeOnly(selectedHistoryEntry.createdAt)}</span></div><div><button className="button button-quiet" disabled={selectedHistoryEntry.id === 'current' || versionRestoring} onClick={() => void restoreSelectedVersion()}><RotateCcw size={15} />{versionRestoring ? 'Restoring…' : 'Restore this version'}</button><button className="button button-primary" onClick={closeVersionHistory}><Check size={15} />Done</button></div></header> : <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
       <div className={`save-indicator ${saveState}`}>{passiveGrammarReviewing ? <><RefreshCw className="passive-grammar-refresh" size={13} /><em>Checking</em></> : <><span />{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Couldn’t save' : 'Saved'}</>}</div>
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
-    </header>
-    <div className="editor-toolbar-wrap">
+    </header>}
+    {!versionHistoryOpen && <div className="editor-toolbar-wrap">
     <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
-    </div>
+    </div>}
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
     <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar" aria-label="Writing suggestion"><header><div><p className="eyebrow">{selectedGrammarIssue.kind === 'style' ? 'FORMAL WRITING' : selectedGrammarIssue.kind === 'structure' ? 'FLOW & STRUCTURE' : 'SPELLING & WRITING'}</p><h2>{selectedGrammarIssue.kind === 'style' ? 'Formal rewrite' : selectedGrammarIssue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div><button className="icon-button tiny" onClick={() => { setGrammarOpen(false); setSelectedGrammarIssue(null) }} aria-label="Close writing suggestion"><X size={16} /></button></header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p>{selectedGrammarIssue.kind !== 'structure' && selectedGrammarIssue.alternatives.length > 0 && <section><h3>{selectedGrammarIssue.kind === 'style' ? 'Choose a rewrite' : 'Choose a correction'}</h3><div className="grammar-alternatives">{selectedGrammarIssue.alternatives.map((alternative) => <button key={alternative} onClick={() => applyGrammarIssue(selectedGrammarIssue, alternative)}>{alternative}</button>)}</div></section>}<section><h3>{selectedGrammarIssue.kind === 'style' ? 'Why this is better' : selectedGrammarIssue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}{selectedGrammarIssue.kind === 'structure' ? <p className="grammar-structure-note">This is a flow recommendation; move the paragraph yourself if it fits your argument.</p> : <div className="grammar-suggestion-actions"><button className="button button-quiet button-small" onClick={() => ignoreGrammarIssue(selectedGrammarIssue)}>Ignore</button><button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Replace text</button></div>}</div></aside>}{(wordReferenceLoading || wordReference || wordReferenceError) && <aside className="word-reference-sidebar" aria-label="Word reference"><header><div><p className="eyebrow">WORD REFERENCE</p><h2>{wordReference?.word || selectedWordReferenceRef.current}</h2>{wordReference?.pronunciation && <span>{wordReference.pronunciation}</span>}</div><button className="icon-button tiny" onClick={() => { wordReferenceRequestRef.current += 1; selectedWordReferenceRef.current = ''; setWordReference(null); setWordReferenceLoading(false); setWordReferenceError('') }} aria-label="Close word reference"><X size={16} /></button></header><div className="word-reference-detail">{wordReferenceLoading && <div className="word-reference-loading"><i />Looking up this word locally…</div>}{wordReferenceError && <p className="word-reference-error">{wordReferenceError}</p>}{wordReference?.senses.map((sense, index) => <section key={`${sense.partOfSpeech}-${index}`}><h3>{sense.partOfSpeech || 'Definition'}</h3><p><b>{index + 1}.</b>{sense.definition}</p>{sense.example && <em>“{sense.example}”</em>}</section>)}{wordReference && <section><h3>Formal related words</h3><div className="grammar-synonyms word-reference-synonyms">{wordReference.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}</div></aside>}{thesaurusOpen && <aside className="word-reference-sidebar thesaurus-sidebar" aria-label="AI Thesaurus"><header><div><p className="eyebrow">AI WRITING TOOL</p><h2>AI Thesaurus</h2><span>Grouped by closeness</span></div><button className="icon-button tiny" onClick={() => { setThesaurusOpen(false); setThesaurusResult(null); setThesaurusError('') }} aria-label="Close AI thesaurus"><X size={16} /></button></header><form className="thesaurus-form" onSubmit={(event) => void runThesaurus(event)}><label htmlFor="thesaurus-query">What kind of word are you looking for?</label><div><input id="thesaurus-query" value={thesaurusQuery} onChange={(event) => setThesaurusQuery(event.target.value)} placeholder="e.g. important, explain, difficult" autoFocus /><button className="button button-primary button-small" type="submit" disabled={!thesaurusQuery.trim() || thesaurusLoading}>{thesaurusLoading ? 'Finding…' : 'Find words'}</button></div></form>{thesaurusError && <p className="word-reference-error thesaurus-error">{thesaurusError}</p>}{thesaurusLoading && <div className="word-reference-loading"><i />Finding grouped alternatives locally…</div>}{thesaurusResult && <div className="thesaurus-detail"><p className="thesaurus-query">For <strong>{thesaurusResult.query}</strong></p>{[['Closest matches', thesaurusResult.close], ['Related / formal', thesaurusResult.related], ['Broader alternatives', thesaurusResult.broad]].map(([label, words]) => Array.isArray(words) && words.length > 0 && <section key={String(label)}><h3>{String(label)}</h3><div className="grammar-synonyms">{words.map((word) => <span key={word}>{word}</span>)}</div></section>)}</div>}</aside>}</section>
@@ -1200,22 +1376,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     {grammarReviewing && <div className="grammar-review-notice" role="status" aria-live="polite"><i /><div><strong>Checking your writing</strong><span>{grammarProgress?.message || 'Reviewing spelling and grammar locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
     {grammarMessage && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>AI Review needs another pass</strong><span>{grammarMessage}</span></div><button className="icon-button tiny" onClick={() => setGrammarMessage('')} aria-label="Dismiss grammar review message"><X size={15} /></button></div>}
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
-    {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history">
-      <header><div><p className="eyebrow">LOCAL EDIT TIMELINE</p><h2>Version history</h2><span>{collectionLabel === 'Lectures' ? 'Lecture note' : 'Paper'} · AI changes count as your edits</span></div><button className="icon-button tiny" onClick={() => setVersionHistoryOpen(false)} aria-label="Close version history"><X size={16} /></button></header>
-      {versionHistoryLoading && <div className="version-history-loading"><div className="word-reference-loading"><i />Loading saved versions…</div></div>}
-      {versionHistoryError && <p className="word-reference-error version-history-error">{versionHistoryError}</p>}
-      {!versionHistoryLoading && !versionHistoryError && <div className="version-history-workspace">
-        <nav className="version-history-timeline" aria-label="Saved versions">{historyTimeline.map((entry, index) => { const newer = index === 0 ? entry : historyTimeline[index - 1]; const detail = revisionChangeDetail(newer.contentPlain, entry.contentPlain); return <button className={`${entry.id === versionHistorySelectedId ? 'selected' : ''}${entry.id === 'current' ? ' current' : ''}`} onClick={() => setVersionHistorySelectedId(entry.id)} key={entry.id}><i /><span><strong>{entry.id === 'current' ? 'Current version' : `Version ${entry.revision}`}</strong><time>{formatRevisionTime(entry.createdAt)}</time><small>{entry.id === 'current' ? 'Latest saved work' : detail.summary}</small></span></button> })}{versionHistory.length === 0 && <p className="version-history-empty">Make another edit and an earlier snapshot will appear here.</p>}</nav>
-        <section className="version-history-change-preview"><div className="version-history-change-heading"><span><small>SELECTED SNAPSHOT</small><strong>{selectedHistoryEntry.id === 'current' ? 'Current version' : `Version ${selectedHistoryEntry.revision}`}</strong></span><time>{formatRevisionTime(selectedHistoryEntry.createdAt)}</time></div><p className="version-history-change-summary">{selectedHistoryChanges.summary}</p>{newerHistoryEntry.title !== olderHistoryEntry.title && <div className="version-title-change"><span>− {olderHistoryEntry.title || 'Untitled'}</span><span>+ {newerHistoryEntry.title || 'Untitled'}</span></div>}{selectedHistoryChanges.removed && <div className="version-diff removed"><b>REMOVED</b><p>{selectedHistoryChanges.removed}</p></div>}{selectedHistoryChanges.added && <div className="version-diff added"><b>ADDED</b><p>{selectedHistoryChanges.added}</p></div>}{!selectedHistoryChanges.added && !selectedHistoryChanges.removed && newerHistoryEntry.title === olderHistoryEntry.title && <div className="version-history-no-change">This snapshot contains formatting, spacing, or save-state changes without a visible text replacement.</div>}<small className="version-history-note">Snapshots stay on this computer with the rest of your SoFlo library.</small></section>
-      </div>}
-    </aside>}
+    {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history"><header><p className="eyebrow">VERSION HISTORY</p><h2>{collectionLabel === 'Lectures' ? 'Lecture timeline' : 'Paper timeline'}</h2><span>Select a checkpoint to view the real document.</span></header>{versionHistoryLoading && <div className="version-history-loading"><div className="word-reference-loading"><i />Loading saved versions…</div></div>}{versionHistoryError && <p className="word-reference-error version-history-error">{versionHistoryError}</p>}{!versionHistoryLoading && <nav className="version-history-timeline" aria-label="Saved versions">{historyDays.map((day) => <section key={day.label}><h3>{day.label}</h3>{day.clusters.map((cluster) => cluster.entries.length === 1 ? renderVersionEntry(cluster.entries[0]) : <div className="version-cluster" key={cluster.id}><button className="version-cluster-toggle" onClick={() => setExpandedVersionGroups((current) => { const next = new Set(current); if (next.has(cluster.id)) next.delete(cluster.id); else next.add(cluster.id); return next })}><ChevronDown className={expandedVersionGroups.has(cluster.id) ? 'expanded' : ''} size={13} /><span><strong>{revisionTimeOnly(cluster.entries[0].createdAt)}</strong><small>{cluster.entries.length} versions</small></span></button>{expandedVersionGroups.has(cluster.id) && <div className="version-cluster-members">{cluster.entries.map((entry) => renderVersionEntry(entry, true))}</div>}</div>)}</section>)}{versionHistory.length === 0 && <p className="version-history-empty">Your first meaningful checkpoint will appear after another editing session.</p>}</nav>}<footer><span><i className="history-added-key" />Added</span><span><i className="history-removed-key" />Removed</span><small>Changes appear directly on the paper.</small></footer></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /><hr /><ContextMenuAction label="Insert" shortcut="›" onClick={() => setContextSubmenu(contextSubmenu === 'insert' ? null : 'insert')} />{contextSubmenu === 'insert' && <div className="editor-context-submenu" role="menu" aria-label="Insert menu"><ContextMenuAction label="Citation" shortcut="›" onClick={() => window.dispatchEvent(new Event('soflo:open-citation'))} /></div>}</div>}
     {citationMenuOpen && contextMenu && <div className="editor-context-menu citation-menu" style={{ left: contextMenu.x + 205, top: contextMenu.y + 38 }} role="menu" aria-label="Citation styles"><ContextMenuAction label="MLA" shortcut="" onClick={() => insertCitation('mla')} /><ContextMenuAction label="APA" shortcut="" onClick={() => insertCitation('apa')} /><ContextMenuAction label="Chicago" shortcut="" onClick={() => insertCitation('chicago')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}
     {imageDialog && <ImageDialog source={imageDialog.src} onClose={() => setImageDialog(null)} onSourceChange={(src) => setImageDialog({ src })} onInsert={insertImage} />}
     {tableDialog && <TableDialog table={tableDialog} onClose={() => setTableDialog(null)} onChange={setTableDialog} onInsert={insertTable} />}
-    <button className="page-settings-button" aria-label="Page settings" title="Page settings" onClick={() => setPageSettingsOpen((open) => !open)}><Settings2 size={20} /></button>
-    {pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}</div></aside>}
+    {!versionHistoryOpen && <button className="page-settings-button" aria-label="Page settings" title="Page settings" onClick={() => setPageSettingsOpen((open) => !open)}><Settings2 size={20} /></button>}
+    {!versionHistoryOpen && pageSettingsOpen && <aside className="page-settings-panel" aria-label="Page settings"><header><div><p className="eyebrow">DOCUMENT</p><h2>Page settings</h2></div><button className="icon-button" onClick={() => setPageSettingsOpen(false)} aria-label="Close page settings"><X size={18} /></button></header><div className="page-settings-content"><div className="paper-spec"><span>US</span><div><strong>US Letter</strong><small>8.5 × 11 in · Google Docs baseline</small></div></div><fieldset><legend>Margins</legend><div className="segmented-control">{(['narrow', 'normal', 'wide'] as const).map((option) => <button key={option} className={pageMargin === option ? 'active' : ''} onClick={() => setPageMargin(option)}>{option}</button>)}</div></fieldset><fieldset><legend>Line spacing</legend><div className="segmented-control segmented-control-four">{([['single', '1.0'], ['docs', '1.15'], ['one-half', '1.5'], ['double', '2.0']] as const).map(([option, label]) => <button key={option} className={lineSpacing === option ? 'active' : ''} onClick={() => setLineSpacing(option)}>{label}</button>)}</div></fieldset><p className="page-settings-note">Normal margins, 11 pt Arial, black text, and 1.15 line spacing are the default.</p>{pdfMessage && <p className="page-settings-message">{pdfMessage}</p>}</div></aside>}
   </main>
 }
 

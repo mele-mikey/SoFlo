@@ -70,8 +70,11 @@ pub struct RevisionHistoryEntry {
     pub id: String,
     pub revision: i32,
     pub title: String,
+    pub content: String,
     pub content_plain: String,
     pub created_at: String,
+    pub name: Option<String>,
+    pub source: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -55,8 +55,11 @@ export interface RevisionHistoryEntry {
   id: string
   revision: number
   title: string
+  content: string
   contentPlain: string
   createdAt: string
+  name: string | null
+  source: 'user' | 'soflo-ai'
 }
 
 export interface LectureSummary {

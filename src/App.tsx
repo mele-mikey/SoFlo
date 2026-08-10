@@ -366,10 +366,10 @@ function App() {
     }
     return api.aiThesaurus(modelPath, word)
   }
-  const generateTeachItBackQuestion = async (front: string, back: string, shownSide: 'front' | 'back') => {
+  const generateTeachItBackQuestion = async (front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => {
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) throw new Error('Turn on AI in Settings to use Teach It Back.')
-    return api.generateTeachItBackQuestion(aiModelPath, front, back, shownSide)
+    return api.generateTeachItBackQuestion(aiModelPath, front, back, shownSide, difficulty)
   }
   const gradeTeachItBackAnswer = async (front: string, back: string, question: string, target: string, answer: string) => {
     const aiModelPath = await ensureAiModel()

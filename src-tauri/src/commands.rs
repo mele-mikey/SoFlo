@@ -536,6 +536,7 @@ pub async fn generate_teach_it_back_question(
     front: String,
     back: String,
     shown_side: String,
+    difficulty: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let front = front.trim();
@@ -544,6 +545,7 @@ pub async fn generate_teach_it_back_question(
             return Err("This card needs both a term and definition before Teach It Back can use it.".into());
         }
         let shown_side = if shown_side.eq_ignore_ascii_case("back") { "back" } else { "front" };
+        let difficulty = if difficulty.eq_ignore_ascii_case("easy") { "easy" } else { "hard" };
         let resolved = resolve_ai_model_path(&app, &model_path)?;
         emit_ai_progress(&app, 12, "Preparing a teach-back question");
         let port = ensure_ai_server(&resolved, &app)?;
@@ -551,8 +553,8 @@ pub async fn generate_teach_it_back_question(
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-        let system = "You create one focused teach-back question from a two-sided flashcard. The front is normally the term or prompt and the back is normally its meaning or explanation. Use both sides as private context, but build the question around the side the student is shown. Ask the student to explain the idea in their own words, including enough context that the question makes sense. Do not reveal the hidden answer. Return only one valid JSON object with exactly these string keys: question, target, hint. target is a short private description of what a strong answer should cover. hint is one short optional nudge that does not give away the answer.";
-        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nSIDE SHOWN TO STUDENT: {}\nCreate the question now.", front, back, shown_side);
+        let system = "You create one focused teach-back question from a two-sided flashcard. The front is normally the term or prompt and the back is normally its meaning or explanation. Use both sides as private context, but build the question around the side the student is shown. Do not reveal the hidden answer. EASY asks only for the core meaning or general definition. HARD asks for the meaning plus an important implication, connection, mechanism, example, or extra step supported by the card; never demand facts absent from the card. Return only one valid JSON object with exactly these string keys: question, target, hint. target is a short private description of what a strong answer should cover. hint is one short optional nudge that does not give away the answer.";
+        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nSIDE SHOWN TO STUDENT: {}\nDIFFICULTY: {}\nCreate the question now.", front, back, shown_side, difficulty);
         let output = local_chat_text(&client, port, system, &prompt, 520)?;
         touch_ai_server();
         if let Some(object) = json_object_from_response(&output) {
@@ -2240,7 +2242,7 @@ pub fn list_document_revisions(
 ) -> CommandResult<Vec<RevisionHistoryEntry>> {
     let connection = database.open()?;
     let mut statement = connection
-        .prepare("SELECT id, revision, title, content_plain, created_at FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC, revision DESC")
+        .prepare("SELECT id, revision, title, content, content_plain, created_at, name, source FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC, revision DESC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([id], |row| {
@@ -2248,13 +2250,61 @@ pub fn list_document_revisions(
                 id: row.get(0)?,
                 revision: row.get(1)?,
                 title: row.get(2)?,
-                content_plain: row.get(3)?,
-                created_at: row.get(4)?,
+                content: row.get(3)?,
+                content_plain: row.get(4)?,
+                created_at: row.get(5)?,
+                name: row.get(6)?,
+                source: row.get(7)?,
             })
         })
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn name_document_revision(
+    database: State<'_, Database>,
+    revision_id: String,
+    name: String,
+) -> CommandResult<()> {
+    let trimmed = name.trim();
+    let changed = database.open()?.execute(
+        "UPDATE document_revisions SET name=?1 WHERE id=?2",
+        params![if trimmed.is_empty() { None::<String> } else { Some(trimmed.to_string()) }, revision_id],
+    ).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("That saved version could not be found.".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_document_revision(
+    database: State<'_, Database>,
+    id: String,
+    revision_id: String,
+) -> CommandResult<DocumentDetail> {
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let (restore_title, restore_content, restore_plain): (String, String, String) = transaction.query_row(
+        "SELECT title, content, content_plain FROM document_revisions WHERE id=?1 AND document_id=?2",
+        params![revision_id, id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "That saved version could not be found.".to_string())?;
+    let (current_title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
+        "SELECT title, content, content_plain, revision FROM documents WHERE id=?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO document_revisions (id, document_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
+        params![Uuid::new_v4().to_string(), id, current_title, current_content, current_plain, revision],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "UPDATE documents SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5",
+        params![restore_title, restore_content, restore_plain, revision + 1, id],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    get_document(database, id)
 }
 
 #[tauri::command]
@@ -2320,7 +2370,7 @@ pub fn list_lecture_revisions(
 ) -> CommandResult<Vec<RevisionHistoryEntry>> {
     let connection = database.open()?;
     let mut statement = connection
-        .prepare("SELECT id, revision, title, content_plain, created_at FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC, revision DESC")
+        .prepare("SELECT id, revision, title, content, content_plain, created_at, name, source FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC, revision DESC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([id], |row| {
@@ -2328,13 +2378,61 @@ pub fn list_lecture_revisions(
                 id: row.get(0)?,
                 revision: row.get(1)?,
                 title: row.get(2)?,
-                content_plain: row.get(3)?,
-                created_at: row.get(4)?,
+                content: row.get(3)?,
+                content_plain: row.get(4)?,
+                created_at: row.get(5)?,
+                name: row.get(6)?,
+                source: row.get(7)?,
             })
         })
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn name_lecture_revision(
+    database: State<'_, Database>,
+    revision_id: String,
+    name: String,
+) -> CommandResult<()> {
+    let trimmed = name.trim();
+    let changed = database.open()?.execute(
+        "UPDATE lecture_revisions SET name=?1 WHERE id=?2",
+        params![if trimmed.is_empty() { None::<String> } else { Some(trimmed.to_string()) }, revision_id],
+    ).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("That saved lecture version could not be found.".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_lecture_revision(
+    database: State<'_, Database>,
+    id: String,
+    revision_id: String,
+) -> CommandResult<LectureDetail> {
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let (restore_title, restore_content, restore_plain): (String, String, String) = transaction.query_row(
+        "SELECT title, content, content_plain FROM lecture_revisions WHERE id=?1 AND lecture_id=?2",
+        params![revision_id, id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "That saved lecture version could not be found.".to_string())?;
+    let (current_title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
+        "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
+        params![Uuid::new_v4().to_string(), id, current_title, current_content, current_plain, revision],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5",
+        params![restore_title, restore_content, restore_plain, revision + 1, id],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    get_lecture(database, id)
 }
 
 #[tauri::command]
@@ -2381,11 +2479,13 @@ pub fn save_lecture(
             )
             .map_err(|error| error.to_string())?;
     let changed = existing != input.content || existing_title != input.title.trim();
-    let next_revision = if changed { revision + 1 } else { revision };
+    let latest_checkpoint_age: Option<i64> = transaction.query_row("SELECT CAST(strftime('%s','now') - strftime('%s',created_at) AS INTEGER) FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC LIMIT 1", [&input.id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+    let checkpoint = changed && latest_checkpoint_age.is_none_or(|seconds| seconds >= 180);
+    let next_revision = if checkpoint { revision + 1 } else { revision };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
-    if changed {
+    if checkpoint {
         transaction.execute("INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
-        transaction.execute("DELETE FROM lecture_revisions WHERE id IN (SELECT id FROM lecture_revisions WHERE lecture_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 100)", [&input.id]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM lecture_revisions WHERE id IN (SELECT id FROM lecture_revisions WHERE lecture_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 200)", [&input.id]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     get_lecture(database, input.id)
@@ -2421,11 +2521,13 @@ pub fn save_document(
             )
             .map_err(|error| error.to_string())?;
     let changed = existing != input.content || existing_title != input.title.trim();
-    let next_revision = if changed { revision + 1 } else { revision };
+    let latest_checkpoint_age: Option<i64> = transaction.query_row("SELECT CAST(strftime('%s','now') - strftime('%s',created_at) AS INTEGER) FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC LIMIT 1", [&input.id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+    let checkpoint = changed && latest_checkpoint_age.is_none_or(|seconds| seconds >= 180);
+    let next_revision = if checkpoint { revision + 1 } else { revision };
     transaction.execute("UPDATE documents SET title=?1, content=?2, content_plain=?3, is_favorite=?4, revision=?5, updated_at=CURRENT_TIMESTAMP WHERE id=?6", params![input.title.trim(), input.content, input.content_plain, input.is_favorite as i32, next_revision, input.id]).map_err(|error| error.to_string())?;
-    if changed {
+    if checkpoint {
         transaction.execute("INSERT INTO document_revisions (id, document_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
-        transaction.execute("DELETE FROM document_revisions WHERE id IN (SELECT id FROM document_revisions WHERE document_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 100)", [&input.id]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM document_revisions WHERE id IN (SELECT id FROM document_revisions WHERE document_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 200)", [&input.id]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     get_document(database, input.id)

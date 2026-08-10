@@ -4,7 +4,7 @@ import type {
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'create_lecture', 'save_lecture', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -27,6 +27,8 @@ export const api = {
   deleteClass: (id: string) => call<void>('delete_class', { id }),
   listDocuments: (classId: string, includeDeleted = false) => call<DocumentSummary[]>('list_documents', { classId, includeDeleted }),
   listDocumentRevisions: (id: string) => call<RevisionHistoryEntry[]>('list_document_revisions', { id }),
+  nameDocumentRevision: (revisionId: string, name: string) => call<void>('name_document_revision', { revisionId, name }),
+  restoreDocumentRevision: (id: string, revisionId: string) => call<DocumentDetail>('restore_document_revision', { id, revisionId }),
   listRecentDocuments: () => call<DocumentSummary[]>('list_recent_documents'),
   getDocument: (id: string) => call<DocumentDetail>('get_document', { id }),
   getSyllabus: (classId: string) => call<DocumentDetail | null>('get_syllabus', { classId }),
@@ -34,6 +36,8 @@ export const api = {
   saveDocument: (input: Pick<DocumentDetail, 'id' | 'title' | 'content' | 'contentPlain' | 'isFavorite'>) => call<DocumentDetail>('save_document', { input }),
   listLectures: (classId: string) => call<LectureSummary[]>('list_lectures', { classId }),
   listLectureRevisions: (id: string) => call<RevisionHistoryEntry[]>('list_lecture_revisions', { id }),
+  nameLectureRevision: (revisionId: string, name: string) => call<void>('name_lecture_revision', { revisionId, name }),
+  restoreLectureRevision: (id: string, revisionId: string) => call<LectureDetail>('restore_lecture_revision', { id, revisionId }),
   getLecture: (id: string) => call<LectureDetail>('get_lecture', { id }),
   createLecture: (input: { classId: string; courseCode: string; courseName: string; lectureDate: string; scheduledStart: string | null; scheduledEnd: string | null; professorSnapshot: string | null; title: string }) => call<LectureDetail>('create_lecture', { input }),
   saveLecture: (input: Pick<LectureDetail, 'id' | 'title' | 'content' | 'contentPlain'>) => call<LectureDetail>('save_lecture', { input }),
@@ -84,7 +88,7 @@ export const api = {
   importWordText: (path: string) => call<string>('import_word_text', { path }),
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string) => call<string>('generate_flashcards_text', { modelPath, materials, guidance }),
-  generateTeachItBackQuestion: (modelPath: string, front: string, back: string, shownSide: 'front' | 'back') => call<string>('generate_teach_it_back_question', { modelPath, front, back, shownSide }),
+  generateTeachItBackQuestion: (modelPath: string, front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => call<string>('generate_teach_it_back_question', { modelPath, front, back, shownSide, difficulty }),
   gradeTeachItBackAnswer: (modelPath: string, front: string, back: string, question: string, target: string, answer: string) => call<string>('grade_teach_it_back_answer', { modelPath, front, back, question, target, answer }),
   reviewGrammarText: (modelPath: string, text: string, quick: boolean) => call<string>('review_grammar_text', { modelPath, text, quick }),
   researchAndGradeText: (modelPath: string, text: string) => call<string>('research_and_grade_text', { modelPath, text }),

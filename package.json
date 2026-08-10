@@ -1,7 +1,7 @@
 {
   "name": "soflo",
   "private": true,
-  "version": "1.0.91",
+  "version": "1.0.92",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
@@ -44,6 +44,7 @@
     "cmdk": "^1.1.1",
     "framer-motion": "^13.0.0",
     "lucide-react": "^1.30.0",
+    "prosemirror-changeset": "^2.4.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zod": "^4.4.3"

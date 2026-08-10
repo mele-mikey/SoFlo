@@ -535,6 +535,7 @@ impl Database {
                 .map_err(|error| error.to_string())?;
         }
         anchor.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;").map_err(|error| error.to_string())?;
+        self.migrate(&mut anchor)?;
         *self
             .memory_anchor
             .lock()
@@ -574,7 +575,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 7 {
+        if version >= 8 {
             return Ok(());
         }
         if version < 1 {
@@ -661,6 +662,15 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_document_revisions_document ON document_revisions(document_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lecture_revisions_lecture ON lecture_revisions(lecture_id, created_at DESC);
                 PRAGMA user_version = 7;
+            "#).map_err(|error| error.to_string())?;
+        }
+        if version < 8 {
+            connection.execute_batch(r#"
+                ALTER TABLE document_revisions ADD COLUMN name TEXT;
+                ALTER TABLE document_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
+                ALTER TABLE lecture_revisions ADD COLUMN name TEXT;
+                ALTER TABLE lecture_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
+                PRAGMA user_version = 8;
             "#).map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -850,6 +860,26 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creates_structured_version_history_columns() {
+        let directory = std::env::temp_dir().join(format!("soflo-history-test-{}", uuid::Uuid::new_v4()));
+        let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
+        let connection = database.open().expect("open database");
+        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        assert_eq!(version, 8);
+        for table in ["document_revisions", "lecture_revisions"] {
+            let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
+            assert!(columns.contains(&"content".to_string()));
+            assert!(columns.contains(&"content_plain".to_string()));
+            assert!(columns.contains(&"name".to_string()));
+            assert!(columns.contains(&"source".to_string()));
+        }
+        drop(connection);
+        drop(database);
+        let _ = fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn encrypts_the_library_and_requires_the_configured_credentials() {
