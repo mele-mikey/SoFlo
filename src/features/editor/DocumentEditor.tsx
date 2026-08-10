@@ -507,10 +507,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const defineWordRef = useRef(onDefineWord)
   aiEnabledRef.current = aiEnabled
   defineWordRef.current = onDefineWord
-  const grammarReviewRef = useRef<(quick: boolean) => void>(() => undefined)
+  const grammarReviewRef = useRef<(quick: boolean) => Promise<boolean>>(async () => false)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
-  const grammarOpenedReviewRef = useRef('')
   const grammarTextCursorRef = useRef(0)
   // When AI spelling is enabled, it owns the marks so the editor never mixes
   // its straight interactive underlines with the browser's red squiggles.
@@ -734,18 +733,26 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       if (!globalThis.document.hasFocus() || !editor.isFocused || grammarRequestRef.current || !recentlyTyped) return
       if (grammarLastAutomaticReviewAt.current && now - grammarLastAutomaticReviewAt.current < 30_000) return
       grammarLastAutomaticReviewAt.current = now
-      grammarReviewRef.current(true)
+      void grammarReviewRef.current(true)
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [aiEnabled, aiGrammarEnabled, aiModelReady, editor])
   useEffect(() => {
-    if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarOpenedReviewRef.current === document.id) return
-    grammarOpenedReviewRef.current = document.id
+    if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady) return
     if (editor.getText().trim().length < 3) return
-    const timer = window.setTimeout(() => {
-      if (globalThis.document.hasFocus() && !grammarRequestRef.current) grammarReviewRef.current(true)
-    }, 450)
-    return () => window.clearTimeout(timer)
+    let cancelled = false
+    let attempts = 0
+    let timer = 0
+    const run = async () => {
+      if (cancelled || grammarRequestRef.current || !globalThis.document.hasFocus()) return
+      attempts += 1
+      const found = await grammarReviewRef.current(true)
+      if (!cancelled && !found && attempts < 2) timer = window.setTimeout(() => { void run() }, 2_500)
+    }
+    timer = window.setTimeout(() => { void run() }, 450)
+    const onFocus = () => { if (attempts < 2) void run() }
+    window.addEventListener('focus', onFocus)
+    return () => { cancelled = true; window.clearTimeout(timer); window.removeEventListener('focus', onFocus) }
   }, [aiEnabled, aiGrammarEnabled, aiModelReady, document.id, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
   useEffect(() => {
@@ -820,7 +827,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return text.slice(start, end)
   }
   const reviewGrammar = async (quick = false) => {
-    if (!aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarRequestRef.current) return
+    if (!aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarRequestRef.current) return false
     grammarRequestRef.current = true
     if (quick) setPassiveGrammarReviewing(true)
     else {
@@ -857,10 +864,12 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
         setGrammarOpen(false)
         setSelectedGrammarIssue(null)
       }
+      return issues.length > 0
     } catch (error) {
       if (!quick) {
         setGrammarMessage(error instanceof Error ? error.message : 'SoFlo could not finish this grammar review. Your current checks are still available.')
       }
+      return false
     } finally {
       if (quick) setPassiveGrammarReviewing(false)
       else {
@@ -870,7 +879,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       grammarRequestRef.current = false
     }
   }
-  grammarReviewRef.current = (quick) => { void reviewGrammar(quick) }
+  grammarReviewRef.current = reviewGrammar
   const runResearchAndGrade = async () => {
     if (!aiEnabled || researchReviewing) return
     setResearchReviewing(true)

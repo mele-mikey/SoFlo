@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::Read,
-    net::{SocketAddr, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::{Mutex, OnceLock},
@@ -134,8 +134,6 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
     Ok(())
 }
 
-const AI_SERVER_PORT: u16 = 19393;
-const WORD_AI_SERVER_PORT: u16 = 19394;
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 const AI_CONTEXT_SIZE: &str = "8192";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
@@ -151,6 +149,7 @@ const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
     model_path: String,
+    port: u16,
     last_used: Instant,
 }
 static AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
@@ -386,7 +385,7 @@ fn refine_document_text_blocking(
         "You are SoFlo's meticulous local paper formatter. Think through the source layout silently before answering, then return only clean Markdown—never code fences, commentary, or a layout explanation. Preserve every source word, number, punctuation mark, date, URL, citation, and paragraph boundary: do not rewrite, proofread, summarize, reorder, or invent anything. This is a formatting task only. Repair only obvious PDF extraction artifacts such as a word split by a stray space (for example, 'y ou' becomes 'you'); never replace a real word. Do not assume an MLA template. Only retain a four-line MLA heading when the source genuinely contains one; otherwise do not manufacture a heading block, title, author, or date. Treat a date as ordinary text unless the source clearly uses it as metadata. Identify headings, lists, tables, quotations, and verse from the source's actual cues, never from a line's position alone. Join ordinary visual line wraps into complete paragraphs instead of echoing each PDF line. Keep intentional verse or quotations line by line using two trailing spaces for each intentional break. Use # for one actual document title only when one is evident, ## and ### only for genuine section headings, Markdown lists only for true lists, and tables only for genuinely tabular material. Preserve citations exactly, including Works Cited entries; never turn a name, date, citation, or ordinary sentence into a heading. Use **bold** or *italics* only when the source clearly indicates emphasis."
     };
     emit_ai_progress(&app, 6, "Starting your private local model");
-    ensure_ai_server(&model_path, &app)?;
+    let ai_port = ensure_ai_server(&model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
@@ -411,7 +410,7 @@ fn refine_document_text_blocking(
             source_kind,
             source
         );
-        let mut formatted = request_document_format(&client, system, &request)
+        let mut formatted = request_document_format(&client, ai_port, system, &request)
             .map_err(|error| format!("{} for section {}.", error, index + 1))?;
         if is_visual_line_echo(source, &formatted) {
             emit_ai_progress(
@@ -426,7 +425,7 @@ fn refine_document_text_blocking(
                 source_kind,
                 source,
             );
-            formatted = request_document_format(&client, system, &retry)
+            formatted = request_document_format(&client, ai_port, system, &retry)
                 .map_err(|error| format!("{} while rebuilding section {}.", error, index + 1))?;
         }
         if formatted.is_empty() {
@@ -446,14 +445,12 @@ fn refine_document_text_blocking(
 
 fn request_document_format(
     client: &reqwest::blocking::Client,
+    port: u16,
     system: &str,
     request: &str,
 ) -> CommandResult<String> {
     let response = client
-        .post(format!(
-            "http://127.0.0.1:{}/v1/chat/completions",
-            AI_SERVER_PORT
-        ))
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
         .json(&serde_json::json!({
             "messages": [
                 { "role": "system", "content": system },
@@ -569,12 +566,10 @@ fn review_grammar_text_blocking(
     emit_ai_progress(&app, 12, "Reading your writing");
     let server_port = if quick {
         let writing_model_path = resolve_word_ai_model_path(&app)?;
-        ensure_word_ai_server(&writing_model_path, &app)?;
-        WORD_AI_SERVER_PORT
+        ensure_word_ai_server(&writing_model_path, &app)?
     } else {
         let general_model_path = resolve_ai_model_path(&app, &model_path)?;
-        ensure_ai_server(&general_model_path, &app)?;
-        AI_SERVER_PORT
+        ensure_ai_server(&general_model_path, &app)?
     };
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
     let client = reqwest::blocking::Client::builder()
@@ -592,9 +587,20 @@ fn review_grammar_text_blocking(
     let mut suggestions = Vec::new();
     for (index, review_source) in review_sources.iter().enumerate() {
         let progress = 45 + ((index as u8).saturating_mul(38) / review_sources.len().max(1) as u8);
-        emit_ai_progress(&app, progress, if quick { "Checking spelling and grammar" } else { "Reviewing another section" });
+        emit_ai_progress(
+            &app,
+            progress,
+            if quick {
+                "Checking spelling and grammar"
+            } else {
+                "Reviewing another section"
+            },
+        );
         let request = if quick {
-            format!("Review this writing. Return JSON only.\n\n{}", review_source)
+            format!(
+                "Review this writing. Return JSON only.\n\n{}",
+                review_source
+            )
         } else {
             format!("Review this passage. Return 4 to 7 focused suggestions from this passage only. Return JSON only.\n\n{}", review_source)
         };
@@ -606,7 +612,9 @@ fn review_grammar_text_blocking(
             if quick { 320 } else { 800 },
         )?;
         if let Some(array) = json_array_from_response(&output) {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(&array)
+            {
                 suggestions.extend(items.into_iter().take(if quick { 3 } else { 7 }));
             }
         }
@@ -752,7 +760,7 @@ fn research_and_grade_text_blocking(
     }
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 8, "Reading your paper locally");
-    ensure_ai_server(&model_path, &app)?;
+    let ai_port = ensure_ai_server(&model_path, &app)?;
     let local_client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -760,7 +768,7 @@ fn research_and_grade_text_blocking(
     emit_ai_progress(&app, 25, "Identifying a focused research topic");
     let query_output = local_chat_text(
         &local_client,
-        AI_SERVER_PORT,
+        ai_port,
         "You turn a student's paper into concise academic database searches. Return only a JSON object with topicQuery and counterQuery. Each query must be 5 to 14 keywords. topicQuery should preserve the paper's topic and central claim. counterQuery should seek a relevant alternate perspective, limitation, or counterargument; if the paper is not making an argument, use a complementary scholarly perspective instead. Do not include personal names unless essential.",
         &format!("Create two research queries for this paper:\n\n{}", source.chars().take(7_000).collect::<String>()),
         120,
@@ -850,7 +858,7 @@ fn research_and_grade_text_blocking(
     };
     let grade_output = local_chat_text(
         &local_client,
-        AI_SERVER_PORT,
+        ai_port,
         "You are a constructive college writing instructor. Grade a student paper approximately, not officially. Use the supplied scholarly research leads only as leads: never claim a source proves something unless its metadata makes that clear. Return only a JSON object with keys grade, overview, strengths, improvements, evidence, reasoning, writingCraft, and researchAdvice. strengths, improvements, and researchAdvice must be arrays of 2 to 5 short strings. writingCraft must be an object with sentenceOpeners, topicSentences, organization, creativity, and length; each is a concise sentence. Clearly discuss the paper's claim, evidence, reasoning, counterarguments or missing perspectives, and practical ways to improve it. Do not write the paper for the student.",
         &format!("PAPER:\n{}\n\nSCHOLARLY RESEARCH LEADS (metadata only):\n{}", source, source_context),
         1800,
@@ -904,13 +912,13 @@ fn define_word_blocking(
     }
     let _ = model_path;
     let word_model_path = resolve_word_ai_model_path(&app)?;
-    ensure_word_ai_server(&word_model_path, &app)?;
+    let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let response = client
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", WORD_AI_SERVER_PORT))
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", word_ai_port))
         .json(&serde_json::json!({
             "messages": [
                 {"role":"system","content":"You are a concise, reliable English dictionary for a college writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated formal, academic, or more precise related alternatives; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
@@ -947,7 +955,7 @@ fn generate_flashcards_text_blocking(
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
-    ensure_ai_server(&model_path, &app)?;
+    let ai_port = ensure_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 42, "Reading your study materials");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
@@ -979,7 +987,7 @@ fn generate_flashcards_text_blocking(
     } else {
         "Use the supplied source material as the primary factual basis for the flashcards."
     };
-    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", AI_SERVER_PORT)).json(&serde_json::json!({
+    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", ai_port)).json(&serde_json::json!({
         "messages": [
           {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 40 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
           {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
@@ -1141,23 +1149,15 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
-    ensure_model_server(
-        &AI_SERVER,
-        model_path,
-        app,
-        AI_SERVER_PORT,
-        AI_CONTEXT_SIZE,
-        "on",
-    )
+fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "on")
 }
 
-fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<()> {
+fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     ensure_model_server(
         &WORD_AI_SERVER,
         model_path,
         app,
-        WORD_AI_SERVER_PORT,
         WORD_AI_CONTEXT_SIZE,
         "off",
     )
@@ -1167,10 +1167,9 @@ fn ensure_model_server(
     server_state: &'static OnceLock<Mutex<Option<AiServer>>>,
     model_path: &str,
     app: &tauri::AppHandle,
-    port_number: u16,
     context_size: &str,
     reasoning: &str,
-) -> CommandResult<()> {
+) -> CommandResult<u16> {
     let state = server_state.get_or_init(|| Mutex::new(None));
     let mut guard = state
         .lock()
@@ -1183,16 +1182,17 @@ fn ensure_model_server(
                 .try_wait()
                 .map_err(|error| error.to_string())?
                 .is_none()
-            && ai_server_ready(port_number)
+            && ai_server_ready(server.port)
         {
             server.last_used = Instant::now();
             emit_ai_progress(app, 32, "Your local model is ready");
-            return Ok(());
+            return Ok(server.port);
         }
         let _ = server.child.kill();
         let _ = server.child.wait();
         *guard = None;
     }
+    let port_number = available_loopback_port()?;
     let port = port_number.to_string();
     let mut command = Command::new("llama-server");
     command.args([
@@ -1225,6 +1225,7 @@ fn ensure_model_server(
     *guard = Some(AiServer {
         child,
         model_path: model_path.to_string(),
+        port: port_number,
         last_used: Instant::now(),
     });
     drop(guard);
@@ -1236,11 +1237,21 @@ fn ensure_model_server(
             && ai_server_ready(port_number)
         {
             emit_ai_progress(app, 32, "Your local model is ready");
-            return Ok(());
+            return Ok(port_number);
         }
         thread::sleep(Duration::from_millis(400));
     }
+    stop_model_server(server_state);
     Err("The local AI model took too long to start.".into())
+}
+
+fn available_loopback_port() -> CommandResult<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|_| "SoFlo could not reserve a private local AI connection.".to_string())?;
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .map_err(|_| "SoFlo could not read its private local AI connection.".to_string())
 }
 
 fn ai_server_ready(port: u16) -> bool {
@@ -1334,7 +1345,10 @@ fn download_ai_model_file(
     let mut response = reqwest::blocking::get(url)
         .map_err(|_| "SoFlo could not start the local AI model download.".to_string())?;
     if !response.status().is_success() {
-        return Err(format!("SoFlo could not download the local AI model (server returned {}).", response.status()));
+        return Err(format!(
+            "SoFlo could not download the local AI model (server returned {}).",
+            response.status()
+        ));
     }
     let total = response
         .content_length()
@@ -2899,7 +2913,17 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 
 #[cfg(test)]
 mod tests {
-    use super::{is_visual_line_echo, json_array_from_response, json_object_from_response};
+    use super::{
+        available_loopback_port, is_visual_line_echo, json_array_from_response,
+        json_object_from_response,
+    };
+
+    #[test]
+    fn reserves_a_fresh_loopback_port_for_each_model_server() {
+        let port = available_loopback_port().expect("a private loopback port");
+        assert!(port > 0);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
 
     #[test]
     fn detects_a_raw_visual_line_echo_without_rejecting_markdown_structure() {

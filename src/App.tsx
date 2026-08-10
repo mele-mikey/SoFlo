@@ -225,6 +225,7 @@ function App() {
     } catch {
       // A locked library has no in-memory work to flush; the window may still close.
     }
+    try { await api.stopAiServer() } catch { /* The window may still close if a local model already stopped. */ }
     await invoke('force_close_window')
   }, [flushDocument, flushLecture])
   useEffect(() => {
