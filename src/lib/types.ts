@@ -120,6 +120,7 @@ export interface StudyWebSummary {
   id: string
   classId: string
   flashcardSetId: string
+  flashcardSetIds: string[]
   name: string
   cardCount: number
   groupCount: number
@@ -154,6 +155,7 @@ export interface StudyWebDetail {
   id: string
   classId: string
   flashcardSetId: string
+  flashcardSetIds: string[]
   name: string
   generatedAt: string
   updatedAt: string

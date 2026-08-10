@@ -719,6 +719,20 @@ impl Database {
                 PRAGMA user_version = 9;
             "#).map_err(|error| error.to_string())?;
         }
+        if version < 10 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS study_web_sources (
+                    study_web_id TEXT NOT NULL REFERENCES study_webs(id) ON DELETE CASCADE,
+                    flashcard_set_id TEXT NOT NULL REFERENCES flashcard_sets(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (study_web_id, flashcard_set_id)
+                );
+                INSERT OR IGNORE INTO study_web_sources (study_web_id, flashcard_set_id, position)
+                SELECT id, flashcard_set_id, 0 FROM study_webs;
+                CREATE INDEX IF NOT EXISTS idx_study_web_sources_web ON study_web_sources(study_web_id, position);
+                PRAGMA user_version = 10;
+            "#).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }
@@ -913,7 +927,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -922,7 +936,7 @@ mod tests {
             assert!(columns.contains(&"name".to_string()));
             assert!(columns.contains(&"source".to_string()));
         }
-        for table in ["study_webs", "study_web_groups", "study_web_nodes", "study_web_group_members", "study_web_relationships"] {
+        for table in ["study_webs", "study_web_sources", "study_web_groups", "study_web_nodes", "study_web_group_members", "study_web_relationships"] {
             let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("study web table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
