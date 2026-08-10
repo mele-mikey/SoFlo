@@ -23,7 +23,7 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { AlignCenter, AlignLeft, AlignRight, Bold, Check, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pencil, Pilcrow, Pin, Quote, Redo2, RefreshCw, RemoveFormatting, RotateCcw, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { ChangeSet, simplifyChanges } from 'prosemirror-changeset'
 import type { DocumentDetail, RevisionHistoryEntry } from '../../lib/types'
@@ -76,17 +76,6 @@ type PinnedWritingPanel = {
   word?: string
   reference?: WordReference | null
   error?: string
-}
-function savedWritingPanelPosition(): WritingPanelPosition | null {
-  try {
-    const raw = globalThis.localStorage?.getItem('soflo-writing-panel-position')
-    if (!raw) return null
-    const value = JSON.parse(raw) as Partial<WritingPanelPosition>
-    return Number.isFinite(value.left) && Number.isFinite(value.top) ? { left: Number(value.left), top: Number(value.top) } : null
-  } catch { return null }
-}
-function savedWritingPanelPin() {
-  try { return globalThis.localStorage?.getItem('soflo-writing-panel-pinned') === 'true' } catch { return false }
 }
 function savedPanelPosition(key: string): WritingPanelPosition | null {
   try {
@@ -683,8 +672,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [paperContext, setPaperContext] = useState(defaultPaperContext)
   const [paperContextDraft, setPaperContextDraft] = useState(defaultPaperContext)
   const [paperContextOpen, setPaperContextOpen] = useState(false)
-  const [writingPanelPosition, setWritingPanelPosition] = useState<WritingPanelPosition | null>(savedWritingPanelPosition)
-  const [writingPanelPinned, setWritingPanelPinned] = useState(savedWritingPanelPin)
+  const [grammarPanelPosition, setGrammarPanelPosition] = useState<WritingPanelPosition | null>(() => savedPanelPosition('soflo-grammar-panel-position'))
+  const [grammarPanelPinned, setGrammarPanelPinned] = useState(false)
+  const [wordReferencePanelPosition, setWordReferencePanelPosition] = useState<WritingPanelPosition | null>(() => savedPanelPosition('soflo-word-reference-panel-position'))
+  const [wordReferencePinned, setWordReferencePinned] = useState(false)
   const [pinnedWritingPanels, setPinnedWritingPanels] = useState<PinnedWritingPanel[]>([])
   const [thesaurusPanelPosition, setThesaurusPanelPosition] = useState<WritingPanelPosition | null>(() => savedPanelPosition('soflo-thesaurus-panel-position'))
   const [researchPanelPosition, setResearchPanelPosition] = useState<WritingPanelPosition | null>(() => savedPanelPosition('soflo-research-panel-position'))
@@ -716,8 +707,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const aiEnabledRef = useRef(aiEnabled)
   const defineWordRef = useRef(onDefineWord)
   const paperContextRef = useRef(paperContext)
-  const writingPanelPinnedRef = useRef(writingPanelPinned)
-  const writingPanelPositionRef = useRef(writingPanelPosition)
+  const grammarPanelPinnedRef = useRef(false)
+  const wordReferencePinnedRef = useRef(false)
+  const grammarPanelPositionRef = useRef(grammarPanelPosition)
+  const wordReferencePanelPositionRef = useRef(wordReferencePanelPosition)
   const wordReferencePanelRef = useRef<{ reference: WordReference | null; loading: boolean; error: string }>({ reference: null, loading: false, error: '' })
   aiEnabledRef.current = aiEnabled
   defineWordRef.current = onDefineWord
@@ -735,27 +728,29 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     wordReferenceRequestRef.current += 1
     selectedWordReferenceRef.current = ''
     selectedWordRangeRef.current = null
-    writingPanelPinnedRef.current = false
-    setWritingPanelPinned(false)
+    wordReferencePinnedRef.current = false
+    setWordReferencePinned(false)
     setWordReference(null)
     setWordReferenceLoading(false)
     setWordReferenceError('')
   }
   const closeActiveGrammarPanel = () => {
-    writingPanelPinnedRef.current = false
-    setWritingPanelPinned(false)
+    grammarPanelPinnedRef.current = false
+    setGrammarPanelPinned(false)
     selectedGrammarIssueRef.current = null
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
   }
-  const beginWritingPanelDrag = (event: React.PointerEvent<HTMLElement>, setPosition: (position: WritingPanelPosition) => void = setWritingPanelPosition) => {
+  const beginWritingPanelDrag = (event: React.PointerEvent<HTMLElement>, setPosition?: (position: WritingPanelPosition) => void) => {
     if ((event.target as Element).closest('button,input,textarea,a')) return
     const panel = event.currentTarget.closest<HTMLElement>('.writing-floating-panel')
     const bounds = panel?.getBoundingClientRect()
     if (!panel || !bounds) return
+    const updatePosition = setPosition
+      ?? (panel.classList.contains('grammar-sidebar') ? setGrammarPanelPosition : setWordReferencePanelPosition)
     event.preventDefault()
     const origin = { x: event.clientX, y: event.clientY, left: bounds.left, top: bounds.top }
-    const move = (next: PointerEvent) => setPosition({
+    const move = (next: PointerEvent) => updatePosition({
       left: Math.max(12, Math.min(window.innerWidth - bounds.width - 12, origin.left + next.clientX - origin.x)),
       top: Math.max(78, Math.min(window.innerHeight - 90, origin.top + next.clientY - origin.y)),
     })
@@ -763,18 +758,17 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
   }
-  const archiveActiveWritingPanel = () => {
-    const position = writingPanelPositionRef.current
+  const archiveGrammarPanel = () => {
     const issue = selectedGrammarIssueRef.current
+    if (issue) setPinnedWritingPanels((panels) => [...panels, { id: `grammar-${Date.now()}-${Math.random().toString(36).slice(2)}`, kind: 'grammar', position: grammarPanelPositionRef.current, pinned: true, issue }])
+    grammarPanelPinnedRef.current = false
+    setGrammarPanelPinned(false)
+  }
+  const archiveWordReferencePanel = () => {
     const word = selectedWordReferenceRef.current
-    const panel = issue
-      ? { id: `grammar-${Date.now()}-${Math.random().toString(36).slice(2)}`, kind: 'grammar' as const, position, pinned: true, issue }
-      : word
-        ? { id: `word-${Date.now()}-${Math.random().toString(36).slice(2)}`, kind: 'word' as const, position, pinned: true, word, reference: wordReferencePanelRef.current.reference, error: wordReferencePanelRef.current.error }
-        : null
-    if (panel) setPinnedWritingPanels((panels) => [...panels, panel])
-    setWritingPanelPinned(false)
-    writingPanelPinnedRef.current = false
+    if (word) setPinnedWritingPanels((panels) => [...panels, { id: `word-${Date.now()}-${Math.random().toString(36).slice(2)}`, kind: 'word', position: wordReferencePanelPositionRef.current, pinned: true, word, reference: wordReferencePanelRef.current.reference, error: wordReferencePanelRef.current.error }])
+    wordReferencePinnedRef.current = false
+    setWordReferencePinned(false)
   }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
     const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null
@@ -802,7 +796,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const issueIndex = Number(marked?.dataset.grammarIssue)
     if (Number.isInteger(issueIndex) && grammarIssues[issueIndex]) {
       event.preventDefault()
-      if (writingPanelPinnedRef.current) archiveActiveWritingPanel()
+      if (grammarPanelPinnedRef.current) archiveGrammarPanel()
       selectedGrammarIssueRef.current = grammarIssues[issueIndex]
       setSelectedGrammarIssue(grammarIssues[issueIndex])
       setGrammarOpen(true)
@@ -823,15 +817,15 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       }
       return
     }
-    if (selection && selectedGrammarIssueRef.current && writingPanelPinnedRef.current && !selectionStaysInIssue(nextEditor, selectedGrammarIssueRef.current)) {
-      archiveActiveWritingPanel()
+    if (selection && selectedGrammarIssueRef.current && grammarPanelPinnedRef.current && !selectionStaysInIssue(nextEditor, selectedGrammarIssueRef.current)) {
+      archiveGrammarPanel()
       selectedGrammarIssueRef.current = null
       setGrammarOpen(false)
       setSelectedGrammarIssue(null)
     }
     if (selectedWordReferenceRef.current) {
       if (currentWord && selectedWordReferenceRef.current.toLocaleLowerCase() === currentWord.toLocaleLowerCase()) return
-      if (writingPanelPinnedRef.current) archiveActiveWritingPanel()
+      if (wordReferencePinnedRef.current) archiveWordReferencePanel()
       wordReferenceRequestRef.current += 1
       selectedWordReferenceRef.current = ''
       selectedWordRangeRef.current = null
@@ -844,9 +838,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     selectedWordReferenceRef.current = word
     selectedWordRangeRef.current = selection
     const request = ++wordReferenceRequestRef.current
-    selectedGrammarIssueRef.current = null
-    setGrammarOpen(false)
-    setSelectedGrammarIssue(null)
     setResearchError('')
     setWordReference(null)
     setWordReferenceError('')
@@ -884,7 +875,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     },
     onSelectionUpdate: ({ editor: nextEditor }) => {
       const activeIssue = selectedGrammarIssueRef.current
-      if (activeIssue && !writingPanelPinnedRef.current && !selectionStaysInIssue(nextEditor, activeIssue)) {
+      if (activeIssue && !grammarPanelPinnedRef.current && !selectionStaysInIssue(nextEditor, activeIssue)) {
         selectedGrammarIssueRef.current = null
         setGrammarOpen(false)
         setSelectedGrammarIssue(null)
@@ -901,9 +892,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setGrammarMessage('')
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
+    grammarPanelPinnedRef.current = false
+    setGrammarPanelPinned(false)
     setWordReference(null)
     setWordReferenceLoading(false)
     setWordReferenceError('')
+    wordReferencePinnedRef.current = false
+    setWordReferencePinned(false)
+    setPinnedWritingPanels([])
     selectedWordReferenceRef.current = ''
     selectedWordRangeRef.current = null
     ignoredGrammarKeysRef.current.clear()
@@ -914,8 +910,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }, [document.id, document.content, editor])
   useEffect(() => { selectedGrammarIssueRef.current = selectedGrammarIssue }, [selectedGrammarIssue])
   useEffect(() => { paperContextRef.current = paperContext }, [paperContext])
-  useEffect(() => { writingPanelPinnedRef.current = writingPanelPinned; try { globalThis.localStorage?.setItem('soflo-writing-panel-pinned', String(writingPanelPinned)) } catch { /* Local layout preferences are optional. */ } }, [writingPanelPinned])
-  useEffect(() => { writingPanelPositionRef.current = writingPanelPosition; if (!writingPanelPosition) return; try { globalThis.localStorage?.setItem('soflo-writing-panel-position', JSON.stringify(writingPanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [writingPanelPosition])
+  useEffect(() => { grammarPanelPinnedRef.current = grammarPanelPinned }, [grammarPanelPinned])
+  useEffect(() => { wordReferencePinnedRef.current = wordReferencePinned }, [wordReferencePinned])
+  useEffect(() => { grammarPanelPositionRef.current = grammarPanelPosition; if (!grammarPanelPosition) return; try { globalThis.localStorage?.setItem('soflo-grammar-panel-position', JSON.stringify(grammarPanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [grammarPanelPosition])
+  useEffect(() => { wordReferencePanelPositionRef.current = wordReferencePanelPosition; if (!wordReferencePanelPosition) return; try { globalThis.localStorage?.setItem('soflo-word-reference-panel-position', JSON.stringify(wordReferencePanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [wordReferencePanelPosition])
   useEffect(() => { wordReferencePanelRef.current = { reference: wordReference, loading: wordReferenceLoading, error: wordReferenceError } }, [wordReference, wordReferenceLoading, wordReferenceError])
   useEffect(() => { if (!thesaurusPanelPosition) return; try { globalThis.localStorage?.setItem('soflo-thesaurus-panel-position', JSON.stringify(thesaurusPanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [thesaurusPanelPosition])
   useEffect(() => { if (!researchPanelPosition) return; try { globalThis.localStorage?.setItem('soflo-research-panel-position', JSON.stringify(researchPanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [researchPanelPosition])
@@ -1258,11 +1256,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     if (!aiEnabled || researchReviewing) return
     setResearchReviewing(true)
     setResearchError('')
-    setGrammarOpen(false)
-    setSelectedGrammarIssue(null)
-    setWordReference(null)
-    setWordReferenceLoading(false)
-    setWordReferenceError('')
     try {
       const report = parseResearchGrade(await onResearchAndGrade(editor.getText(), paperContext))
       if (!report) throw new Error('SoFlo could not prepare a research and grade report from the local AI response.')
@@ -1288,13 +1281,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }
   const openThesaurus = () => {
     setThesaurusOpen(true)
-    setGrammarOpen(false)
-    setSelectedGrammarIssue(null)
-    setPinnedWritingPanels([])
-    setWritingPanelPinned(false)
-    writingPanelPinnedRef.current = false
-    setWordReference(null)
-    setWordReferenceError('')
   }
   const applyGrammarIssue = (issue: GrammarIssue, replacement = issue.replacement) => {
     if (issue.kind === 'structure') return
@@ -1306,8 +1292,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const remaining = grammarIssues.filter((current) => current !== issue).map((current) => ({ ...current, from: transaction.mapping.map(current.from, -1), to: transaction.mapping.map(current.to, 1) }))
     setGrammarIssues(remaining)
     setGrammarDecorations(remaining)
-    writingPanelPinnedRef.current = false
-    setWritingPanelPinned(false)
+    grammarPanelPinnedRef.current = false
+    setGrammarPanelPinned(false)
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
   }
@@ -1316,8 +1302,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const remaining = grammarIssues.filter((current) => grammarIssueKey(current) !== grammarIssueKey(issue))
     setGrammarIssues(remaining)
     setGrammarDecorations(remaining)
-    writingPanelPinnedRef.current = false
-    setWritingPanelPinned(false)
+    grammarPanelPinnedRef.current = false
+    setGrammarPanelPinned(false)
     selectedGrammarIssueRef.current = null
     setGrammarOpen(false)
     setSelectedGrammarIssue(null)
@@ -1325,9 +1311,32 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const useWordAlternative = (alternative: string) => {
     const range = selectedWordRangeRef.current
     if (!range) return
-    const exact = editor.state.doc.textBetween(range.from, range.to, ' ')
-    if (exact.toLocaleLowerCase() !== range.word.toLocaleLowerCase()) return
-    const transaction = editor.state.tr.insertText(alternative, range.from, range.to).scrollIntoView()
+    let from = range.from
+    let to = range.to
+    const selectedWord = range.word.toLocaleLowerCase()
+    if (editor.state.doc.textBetween(from, to, ' ').toLocaleLowerCase() !== selectedWord) {
+      let nearestFrom = -1
+      let nearestTo = -1
+      let nearestDistance = Number.POSITIVE_INFINITY
+      editor.state.doc.descendants((node, position) => {
+        if (!node.isText || !node.text) return
+        let start = node.text.toLocaleLowerCase().indexOf(selectedWord)
+        while (start >= 0) {
+          const candidateFrom = position + start
+          const candidateDistance = Math.abs(candidateFrom - range.from)
+          if (candidateDistance < nearestDistance) {
+            nearestFrom = candidateFrom
+            nearestTo = candidateFrom + range.word.length
+            nearestDistance = candidateDistance
+          }
+          start = node.text.toLocaleLowerCase().indexOf(selectedWord, start + range.word.length)
+        }
+      })
+      if (nearestFrom < 0) return
+      from = nearestFrom
+      to = nearestTo
+    }
+    const transaction = editor.state.tr.insertText(alternative, from, to).scrollIntoView()
     editor.view.dispatch(transaction)
     void navigator.clipboard.writeText(alternative).catch(() => undefined)
     wordReferenceRequestRef.current += 1
@@ -1456,10 +1465,25 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return <div className={`version-entry${selected ? ' selected' : ''}${nested ? ' nested' : ''}`} key={entry.id}><button className="version-entry-main" onClick={() => setVersionHistorySelectedId(entry.id)}><i /><span><strong>{entry.id === 'current' ? 'Current version' : entry.name || revisionTimeOnly(entry.createdAt)}</strong><small>{entry.id === 'current' ? 'Latest saved work' : revisionSummary(entry, older)}</small>{entry.name && <time>{revisionTimeOnly(entry.createdAt)}</time>}</span></button>{entry.id !== 'current' && <button className="version-name-button" aria-label={`Name version ${entry.revision}`} onClick={() => { setNamingVersionId(entry.id); setVersionName(entry.name ?? '') }}><Pencil size={12} /></button>}{namingVersionId === entry.id && <form className="version-name-form" onSubmit={(event) => { event.preventDefault(); void saveVersionName(entry) }}><input autoFocus value={versionName} onChange={(event) => setVersionName(event.target.value)} placeholder="e.g. First Draft" /><button type="submit"><Check size={12} /></button><button type="button" onClick={() => setNamingVersionId(null)}><X size={12} /></button></form>}</div>
   }
   const panelStyle = (position: WritingPanelPosition | null, zIndex: number) => position ? { left: `${position.left}px`, top: `${position.top}px`, right: 'auto', bottom: 'auto', zIndex } : { zIndex }
-  const writingPanelStyle = panelStyle(writingPanelPosition, 100 + pinnedWritingPanels.length)
+  const writingPanelStyle = {
+    zIndex: 100 + pinnedWritingPanels.length,
+    '--soflo-grammar-panel-left': grammarPanelPosition ? `${grammarPanelPosition.left}px` : undefined,
+    '--soflo-grammar-panel-top': grammarPanelPosition ? `${grammarPanelPosition.top}px` : undefined,
+    '--soflo-word-panel-left': wordReferencePanelPosition ? `${wordReferencePanelPosition.left}px` : undefined,
+    '--soflo-word-panel-top': wordReferencePanelPosition ? `${wordReferencePanelPosition.top}px` : undefined,
+  } as CSSProperties
   const thesaurusPanelStyle = panelStyle(thesaurusPanelPosition, 88)
   const researchPanelStyle = panelStyle(researchPanelPosition, 88)
-  const writingPanelControls = (onClose: () => void) => <div className="writing-panel-controls"><button type="button" className={writingPanelPinned ? 'icon-button tiny active' : 'icon-button tiny'} onClick={() => setWritingPanelPinned((pinned) => !pinned)} aria-label={writingPanelPinned ? 'Unpin this panel' : 'Keep this panel open'} aria-pressed={writingPanelPinned}><Pin size={14} /></button><button type="button" className="icon-button tiny" onClick={onClose} aria-label="Close panel"><X size={16} /></button></div>
+  const writingPanelControls = (onClose: () => void) => {
+    const grammarPanel = onClose === closeActiveGrammarPanel
+    const pinned = grammarPanel ? grammarPanelPinned : wordReferencePinned
+    const togglePin = () => {
+      const next = !pinned
+      if (grammarPanel) { grammarPanelPinnedRef.current = next; setGrammarPanelPinned(next) }
+      else { wordReferencePinnedRef.current = next; setWordReferencePinned(next) }
+    }
+    return <div className="writing-panel-controls"><button type="button" className={pinned ? 'icon-button tiny active' : 'icon-button tiny'} onClick={togglePin} aria-label={pinned ? 'Unpin this panel' : 'Keep this panel open'} aria-pressed={pinned}><Pin size={14} /></button><button type="button" className="icon-button tiny" onClick={onClose} aria-label="Close panel"><X size={16} /></button></div>
+  }
   const pinnedPanelControls = (panel: PinnedWritingPanel) => <div className="writing-panel-controls"><button type="button" className={panel.pinned ? 'icon-button tiny active' : 'icon-button tiny'} onClick={() => setPinnedWritingPanels((panels) => panels.map((current) => current.id === panel.id ? { ...current, pinned: !current.pinned } : current))} aria-label={panel.pinned ? 'Unpin this panel' : 'Pin this panel'} aria-pressed={panel.pinned}><Pin size={14} /></button><button type="button" className="icon-button tiny" onClick={() => setPinnedWritingPanels((panels) => panels.filter((current) => current.id !== panel.id))} aria-label="Close panel"><X size={16} /></button></div>
   const renderPinnedWritingPanel = (panel: PinnedWritingPanel, index: number) => panel.kind === 'grammar' && panel.issue
     ? <aside key={panel.id} data-pinned-panel-id={panel.id} className="grammar-sidebar writing-floating-panel pinned-writing-panel" style={panelStyle(panel.position, 80 + index)} aria-label="Pinned writing suggestion"><header onPointerDown={(event) => beginWritingPanelDrag(event, (position) => setPinnedWritingPanels((panels) => panels.map((current) => current.id === panel.id ? { ...current, position } : current)))}><div><p className="eyebrow">PINNED WRITING SUGGESTION</p><h2>{panel.issue.kind === 'style' ? 'Formal rewrite' : panel.issue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div>{pinnedPanelControls(panel)}</header><div className="grammar-suggestion-detail"><small>{panel.issue.category}{panel.issue.partOfSpeech ? ` · ${panel.issue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{panel.issue.original}</s><strong>{panel.issue.replacement}</strong></p><section><h3>{panel.issue.kind === 'style' ? 'Why this is better' : panel.issue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{panel.issue.reason}</p></section></div></aside>
