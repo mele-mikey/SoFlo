@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
-  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary,
+  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary, RevisionHistoryEntry,
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, TestAttemptSummary,
 } from './types'
 
@@ -26,12 +26,14 @@ export const api = {
   updateClass: (input: { id: string; semesterId: string; name: string; courseCode: string; professor?: string | null; location?: string | null; schedule?: string | null; icon: string; accentColor: string; archived: boolean }) => call<CourseClass>('update_class', { input }),
   deleteClass: (id: string) => call<void>('delete_class', { id }),
   listDocuments: (classId: string, includeDeleted = false) => call<DocumentSummary[]>('list_documents', { classId, includeDeleted }),
+  listDocumentRevisions: (id: string) => call<RevisionHistoryEntry[]>('list_document_revisions', { id }),
   listRecentDocuments: () => call<DocumentSummary[]>('list_recent_documents'),
   getDocument: (id: string) => call<DocumentDetail>('get_document', { id }),
   getSyllabus: (classId: string) => call<DocumentDetail | null>('get_syllabus', { classId }),
   createDocument: (input: { classId: string; title: string }) => call<DocumentDetail>('create_document', { input }),
   saveDocument: (input: Pick<DocumentDetail, 'id' | 'title' | 'content' | 'contentPlain' | 'isFavorite'>) => call<DocumentDetail>('save_document', { input }),
   listLectures: (classId: string) => call<LectureSummary[]>('list_lectures', { classId }),
+  listLectureRevisions: (id: string) => call<RevisionHistoryEntry[]>('list_lecture_revisions', { id }),
   getLecture: (id: string) => call<LectureDetail>('get_lecture', { id }),
   createLecture: (input: { classId: string; courseCode: string; courseName: string; lectureDate: string; scheduledStart: string | null; scheduledEnd: string | null; professorSnapshot: string | null; title: string }) => call<LectureDetail>('create_lecture', { input }),
   saveLecture: (input: Pick<LectureDetail, 'id' | 'title' | 'content' | 'contentPlain'>) => call<LectureDetail>('save_lecture', { input }),

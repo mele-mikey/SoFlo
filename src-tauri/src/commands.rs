@@ -974,36 +974,50 @@ fn ai_thesaurus_blocking(
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let response = client
-        .post(format!(
-            "http://127.0.0.1:{}/v1/chat/completions",
-            word_ai_port
-        ))
-        .json(&serde_json::json!({
-            "messages": [
-                {"role":"system","content":"You are a precise English thesaurus for college writing. Return only one complete valid JSON object with exactly these keys: query, close, related, broad. Each value must be an array of 3 to 6 concise alternatives. close means nearly interchangeable in the same context; related means useful formal or academic alternatives with a slightly different shade; broad means more distant but relevant words or phrases. Preserve the part of speech and meaning of the query. Use single words or short phrases, never definitions, commentary, Markdown, duplicates, or the queried term itself. Do not invent unusual words."},
-                {"role":"user","content":format!("Find grouped alternatives for: {}", query)}
-            ],
-            "chat_template_kwargs": { "enable_thinking": false },
-            "max_tokens": 700,
-            "temperature": 0.15
-        }))
-        .send()
-        .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
-        .error_for_status()
-        .map_err(|error| format!("SoFlo's local AI model could not find related words: {}", error))?;
-    let body: serde_json::Value = response
-        .json()
-        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    let output = body
-        .get("choices")
-        .and_then(|value| value.get(0))
-        .and_then(|value| value.get("message"))
-        .and_then(|value| value.get("content"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
+    let request = |instruction: &str, max_tokens: u16| -> CommandResult<String> {
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                word_ai_port
+            ))
+            .json(&serde_json::json!({
+                "messages": [
+                    {"role":"system","content":instruction},
+                    {"role":"user","content":format!("Find grouped alternatives for: {}", query)}
+                ],
+                "chat_template_kwargs": { "enable_thinking": false },
+                "response_format": { "type": "json_object" },
+                "max_tokens": max_tokens,
+                "temperature": 0.1
+            }))
+            .send()
+            .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
+            .error_for_status()
+            .map_err(|error| format!("SoFlo's local AI model could not find related words: {}", error))?;
+        let body: serde_json::Value = response
+            .json()
+            .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+        Ok(body
+            .get("choices")
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.get("message"))
+            .and_then(|value| value.get("content"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string())
+    };
+    let instruction = "You are a precise English thesaurus for college writing. Return only one complete valid JSON object with exactly these keys: query, close, related, broad. Each value must be an array of 3 to 6 concise alternatives. close means nearly interchangeable in the same context; related means useful formal or academic alternatives with a slightly different shade; broad means more distant but relevant words or phrases. Preserve the part of speech and meaning of the query. Use single words or short phrases, never definitions, commentary, Markdown, duplicates, or the queried term itself. Do not invent unusual words.";
+    let output = request(instruction, 700)?;
     touch_word_ai_server();
-    json_object_from_response(output)
+    if let Some(object) = json_object_from_response(&output) {
+        return Ok(object);
+    }
+    let retry = request("Return only valid compact JSON in this exact shape: {\"query\":\"input\",\"close\":[\"word\"],\"related\":[\"word\"],\"broad\":[\"word\"]}. Replace input and each word with useful alternatives. No Markdown, explanation, or extra keys.", 1100)?;
+    if let Some(object) = json_object_from_response(&retry) {
+        return Ok(object);
+    }
+    let final_retry = request("Output one compact JSON object and nothing else. Use exactly these keys and arrays: query (string), close (array), related (array), broad (array). Each array must contain 3 short English alternatives. Do not use markdown or commentary.", 1200)?;
+    json_object_from_response(&final_retry)
         .ok_or_else(|| "SoFlo could not prepare grouped thesaurus suggestions.".into())
 }
 
@@ -1962,6 +1976,30 @@ pub fn get_syllabus(
 }
 
 #[tauri::command]
+pub fn list_document_revisions(
+    database: State<'_, Database>,
+    id: String,
+) -> CommandResult<Vec<RevisionHistoryEntry>> {
+    let connection = database.open()?;
+    let mut statement = connection
+        .prepare("SELECT id, revision, title, content_plain, created_at FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC, revision DESC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([id], |row| {
+            Ok(RevisionHistoryEntry {
+                id: row.get(0)?,
+                revision: row.get(1)?,
+                title: row.get(2)?,
+                content_plain: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn set_document_syllabus(
     database: State<'_, Database>,
     id: String,
@@ -2018,6 +2056,30 @@ pub fn list_lectures(
 }
 
 #[tauri::command]
+pub fn list_lecture_revisions(
+    database: State<'_, Database>,
+    id: String,
+) -> CommandResult<Vec<RevisionHistoryEntry>> {
+    let connection = database.open()?;
+    let mut statement = connection
+        .prepare("SELECT id, revision, title, content_plain, created_at FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC, revision DESC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([id], |row| {
+            Ok(RevisionHistoryEntry {
+                id: row.get(0)?,
+                revision: row.get(1)?,
+                title: row.get(2)?,
+                content_plain: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_lecture(database: State<'_, Database>, id: String) -> CommandResult<LectureDetail> {
     database.open()?.query_row("SELECT id, class_id, course_code, course_name, lecture_date, scheduled_start, scheduled_end, professor_snapshot, title, content, content_plain, revision, created_at, updated_at FROM lectures WHERE id=?1", [&id], read_lecture).map_err(|error| error.to_string())
 }
@@ -2052,11 +2114,11 @@ pub fn save_lecture(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let (existing, revision): (String, i32) = transaction
+    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) = transaction
         .query_row(
-            "SELECT content, revision FROM lectures WHERE id=?1",
+            "SELECT content, revision, content_plain, title FROM lectures WHERE id=?1",
             [&input.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|error| error.to_string())?;
     let next_revision = if existing != input.content {
@@ -2065,6 +2127,10 @@ pub fn save_lecture(
         revision
     };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
+    if existing != input.content && next_revision % 15 == 0 {
+        transaction.execute("INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM lecture_revisions WHERE id IN (SELECT id FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC LIMIT -1 OFFSET 30)", [&input.id]).map_err(|error| error.to_string())?;
+    }
     transaction.commit().map_err(|error| error.to_string())?;
     get_lecture(database, input.id)
 }
@@ -2090,18 +2156,18 @@ pub fn save_document(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let (existing, revision): (String, i32) = transaction
+    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) = transaction
         .query_row(
-            "SELECT content, revision FROM documents WHERE id=?1",
+            "SELECT content, revision, content_plain, title FROM documents WHERE id=?1",
             [&input.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|error| error.to_string())?;
     let changed = existing != input.content;
     let next_revision = if changed { revision + 1 } else { revision };
     transaction.execute("UPDATE documents SET title=?1, content=?2, content_plain=?3, is_favorite=?4, revision=?5, updated_at=CURRENT_TIMESTAMP WHERE id=?6", params![input.title.trim(), input.content, input.content_plain, input.is_favorite as i32, next_revision, input.id]).map_err(|error| error.to_string())?;
     if changed && next_revision % 15 == 0 {
-        transaction.execute("INSERT INTO document_revisions (id, document_id, title, content, revision) SELECT ?1, id, title, content, revision FROM documents WHERE id=?2", params![Uuid::new_v4().to_string(), input.id]).map_err(|error| error.to_string())?;
+        transaction.execute("INSERT INTO document_revisions (id, document_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM document_revisions WHERE id IN (SELECT id FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC LIMIT -1 OFFSET 30)", [&input.id]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;

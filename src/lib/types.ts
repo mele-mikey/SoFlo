@@ -51,6 +51,14 @@ export interface DocumentDetail extends DocumentSummary {
   createdAt: string
 }
 
+export interface RevisionHistoryEntry {
+  id: string
+  revision: number
+  title: string
+  contentPlain: string
+  createdAt: string
+}
+
 export interface LectureSummary {
   id: string
   classId: string

@@ -574,7 +574,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 6 {
+        if version >= 7 {
             return Ok(());
         }
         if version < 1 {
@@ -644,6 +644,23 @@ impl Database {
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 PRAGMA user_version = 6;
+            "#).map_err(|error| error.to_string())?;
+        }
+        if version < 7 {
+            connection.execute_batch(r#"
+                ALTER TABLE document_revisions ADD COLUMN content_plain TEXT NOT NULL DEFAULT '';
+                CREATE TABLE IF NOT EXISTS lecture_revisions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_plain TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_document_revisions_document ON document_revisions(document_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_lecture_revisions_lecture ON lecture_revisions(lecture_id, created_at DESC);
+                PRAGMA user_version = 7;
             "#).map_err(|error| error.to_string())?;
         }
         Ok(())

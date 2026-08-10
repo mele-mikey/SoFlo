@@ -23,7 +23,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { DocumentDetail } from '../../lib/types'
+import type { DocumentDetail, RevisionHistoryEntry } from '../../lib/types'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../../lib/api'
@@ -47,6 +47,7 @@ interface DocumentEditorProps {
   onResearchAndGrade: (text: string) => Promise<string>
   onDefineWord: (word: string) => Promise<string>
   onAiThesaurus: (word: string) => Promise<string>
+  onVersionHistory: () => Promise<RevisionHistoryEntry[]>
   onReleaseAi: () => Promise<void>
   onBack: () => void
   onDelete: () => void
@@ -135,6 +136,18 @@ type GrammarIssue = { kind: GrammarIssueKind; original: string; replacement: str
 type WordSense = { partOfSpeech: string; definition: string; example: string }
 type WordReference = { word: string; pronunciation: string; senses: WordSense[]; synonyms: string[] }
 type ThesaurusResult = { query: string; close: string[]; related: string[]; broad: string[] }
+function formatRevisionTime(value: string) {
+  const parsed = new Date(`${value.replace(' ', 'T')}Z`)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+}
+function wordCount(value: string) { return value.trim() ? value.trim().split(/\s+/).length : 0 }
+function revisionChangeSummary(newer: string, older: string) {
+  if (!older) return 'Earlier snapshot saved before text comparison was available.'
+  const delta = wordCount(newer) - wordCount(older)
+  if (delta > 0) return `${delta} word${delta === 1 ? '' : 's'} added since this version.`
+  if (delta < 0) return `${Math.abs(delta)} word${delta === -1 ? '' : 's'} removed since this version.`
+  return 'Text length stayed about the same; wording or formatting may have changed.'
+}
 type WordSelection = { word: string; from: number; to: number }
 type ResearchSource = { title: string; publication: string; year: string; type: string; perspective: string; citations: number; url: string }
 type ResearchGrade = { grade: string; overview: string; strengths: string[]; improvements: string[]; evidence: string; reasoning: string; writingCraft: Record<string, string>; researchAdvice: string[]; researchQuery: string; sources: ResearchSource[]; sourceNote: string }
@@ -472,7 +485,7 @@ const PaperPagination = Extension.create({
   },
 })
 
-export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, aiModelReady, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onResearchAndGrade, onDefineWord, onAiThesaurus, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
+export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabled, aiModelReady, fontSize, readingSurface, saveState, onChange, onSpellcheckChange, onAiGrammarEnabledChange, grammarProgress, onGrammarReview, onResearchAndGrade, onDefineWord, onAiThesaurus, onVersionHistory, onReleaseAi, onBack, onDelete, onDuplicate, collectionLabel = 'Papers', deleteLabel = 'Move to trash', deriveTitle = true, context }: DocumentEditorProps) {
   const [findOpen, setFindOpen] = useState(false)
   const [findValue, setFindValue] = useState('')
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false)
@@ -489,6 +502,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [pageCount, setPageCount] = useState(1)
   const [pdfMessage, setPdfMessage] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [contextSubmenu, setContextSubmenu] = useState<string | null>(null)
+  const [citationMenuOpen, setCitationMenuOpen] = useState(false)
   const [linkDialog, setLinkDialog] = useState<{ url: string; canRemove: boolean } | null>(null)
   const [linkPreview, setLinkPreview] = useState<{ href: string; label: string; x: number; y: number } | null>(null)
   const [imageDialog, setImageDialog] = useState<{ src: string } | null>(null)
@@ -510,6 +525,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [thesaurusResult, setThesaurusResult] = useState<ThesaurusResult | null>(null)
   const [thesaurusLoading, setThesaurusLoading] = useState(false)
   const [thesaurusError, setThesaurusError] = useState('')
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
+  const [versionHistory, setVersionHistory] = useState<RevisionHistoryEntry[]>([])
+  const [versionHistoryLoading, setVersionHistoryLoading] = useState(false)
+  const [versionHistoryError, setVersionHistoryError] = useState('')
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
@@ -735,7 +754,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }, [findOpen])
   useEffect(() => {
     if (!contextMenu) return
-    const dismiss = () => setContextMenu(null)
+    const dismiss = (event?: Event) => { if ((event?.target as Element | null)?.closest('.editor-context-menu')) return; setContextMenu(null); setContextSubmenu(null); setCitationMenuOpen(false) }
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss() }
     window.addEventListener('click', dismiss)
     window.addEventListener('resize', dismiss)
@@ -784,6 +803,35 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return () => window.removeEventListener('click', replaceFromWordReference)
   }, [])
 
+  useEffect(() => {
+    if (!thesaurusOpen) return
+    const startDrag = (event: PointerEvent) => {
+      const target = event.target as Element | null
+      if (!target?.closest('.thesaurus-sidebar header') || target.closest('button, input')) return
+      const panel = target.closest('.thesaurus-sidebar') as HTMLElement | null
+      const bounds = panel?.getBoundingClientRect()
+      if (!panel || !bounds) return
+      const origin = { x: event.clientX, y: event.clientY, left: bounds.left, top: bounds.top }
+      const move = (next: PointerEvent) => {
+        const left = Math.max(12, Math.min(window.innerWidth - bounds.width - 12, origin.left + next.clientX - origin.x))
+        const top = Math.max(78, Math.min(window.innerHeight - 90, origin.top + next.clientY - origin.y))
+        panel.style.left = `${left}px`
+        panel.style.top = `${top}px`
+        panel.style.right = 'auto'
+        panel.style.bottom = 'auto'
+      }
+      const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', stop)
+    }
+    globalThis.document.addEventListener('pointerdown', startDrag)
+    return () => globalThis.document.removeEventListener('pointerdown', startDrag)
+  }, [thesaurusOpen])
+  useEffect(() => {
+    const openCitationMenu = () => setCitationMenuOpen(true)
+    window.addEventListener('soflo:open-citation', openCitationMenu)
+    return () => window.removeEventListener('soflo:open-citation', openCitationMenu)
+  }, [])
   if (!editor) return <div className="editor-loading" />
   const runFind = (value: string) => { setFindValue(value); const finder = (window as Window & { find?: (query: string, caseSensitive?: boolean, backwards?: boolean, wrapAround?: boolean) => boolean }).find; if (value && finder) finder(value, false, false, true) }
   const exportPdf = () => {
@@ -803,10 +851,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }
   const openContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault()
+    setContextSubmenu(null)
+    setCitationMenuOpen(false)
     setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 222), y: Math.min(event.clientY, window.innerHeight - 270) })
   }
   const runContextAction = async (action: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll') => {
     setContextMenu(null)
+    setContextSubmenu(null)
+    setCitationMenuOpen(false)
     if (action === 'undo') { editor.chain().focus().undo().run(); return }
     if (action === 'redo') { editor.chain().focus().redo().run(); return }
     if (action === 'selectAll') { editor.chain().focus().selectAll().run(); return }
@@ -820,6 +872,23 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const { from, to } = editor.state.selection
     const text = editor.state.doc.textBetween(from, to, '\n')
     try { await navigator.clipboard.writeText(text); if (action === 'cut') editor.commands.deleteSelection() } catch { /* The browser command is the best available fallback. */ }
+  }
+  const insertCitation = (style: 'mla' | 'apa' | 'chicago') => {
+    const templates = {
+      mla: '[Author Last, First]. "[Title]." [Container], [Publisher], [Year].',
+      apa: '[Author, A. A.]. ([Year]). [Title]. [Publisher].',
+      chicago: '[Author First Last]. "[Title]." [Publication], [Date].',
+    }
+    editor.chain().focus().insertContentAt(editor.state.selection.to, ` ${templates[style]}`).run()
+    setContextMenu(null)
+    setContextSubmenu(null)
+    setCitationMenuOpen(false)
+  }
+  const openVersionHistory = async () => {
+    setVersionHistoryOpen(true)
+    setVersionHistoryLoading(true)
+    setVersionHistoryError('')
+    try { setVersionHistory(await onVersionHistory()) } catch (error) { setVersionHistoryError(error instanceof Error ? error.message : 'Version history could not be loaded.') } finally { setVersionHistoryLoading(false) }
   }
   const setGrammarDecorations = (issues: GrammarIssue[]) => {
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
@@ -1084,7 +1153,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>
     <div className="editor-toolbar-wrap">
-    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
@@ -1095,7 +1164,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     {grammarReviewing && <div className="grammar-review-notice" role="status" aria-live="polite"><i /><div><strong>Checking your writing</strong><span>{grammarProgress?.message || 'Reviewing spelling and grammar locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
     {grammarMessage && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>AI Review needs another pass</strong><span>{grammarMessage}</span></div><button className="icon-button tiny" onClick={() => setGrammarMessage('')} aria-label="Dismiss grammar review message"><X size={15} /></button></div>}
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
-    {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /></div>}
+    {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history"><header><div><p className="eyebrow">DOCUMENT</p><h2>Version history</h2><span>{collectionLabel === 'Lectures' ? 'Lecture note' : 'Paper'} · edits saved locally</span></div><button className="icon-button tiny" onClick={() => setVersionHistoryOpen(false)} aria-label="Close version history"><X size={16} /></button></header><div className="version-history-detail">{versionHistoryLoading && <div className="word-reference-loading"><i />Loading saved versions…</div>}{versionHistoryError && <p className="word-reference-error">{versionHistoryError}</p>}{!versionHistoryLoading && !versionHistoryError && <><article className="version-history-entry current"><div><strong>Current version · {document.revision}</strong><time>{formatRevisionTime(document.updatedAt)}</time></div><p>{document.title || 'Untitled'}</p><small>Current saved version. AI edits are recorded as your edits.</small></article>{versionHistory.length === 0 && <p className="version-history-empty">Earlier snapshots will appear here as you continue editing.</p>}{versionHistory.map((entry, index) => <article className="version-history-entry" key={entry.id}><div><strong>Version {entry.revision}</strong><time>{formatRevisionTime(entry.createdAt)}</time></div><p>{entry.title || 'Untitled'}</p><small>{revisionChangeSummary(index === 0 ? document.contentPlain : versionHistory[index - 1].contentPlain, entry.contentPlain)}</small></article>)}</>}</div></aside>}
+    {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /><hr /><ContextMenuAction label="Insert" shortcut="›" onClick={() => setContextSubmenu(contextSubmenu === 'insert' ? null : 'insert')} />{contextSubmenu === 'insert' && <div className="editor-context-submenu" role="menu" aria-label="Insert menu"><ContextMenuAction label="Citation" shortcut="›" onClick={() => window.dispatchEvent(new Event('soflo:open-citation'))} /></div>}</div>}
+    {citationMenuOpen && contextMenu && <div className="editor-context-menu citation-menu" style={{ left: contextMenu.x + 205, top: contextMenu.y + 38 }} role="menu" aria-label="Citation styles"><ContextMenuAction label="MLA" shortcut="" onClick={() => insertCitation('mla')} /><ContextMenuAction label="APA" shortcut="" onClick={() => insertCitation('apa')} /><ContextMenuAction label="Chicago" shortcut="" onClick={() => insertCitation('chicago')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}
     {imageDialog && <ImageDialog source={imageDialog.src} onClose={() => setImageDialog(null)} onSourceChange={(src) => setImageDialog({ src })} onInsert={insertImage} />}
     {tableDialog && <TableDialog table={tableDialog} onClose={() => setTableDialog(null)} onChange={setTableDialog} onInsert={insertTable} />}
@@ -1128,12 +1199,12 @@ function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { lab
   return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
 }
 
-function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
+function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onVersionHistory, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onVersionHistory: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
   const pasteWithoutFormatting = async () => {
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
-    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button><button onClick={onAiThesaurus}>AI Thesaurus</button></ToolbarMenu>
     <Divider />

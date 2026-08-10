@@ -66,6 +66,16 @@ pub struct DocumentDetail {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct RevisionHistoryEntry {
+    pub id: String,
+    pub revision: i32,
+    pub title: String,
+    pub content_plain: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct DocumentFolder {
     pub id: String,
     pub class_id: String,
