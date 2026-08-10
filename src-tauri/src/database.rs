@@ -575,7 +575,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 10 {
+        if version >= 12 {
             return Ok(());
         }
         if version < 1 {
@@ -732,6 +732,22 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_study_web_sources_web ON study_web_sources(study_web_id, position);
                 PRAGMA user_version = 10;
             "#).map_err(|error| error.to_string())?;
+        }
+        if version < 11 {
+            let mut statement = connection.prepare("PRAGMA table_info(study_web_nodes)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "pinned") {
+                connection.execute_batch("ALTER TABLE study_web_nodes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 11;").map_err(|error| error.to_string())?;
+        }
+        if version < 12 {
+            let mut statement = connection.prepare("PRAGMA table_info(study_webs)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "deleted_at") {
+                connection.execute_batch("ALTER TABLE study_webs ADD COLUMN deleted_at TEXT;").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("CREATE INDEX IF NOT EXISTS idx_study_webs_deleted ON study_webs(class_id, deleted_at, updated_at DESC); PRAGMA user_version = 12;").map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -927,7 +943,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 10);
+        assert_eq!(version, 12);
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -958,7 +974,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 10);
+        assert_eq!(version, 12);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);

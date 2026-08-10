@@ -126,6 +126,7 @@ export interface StudyWebSummary {
   groupCount: number
   generatedAt: string
   updatedAt: string
+  deletedAt: string | null
   outOfDate: boolean
 }
 
@@ -141,6 +142,7 @@ export interface StudyWebNode {
   x: number
   y: number
   manuallyPositioned: boolean
+  pinned: boolean
 }
 
 export interface StudyWebRelationship {

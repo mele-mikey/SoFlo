@@ -132,6 +132,7 @@ fn extract_syllabus_pdf_text(bytes: &[u8]) -> CommandResult<String> {
 fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
     connection.execute("DELETE FROM documents WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM flashcard_sets WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -3138,8 +3139,8 @@ fn study_web_source_hash(cards: &[StudyWebSourceCard]) -> String {
 
 fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<StudyWebDetail> {
     let (id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at): (String, String, String, String, String, String, String) = connection.query_row("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).map_err(|_| "That Study Web could not be found.".to_string())?;
-    let mut node_statement = connection.prepare("SELECT flashcard_id, x, y, manually_positioned FROM study_web_nodes WHERE study_web_id=?1 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
-    let nodes = node_statement.query_map([&id], |row| Ok(StudyWebNode { card_id: row.get(0)?, x: row.get(1)?, y: row.get(2)?, manually_positioned: row.get::<_, i32>(3)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut node_statement = connection.prepare("SELECT flashcard_id, x, y, manually_positioned, pinned FROM study_web_nodes WHERE study_web_id=?1 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
+    let nodes = node_statement.query_map([&id], |row| Ok(StudyWebNode { card_id: row.get(0)?, x: row.get(1)?, y: row.get(2)?, manually_positioned: row.get::<_, i32>(3)? != 0, pinned: row.get::<_, i32>(4)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     let mut group_statement = connection.prepare("SELECT id, label, parent_group_id FROM study_web_groups WHERE study_web_id=?1 ORDER BY label COLLATE NOCASE").map_err(|error| error.to_string())?;
     let group_rows = group_statement.query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     let mut groups = Vec::new();
@@ -3163,20 +3164,34 @@ fn study_web_source_from_connection(connection: &Connection, set_id: &str) -> Co
 }
 
 #[tauri::command]
-pub fn list_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> {
+fn list_study_webs_by_deleted(database: State<'_, Database>, class_id: String, deleted: bool) -> CommandResult<Vec<StudyWebSummary>> {
     let connection = database.open()?;
-    let mut statement = connection.prepare("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE class_id=?1 ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
-    let rows = statement.query_map([&class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at, deleted_at FROM study_webs WHERE class_id=?1 AND (deleted_at IS NOT NULL)=?2 ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
+    let rows = statement.query_map(params![&class_id, deleted as i32], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))).map_err(|error| error.to_string())?;
     let mut webs = Vec::new();
     for row in rows {
-        let (id, class_id, set_id, name, source_hash, generated_at, updated_at) = row.map_err(|error| error.to_string())?;
+        let (id, class_id, set_id, name, source_hash, generated_at, updated_at, deleted_at) = row.map_err(|error| error.to_string())?;
         let card_count = connection.query_row("SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
         let group_count = connection.query_row("SELECT COUNT(*) FROM study_web_groups WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
         let flashcard_set_ids = study_web_set_ids(&connection, &id, &set_id)?;
         let (_, _, cards) = study_web_sources_from_connection(&connection, &flashcard_set_ids)?;
-        webs.push(StudyWebSummary { id, class_id, flashcard_set_id: set_id, flashcard_set_ids, name, card_count, group_count, generated_at, updated_at, out_of_date: source_hash != study_web_source_hash(&cards) });
+        webs.push(StudyWebSummary { id, class_id, flashcard_set_id: set_id, flashcard_set_ids, name, card_count, group_count, generated_at, updated_at, deleted_at, out_of_date: source_hash != study_web_source_hash(&cards) });
     }
     Ok(webs)
+}
+
+#[tauri::command]
+pub fn list_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> { list_study_webs_by_deleted(database, class_id, false) }
+
+#[tauri::command]
+pub fn list_trashed_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> { list_study_webs_by_deleted(database, class_id, true) }
+
+#[tauri::command]
+pub fn set_study_web_deleted(database: State<'_, Database>, id: String, deleted: bool) -> CommandResult<()> {
+    let connection = database.open()?;
+    let changed = connection.execute("UPDATE study_webs SET deleted_at=CASE WHEN ?1 THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![deleted as i32, id]).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("That Study Web could not be found.".into()); }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3186,7 +3201,11 @@ pub fn get_study_web(database: State<'_, Database>, id: String) -> CommandResult
 pub fn save_study_web_node_position(database: State<'_, Database>, input: SaveStudyWebNodePositionInput) -> CommandResult<()> {
     if !input.x.is_finite() || !input.y.is_finite() { return Err("That Study Web position is invalid.".into()); }
     let connection = database.open()?;
-    connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1 WHERE study_web_id=?3 AND flashcard_id=?4", params![input.x, input.y, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+    if let Some(pinned) = input.pinned {
+        connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1, pinned=?3 WHERE study_web_id=?4 AND flashcard_id=?5", params![input.x, input.y, if pinned { 1 } else { 0 }, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+    } else {
+        connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1 WHERE study_web_id=?3 AND flashcard_id=?4", params![input.x, input.y, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+    }
     connection.execute("UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.study_web_id]).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -3224,7 +3243,35 @@ fn fallback_study_web_plan(cards: &[StudyWebSourceCard]) -> StudyWebSemanticPlan
     for card in cards { let key = card.front.chars().find(|character| character.is_alphanumeric()).map(|character| character.to_ascii_uppercase()).unwrap_or('#'); buckets.entry(key).or_default().push(card.id.clone()); }
     let mut groups = buckets.into_iter().enumerate().map(|(index, (key, members))| StudyWebSemanticGroup { id: format!("fallback-{index}"), label: if key == '#' { "Core concepts".into() } else { format!("Concepts · {key}") }, members, parent_id: None }).collect::<Vec<_>>();
     if groups.len() > 8 { groups = vec![StudyWebSemanticGroup { id: "fallback-core".into(), label: "Core concepts".into(), members: cards.iter().map(|card| card.id.clone()).collect(), parent_id: None }]; }
-    StudyWebSemanticPlan { groups, relationships: Vec::new() }
+    // Keep a useful, visible web even if the local model is unavailable or returns
+    // incomplete JSON. These are deterministic keyword connections, never made-up
+    // content, and the model's relationships still take precedence when present.
+    let words = cards.iter().map(|card| {
+        format!("{} {}", card.front, card.back).to_lowercase().split(|character: char| !character.is_alphanumeric()).filter(|word| word.len() >= 4 && !matches!(*word, "this" | "that" | "with" | "from" | "into" | "your" | "what" | "when" | "which" | "about" | "there" | "their" | "have" | "will" | "would" | "could" | "should" | "definition" | "concept")).map(str::to_string).collect::<HashSet<_>>()
+    }).collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for left in 0..cards.len() { for right in (left + 1)..cards.len() {
+        let shared = words[left].intersection(&words[right]).count();
+        if shared > 0 { candidates.push((shared as f64 / words[left].len().min(words[right].len()).max(1) as f64, left, right)); }
+    }}
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut degree = vec![0_usize; cards.len()];
+    let mut linked = HashSet::new();
+    let mut relationships = Vec::new();
+    for (score, left, right) in candidates {
+        if degree[left] >= 2 || degree[right] >= 2 || !linked.insert((left, right)) { continue; }
+        degree[left] += 1; degree[right] += 1;
+        relationships.push(StudyWebSemanticRelationship { source: cards[left].id.clone(), target: cards[right].id.clone(), relationship_type: "related_to".into(), strength: (0.35 + score).clamp(0.35, 0.9) });
+    }
+    // A category should never render as isolated cards. Link adjacent members as a
+    // calm visual fallback when their wording has little overlap.
+    for group in &groups { for pair in group.members.windows(2) {
+        let Some(left) = cards.iter().position(|card| card.id == pair[0]) else { continue; };
+        let Some(right) = cards.iter().position(|card| card.id == pair[1]) else { continue; };
+        let key = if left < right { (left, right) } else { (right, left) };
+        if linked.insert(key) { relationships.push(StudyWebSemanticRelationship { source: cards[left].id.clone(), target: cards[right].id.clone(), relationship_type: "related_to".into(), strength: 0.42 }); }
+    }}
+    StudyWebSemanticPlan { groups, relationships }
 }
 
 fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[String], set_titles: &[String], cards: &[StudyWebSourceCard], plan: StudyWebSemanticPlan, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
@@ -3297,10 +3344,10 @@ fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, Strin
     for _ in 0..180 {
         let mut delta = cards.iter().map(|card| (card.id.clone(), (0.0_f64, 0.0_f64))).collect::<HashMap<_, _>>();
         for left in 0..cards.len() { for right in left + 1..cards.len() {
-            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 18_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
+            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 48_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
             if let Some(value) = delta.get_mut(&cards[left].id) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(&cards[right].id) { value.0 -= unit.0; value.1 -= unit.1; }
         }}
-        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 280.0) * 0.018 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
+        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 360.0) * 0.021 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
         for (id, movement) in delta { if let Some(position) = positions.get_mut(&id) { position.0 += movement.0.clamp(-18.0, 18.0); position.1 += movement.1.clamp(-18.0, 18.0); } }
     }
     let min_x = positions.values().map(|position| position.0).fold(f64::INFINITY, f64::min); let min_y = positions.values().map(|position| position.1).fold(f64::INFINITY, f64::min);
@@ -3569,6 +3616,7 @@ pub fn empty_trash(database: State<'_, Database>) -> CommandResult<()> {
             [],
         )
         .map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL", []).map_err(|error| error.to_string())?;
     Ok(())
 }
 

@@ -185,6 +185,7 @@ pub struct StudyWebSummary {
     pub group_count: i32,
     pub generated_at: String,
     pub updated_at: String,
+    pub deleted_at: Option<String>,
     pub out_of_date: bool,
 }
 
@@ -204,6 +205,7 @@ pub struct StudyWebNode {
     pub x: f64,
     pub y: f64,
     pub manually_positioned: bool,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -480,6 +482,8 @@ pub struct SaveStudyWebNodePositionInput {
     pub card_id: String,
     pub x: f64,
     pub y: f64,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
