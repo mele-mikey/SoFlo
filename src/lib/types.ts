@@ -128,6 +128,7 @@ export interface StudyWebSummary {
   updatedAt: string
   deletedAt: string | null
   outOfDate: boolean
+  isManual: boolean
 }
 
 export interface StudyWebGroup {
@@ -162,6 +163,7 @@ export interface StudyWebDetail {
   generatedAt: string
   updatedAt: string
   outOfDate: boolean
+  isManual: boolean
   nodes: StudyWebNode[]
   groups: StudyWebGroup[]
   relationships: StudyWebRelationship[]

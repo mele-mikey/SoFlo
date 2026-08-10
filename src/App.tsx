@@ -1,4 +1,4 @@
-import { Menu, Plus, Search, X } from 'lucide-react'
+import { Menu, Plus, Search, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -95,6 +95,8 @@ function App() {
   const [activeStudySets, setActiveStudySets] = useState<FlashcardSetDetail[]>([])
   const [activeStudyWeb, setActiveStudyWeb] = useState<StudyWebDetail | null>(null)
   const [activeStudyWebSets, setActiveStudyWebSets] = useState<FlashcardSetDetail[]>([])
+  const [manualStudyWebEditingId, setManualStudyWebEditingId] = useState<string | null>(null)
+  const [studyWebRefreshPrompt, setStudyWebRefreshPrompt] = useState<StudyWebDetail | null>(null)
   const [modal, setModal] = useState<ModalState>(null)
   const [commandOpen, setCommandOpen] = useState(false)
   const [globalFindOpen, setGlobalFindOpen] = useState(false)
@@ -482,6 +484,7 @@ function App() {
       const sourceSets = await Promise.all(web.flashcardSetIds.map((setId) => api.getSet(setId)))
       setActiveStudyWeb(web)
       setActiveStudyWebSets(sourceSets)
+      setManualStudyWebEditingId(null)
       navigate({ kind: 'studyWeb', classId: targets[0].classId, webId: web.id })
       showToast(existingWebId ? 'Study Web regenerated.' : 'Study Web created.')
     } catch (error) {
@@ -491,10 +494,12 @@ function App() {
       setAiProgress(null)
     }
   }
-  const openStudyWeb = async (web: StudyWebDetail) => {
+  const openStudyWeb = async (web: StudyWebDetail, startEditing = false, acceptStale = false) => {
     const sourceSets = await Promise.all(web.flashcardSetIds.map((setId) => api.getSet(setId)))
+    if (web.outOfDate && !startEditing && !acceptStale) { setStudyWebRefreshPrompt(web); return }
     setActiveStudyWeb(web)
     setActiveStudyWebSets(sourceSets)
+    setManualStudyWebEditingId(startEditing ? web.id : null)
     navigate({ kind: 'studyWeb', classId: web.classId, webId: web.id })
   }
   const createEmptyStudyWeb = async () => {
@@ -502,7 +507,7 @@ function App() {
     try {
       const web = await api.createEmptyStudyWeb(activeCourse.id)
       await loadClassContent(activeCourse.id)
-      await openStudyWeb(web)
+      await openStudyWeb(web, true)
       showToast('Blank Study Web created.')
     } catch (error) { showToast(error instanceof Error ? error.message : 'SoFlo could not create that Study Web.', 'error') }
   }
@@ -703,15 +708,15 @@ function App() {
           onRenameDocumentFolder={(id, title) => void renamePaperFolder(id, title)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })}
           onStudy={(setIds, mode, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds, mode, cardIds })}
           onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds: [setId], mode: 'learn', cardIds })}
-          onCreateStudyWeb={(selectedSets) => void createStudyWeb(selectedSets)} onCreateEmptyStudyWeb={() => void createEmptyStudyWeb()} onImportStudyWeb={() => void importStudyWeb()}
-          onOpenStudyWeb={(webId) => navigate({ kind: 'studyWeb', classId: activeCourse.id, webId })} onDuplicateSet={(set, title) => void duplicateSet(set, title)}
+          onCreateStudyWeb={(selectedSets, existingWebId) => void createStudyWeb(selectedSets, existingWebId)} onCreateEmptyStudyWeb={() => void createEmptyStudyWeb()} onImportStudyWeb={() => void importStudyWeb()}
+          onOpenStudyWeb={(webId) => { const web = studyWebs.find((item) => item.id === webId); if (web) void api.getStudyWeb(web.id).then((detail) => openStudyWeb(detail)).catch(() => showToast('That Study Web could not be opened.', 'error')) }} onDuplicateSet={(set, title) => void duplicateSet(set, title)}
           onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })}
         />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled && !writingModelDeferred} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listDocumentRevisions(activeDocument.id)} onReleaseAi={releaseAiModel} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
         {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setIds: [activeSet.id], mode })} onCreateStudyWeb={() => { const summary = sets.find((item) => item.id === activeSet.id); if (summary) void createStudyWeb([summary]) }} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
         {view.kind === 'study' && (activeStudySets.length ? <StudyView sets={activeStudySets} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'flashcards' })} onModeChange={(mode) => navigate({ kind: 'study', classId: view.classId, setIds: view.setIds, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
-        {view.kind === 'studyWeb' && (activeStudyWeb && activeStudyWebSets.length ? <StudyWebView web={activeStudyWeb} sets={activeStudyWebSets} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'studyWeb' })} onRegenerate={() => { const selectedSets = sets.filter((item) => activeStudyWeb.flashcardSetIds.includes(item.id)); if (selectedSets.length) void createStudyWeb(selectedSets, activeStudyWeb.id) }} onStudyCard={(cardId) => navigate({ kind: 'study', classId: view.classId, setIds: activeStudyWeb.flashcardSetIds, mode: 'flashcards', cardIds: [cardId] })} /> : <LoadingView />)}
+        {view.kind === 'studyWeb' && (activeStudyWeb && activeStudyWebSets.length ? <StudyWebView web={activeStudyWeb} sets={activeStudyWebSets} aiEnabled={library.settings.aiEnabled} startInEditMode={manualStudyWebEditingId === activeStudyWeb.id} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'studyWeb' })} onRegenerate={() => { const selectedSets = sets.filter((item) => activeStudyWeb.flashcardSetIds.includes(item.id)); if (selectedSets.length) void createStudyWeb(selectedSets, activeStudyWeb.id) }} onStudyCard={(cardId) => navigate({ kind: 'study', classId: view.classId, setIds: activeStudyWeb.flashcardSetIds, mode: 'flashcards', cardIds: [cardId] })} /> : <LoadingView />)}
       </section>
     </div>
     <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} classes={library.classes} onNavigate={navigate} onNewNote={() => void createDocument()} onNewSet={() => void createSet()} />
@@ -720,6 +725,7 @@ function App() {
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
     {modal?.type === 'importSet' && <ImportSetDialog onClose={() => setModal(null)} onImport={(title, text) => importSet(modal.classId, title, text)} />}
     {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(request) => void generateAiSet(modal.classId, request)} />}
+    {studyWebRefreshPrompt && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog study-web-confirm" role="dialog" aria-modal="true" aria-label="New flashcards detected"><header><div><p className="eyebrow">STUDY WEB UPDATE</p><h2>New flashcards detected</h2></div><button className="icon-button" onClick={() => setStudyWebRefreshPrompt(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>There are new or changed flashcards in this web’s source material. Regenerate it to add them to the map, or open the current web as it is.</p></div><footer><button className="button button-quiet" onClick={() => { const web = studyWebRefreshPrompt; setStudyWebRefreshPrompt(null); void openStudyWeb(web, false, true) }}>Open current web</button>{library.settings.aiEnabled && <button className="button button-primary ai-action" onClick={() => { const web = studyWebRefreshPrompt; const sourceSets = sets.filter((set) => web.flashcardSetIds.includes(set.id)); setStudyWebRefreshPrompt(null); if (sourceSets.length) void createStudyWeb(sourceSets, web.id) }}><Sparkles size={15} /> Regenerate web</button>}</footer></section></div>}
     {modal?.type === 'archiveClass' && activeCourse && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Archive class"><header><div><p className="eyebrow">ARCHIVE CLASS</p><h2>Archive {activeCourse.name}?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>This removes the class from your active library but keeps its papers, lectures, flashcards, and study history safely in Archive. You can restore it whenever you need it.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => { setModal(null); void archiveActiveClass() }}>Archive class</button></footer></section></div>}
     {modal?.type === 'restartWalkthrough' && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Restart walkthrough"><header><div><p className="eyebrow">RESTART WALKTHROUGH</p><h2>Replace the old example class?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>You kept the example class from the last walkthrough. Starting again will permanently remove that example and create a fresh one for this walkthrough. Your own classes and papers will not be changed.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => void startWalkthrough(true)}>Start walkthrough</button></footer></section></div>}
     {lectureToDelete && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Delete lecture"><header><div><p className="eyebrow">PERMANENT ACTION</p><h2>Delete this lecture?</h2></div><button className="icon-button" onClick={() => setLectureToDelete(null)} aria-label="Cancel deletion"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{lectureToDelete.title}</strong> and its notes will be permanently deleted. This cannot be undone.</p></div><footer><button className="button button-quiet" onClick={() => setLectureToDelete(null)}>Cancel</button><button className="button button-danger" onClick={() => void deleteLecture(lectureToDelete)}>Delete lecture</button></footer></section></div>}

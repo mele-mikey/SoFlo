@@ -575,7 +575,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 12 {
+        if version >= 13 {
             return Ok(());
         }
         if version < 1 {
@@ -587,7 +587,7 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS classes ( id TEXT PRIMARY KEY NOT NULL, semester_id TEXT NOT NULL REFERENCES semesters(id) ON DELETE RESTRICT, name TEXT NOT NULL, course_code TEXT NOT NULL DEFAULT '', professor TEXT, location TEXT, schedule TEXT, icon TEXT NOT NULL DEFAULT 'book-open', accent_color TEXT NOT NULL DEFAULT '#8B7CF6', position INTEGER NOT NULL DEFAULT 0, archived_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS documents ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '{"type":"doc","content":[{"type":"paragraph"}]}', content_plain TEXT NOT NULL DEFAULT '', is_favorite INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS document_revisions ( id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, title TEXT NOT NULL, content TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
-                CREATE TABLE IF NOT EXISTS flashcard_sets ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, description TEXT, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
+                CREATE TABLE IF NOT EXISTS flashcard_sets ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, description TEXT, is_study_web_private INTEGER NOT NULL DEFAULT 0, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS flashcards ( id TEXT PRIMARY KEY NOT NULL, set_id TEXT NOT NULL REFERENCES flashcard_sets(id) ON DELETE CASCADE, front TEXT NOT NULL DEFAULT '', back TEXT NOT NULL DEFAULT '', notes TEXT, image_path TEXT, position INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS card_progress ( card_id TEXT PRIMARY KEY NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE, mastery TEXT NOT NULL DEFAULT 'new', correct_count INTEGER NOT NULL DEFAULT 0, incorrect_count INTEGER NOT NULL DEFAULT 0, consecutive_correct INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT, due_at TEXT );
                 CREATE TABLE IF NOT EXISTS study_sessions ( id TEXT PRIMARY KEY NOT NULL, set_id TEXT REFERENCES flashcard_sets(id) ON DELETE SET NULL, class_id TEXT REFERENCES classes(id) ON DELETE SET NULL, mode TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, metadata TEXT NOT NULL DEFAULT '{}' );
@@ -748,6 +748,20 @@ impl Database {
                 connection.execute_batch("ALTER TABLE study_webs ADD COLUMN deleted_at TEXT;").map_err(|error| error.to_string())?;
             }
             connection.execute_batch("CREATE INDEX IF NOT EXISTS idx_study_webs_deleted ON study_webs(class_id, deleted_at, updated_at DESC); PRAGMA user_version = 12;").map_err(|error| error.to_string())?;
+        }
+        if version < 13 {
+            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "is_study_web_private") {
+                connection.execute_batch("ALTER TABLE flashcard_sets ADD COLUMN is_study_web_private INTEGER NOT NULL DEFAULT 0;").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch(r#"
+                UPDATE flashcard_sets
+                SET is_study_web_private=1
+                WHERE id IN (SELECT flashcard_set_id FROM study_webs WHERE source_hash='manual');
+                CREATE INDEX IF NOT EXISTS idx_flashcard_sets_visible ON flashcard_sets(class_id, is_study_web_private, deleted_at, updated_at DESC);
+                PRAGMA user_version = 13;
+            "#).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -943,7 +957,12 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
+        let set_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
+            statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
+        };
+        assert!(set_columns.contains(&"is_study_web_private".to_string()));
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -974,7 +993,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);

@@ -133,6 +133,7 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
     connection.execute("DELETE FROM documents WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM flashcard_sets WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL AND deleted_at <= datetime('now', '-30 days')", []).map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM flashcard_sets WHERE is_study_web_private=1 AND id NOT IN (SELECT flashcard_set_id FROM study_web_sources)", []).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2872,7 +2873,7 @@ pub fn list_flashcard_sets(
 ) -> CommandResult<Vec<FlashcardSetSummary>> {
     let connection = database.open()?;
     purge_expired_trash(&connection)?;
-    let mut statement = connection.prepare("SELECT s.id, s.class_id, s.title, s.description, COUNT(c.id), s.updated_at, s.deleted_at FROM flashcard_sets s LEFT JOIN flashcards c ON c.set_id=s.id WHERE s.class_id=?1 AND (?2=1 OR s.deleted_at IS NULL) GROUP BY s.id ORDER BY s.updated_at DESC").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT s.id, s.class_id, s.title, s.description, COUNT(c.id), s.updated_at, s.deleted_at FROM flashcard_sets s LEFT JOIN flashcards c ON c.set_id=s.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND (?2=1 OR s.deleted_at IS NULL) GROUP BY s.id ORDER BY s.updated_at DESC").map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params![class_id, include_deleted as i32], read_set_summary)
         .map_err(|error| error.to_string())?;
@@ -3128,7 +3129,7 @@ pub fn list_all_cards(
     class_id: String,
 ) -> CommandResult<Vec<Flashcard>> {
     let connection = database.open()?;
-    let mut statement = connection.prepare("SELECT c.id, c.set_id, c.front, c.back, c.notes, c.image_path, c.position, c.is_starred, c.created_at, c.updated_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.deleted_at IS NULL ORDER BY s.updated_at DESC, c.position ASC").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT c.id, c.set_id, c.front, c.back, c.notes, c.image_path, c.position, c.is_starred, c.created_at, c.updated_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND s.deleted_at IS NULL ORDER BY s.updated_at DESC, c.position ASC").map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([class_id], read_card)
         .map_err(|error| error.to_string())?;
@@ -3438,6 +3439,7 @@ fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<Stu
         generated_at,
         updated_at,
         out_of_date: source_hash != "manual" && source_hash != study_web_source_hash(&cards),
+        is_manual: source_hash == "manual",
         nodes,
         groups,
         relationships,
@@ -3525,6 +3527,7 @@ fn list_study_webs_by_deleted(
             updated_at,
             deleted_at,
             out_of_date: source_hash != "manual" && source_hash != study_web_source_hash(&cards),
+            is_manual: source_hash == "manual",
         });
     }
     Ok(webs)
@@ -3578,7 +3581,7 @@ pub fn create_empty_study_web(
     let set_id = Uuid::new_v4().to_string();
     let web_id = Uuid::new_v4().to_string();
     transaction.execute(
-        "INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1,?2,?3,?4)",
+        "INSERT INTO flashcard_sets (id, class_id, title, description, is_study_web_private) VALUES (?1,?2,?3,?4,1)",
         params![&set_id, &class_id, format!("{} cards", title), "Cards created inside this Study Web."],
     ).map_err(|error| error.to_string())?;
     transaction.execute(
@@ -3642,7 +3645,7 @@ pub fn import_study_web_json(
     let title = if title.is_empty() { "Imported Study Web".to_string() } else { title };
     let set_id = Uuid::new_v4().to_string();
     let web_id = Uuid::new_v4().to_string();
-    transaction.execute("INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1,?2,?3,?4)", params![&set_id, &class_id, format!("{} cards", title), "Cards imported with this Study Web."]).map_err(|error| error.to_string())?;
+    transaction.execute("INSERT INTO flashcard_sets (id, class_id, title, description, is_study_web_private) VALUES (?1,?2,?3,?4,1)", params![&set_id, &class_id, format!("{} cards", title), "Cards imported with this Study Web."]).map_err(|error| error.to_string())?;
     transaction.execute("INSERT INTO study_webs (id, class_id, flashcard_set_id, name, source_hash) VALUES (?1,?2,?3,?4,'manual')", params![&web_id, &class_id, &set_id, &title]).map_err(|error| error.to_string())?;
     transaction.execute("INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,0)", params![&web_id, &set_id]).map_err(|error| error.to_string())?;
     let mut card_ids = HashMap::new();
@@ -3879,7 +3882,7 @@ fn generate_study_web_semantics_layered(
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     emit_ai_progress(&app, 24, "Finding the larger themes");
-    let parent_system = "You classify study cards into meaningful themes. Return only valid JSON with one key, assignments. Its value is an array with exactly one object for each provided card. Each object has exactly three string keys: id, parent, leaf. id must be copied from a supplied card. parent is a concise broad semantic theme. leaf is a concise, narrower subgroup within that parent. Use 3 to 10 distinct parent labels. Assign every card exactly once. Do not include relationships, explanations, or any other keys.";
+    let parent_system = "You classify study cards into meaningful themes. Return only valid JSON with one key, assignments. Its value is an array with exactly one object for each provided card. Each object has exactly three string keys: id, parent, leaf. id must be copied from a supplied card. parent is a concise broad semantic theme. leaf is a concise, narrower subgroup within that parent. Prefer the fewest meaningful parent themes, normally 2 to 6, and use a new parent only when the cards have a genuinely different role, process, location, or relationship. Assign every card exactly once. Do not include relationships, explanations, or any other keys.";
     let parent_prompt = format!(
         "FLASHCARDS:\n{}\n\nReturn the classification now.",
         serde_json::to_string(&material).unwrap_or_default()
@@ -3923,14 +3926,10 @@ fn generate_study_web_semantics_layered(
             leaves.push((leaf_id, parent_id.clone(), label, members));
         }
     }
-    // The structural backbone keeps the map as one connected whole, but it is
-    // rendered as group-to-group structure instead of claiming that its two
-    // anchor cards are a factual pair. Exact card links come from a dedicated
-    // local-model reasoning pass below.
-    let mut relationships = infer_study_web_relationships(&model_cards, &leaves)
-        .into_iter()
-        .filter(|relationship| matches!(relationship.relationship_type.as_str(), "parent_backbone" | "theme_backbone"))
-        .collect::<Vec<_>>();
+    // Group structure is rendered directly from the hierarchy, never stored as
+    // fake card-to-card links. Every stored line below is an exact relationship
+    // the local model has to justify from the supplied material.
+    let mut relationships = Vec::<StudyWebSemanticRelationship>::new();
     emit_ai_progress(&app, 80, "Verifying the exact concept connections");
     relationships.extend(infer_study_web_leaf_relationships(
         &client,
@@ -4140,7 +4139,7 @@ fn infer_study_web_leaf_relationships(
         })
         .collect::<Vec<_>>();
     let maximum = leaves.len().saturating_mul(2).clamp(3, 28);
-    let system = format!("You are the relationship verifier for an academic Study Web. Return only valid JSON: {{\"connections\":[{{\"source\":\"supplied card id\",\"target\":\"supplied card id\",\"relationship_type\":\"short exact relationship\",\"reason\":\"brief evidence from the supplied definitions\"}}]}}. Read every term and definition. Add at most {maximum} connections. A connection is allowed only when the two exact cards have a specific, direct relationship you can state clearly: part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or a directly evidenced shared mechanism. Never connect cards merely because they are in the same broad subject, body system, category, region, list, or because they are analogous. Do not invent knowledge not supported by the supplied cards. If the connection is uncertain, omit it. Prefer no line over a questionable line. Use every connection's reason to identify the exact link; vague reasons such as 'both are related' are invalid. Do not add commentary, markdown, groups, coordinates, or IDs that were not supplied.");
+    let system = format!("You are the relationship verifier for an academic Study Web. Return only valid JSON: {{\"connections\":[{{\"source\":\"supplied card id\",\"target\":\"supplied card id\",\"relationship_type\":\"short exact relationship\",\"reason\":\"brief evidence from the supplied definitions\"}}]}}. Read every term and definition. Add at most {maximum} connections. A connection is allowed only when the two exact cards have a specific, direct relationship you can state clearly: part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or a directly evidenced shared mechanism. Apply a replacement test before accepting a line: if either card could be swapped with another card from the same category without making the stated relation false, reject it. Never connect cards merely because they are in the same broad subject, category, region, list, or because they are analogous. Do not invent knowledge not supported by the supplied cards. If the connection is uncertain, omit it. Prefer no line over a questionable line. Every reason must name the precise relationship in at least six words; vague reasons such as 'both are related' are invalid. Do not add commentary, markdown, groups, coordinates, or IDs that were not supplied.");
     let prompt = format!(
         "LEAF GROUPS AND FLASHCARDS:\n{}\n\nReturn only the verified direct connections now.",
         serde_json::to_string(&material).unwrap_or_default()
@@ -4160,7 +4159,7 @@ fn infer_study_web_leaf_relationships(
         .into_iter()
         .filter_map(|connection| {
             if connection.source == connection.target
-                || connection.reason.split_whitespace().count() < 3
+                || connection.reason.split_whitespace().count() < 6
                 || !valid_ids.contains(connection.source.as_str())
                 || !valid_ids.contains(connection.target.as_str())
             {
@@ -4217,7 +4216,7 @@ fn infer_study_web_theme_bridges(
             serde_json::json!({ "parent_id": id, "theme": label, "cards": concepts })
         })
         .collect::<Vec<_>>();
-    let system = "You are creating the sparse backbone of a study concept web. Return only valid JSON with exactly one key, connections. connections is an array of no more than one fewer than the supplied parent themes. Every item has exactly these string keys: source_parent, target_parent, source, target, reason. parent values must be supplied parent_id values. source and target must be supplied card IDs from their named parent themes. reason must state the exact direct relationship from the supplied definitions in at least three words. Build a connected, calm concept map whenever the material genuinely supports it: pick the most meaningful card-to-card bridge between neighboring themes, such as a direct structural, functional, causal, sequential, prerequisite, contrast, or interaction relationship. Do not connect themes merely because both are academic material or share a broad subject. If no exact bridge is supported, return fewer connections. Never invent IDs, commentary, labels, markdown, or extra keys.";
+    let system = "You are creating verified bridges between themes in an academic Study Web. Return only valid JSON with exactly one key, connections. connections is an array of no more than one fewer than the supplied parent themes. Every item has exactly these string keys: source_parent, target_parent, source, target, reason. parent values must be supplied parent_id values. source and target must be supplied card IDs from their named parent themes. A bridge is allowed only if those two exact cards have a direct, specific relationship that is supported by the supplied definitions. Apply a replacement test: if either selected card could be replaced by another card from its theme without making the reason false, reject it. Do not use a generic controller, representative, or broad category as a hub. Do not connect themes merely because both are academic material or share a broad subject. reason must name the precise direct relation in at least six words. If no exact bridge is supported, return fewer connections. Never invent IDs, commentary, labels, markdown, or extra keys.";
     let prompt = format!(
         "PARENT THEMES:\n{}\n\nReturn the theme bridges now.",
         serde_json::to_string(&material).unwrap_or_default()
@@ -4240,7 +4239,7 @@ fn infer_study_web_theme_bridges(
         .into_iter()
         .filter_map(|bridge| {
             if bridge.source_parent == bridge.target_parent
-                || bridge.reason.split_whitespace().count() < 3
+                || bridge.reason.split_whitespace().count() < 6
                 || !members_by_parent
                     .get(bridge.source_parent.as_str())
                     .is_some_and(|members| members.contains(bridge.source.as_str()))
@@ -4266,6 +4265,7 @@ fn infer_study_web_theme_bridges(
         .collect()
 }
 
+#[allow(dead_code)]
 fn infer_study_web_relationships(
     cards: &[StudyWebSourceCard],
     leaves: &[(String, String, String, Vec<String>)],
@@ -4490,6 +4490,7 @@ fn infer_study_web_relationships(
     edges
 }
 
+#[allow(dead_code)]
 fn study_web_group_anchor(
     members: &[String],
     tokens: &HashMap<String, HashSet<String>>,
@@ -4521,6 +4522,7 @@ fn study_web_group_anchor(
         .cloned()
 }
 
+#[allow(dead_code)]
 fn study_web_relation_words(value: &str) -> HashSet<String> {
     value
         .to_lowercase()
@@ -4571,6 +4573,7 @@ fn study_web_relation_words(value: &str) -> HashSet<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn study_web_relationship_score(
     source: &str,
     target: &str,
@@ -5308,7 +5311,7 @@ pub fn get_study_insights(
 ) -> CommandResult<StudyInsights> {
     let connection = database.open()?;
     let mut counts = [0_i32; 6];
-    let mut statement = connection.prepare("SELECT COALESCE(p.mastery, 'new'), COUNT(*) FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL GROUP BY COALESCE(p.mastery, 'new')").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT COALESCE(p.mastery, 'new'), COUNT(*) FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND s.deleted_at IS NULL GROUP BY COALESCE(p.mastery, 'new')").map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([&class_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
@@ -5324,8 +5327,8 @@ pub fn get_study_insights(
             _ => counts[0] = count,
         }
     }
-    counts[5] = connection.query_row("SELECT COUNT(*) FROM card_progress p INNER JOIN flashcards c ON c.id=p.card_id INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND datetime(p.due_at) <= CURRENT_TIMESTAMP", [&class_id], |row| row.get(0)).unwrap_or(0);
-    let mut card_statement = connection.prepare("SELECT c.id, c.set_id, c.front, COALESCE(p.mastery,'new'), COALESCE(p.correct_count,0), COALESCE(p.incorrect_count,0), p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL ORDER BY CASE COALESCE(p.mastery,'new') WHEN 'needsWork' THEN 0 WHEN 'learning' THEN 1 WHEN 'new' THEN 2 WHEN 'familiar' THEN 3 ELSE 4 END, (COALESCE(p.incorrect_count,0) - COALESCE(p.correct_count,0)) DESC, COALESCE(p.last_seen_at,'') ASC LIMIT 8").map_err(|error| error.to_string())?;
+    counts[5] = connection.query_row("SELECT COUNT(*) FROM card_progress p INNER JOIN flashcards c ON c.id=p.card_id INNER JOIN flashcard_sets s ON s.id=c.set_id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND s.deleted_at IS NULL AND datetime(p.due_at) <= CURRENT_TIMESTAMP", [&class_id], |row| row.get(0)).unwrap_or(0);
+    let mut card_statement = connection.prepare("SELECT c.id, c.set_id, c.front, COALESCE(p.mastery,'new'), COALESCE(p.correct_count,0), COALESCE(p.incorrect_count,0), p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id LEFT JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND s.deleted_at IS NULL ORDER BY CASE COALESCE(p.mastery,'new') WHEN 'needsWork' THEN 0 WHEN 'learning' THEN 1 WHEN 'new' THEN 2 WHEN 'familiar' THEN 3 ELSE 4 END, (COALESCE(p.incorrect_count,0) - COALESCE(p.correct_count,0)) DESC, COALESCE(p.last_seen_at,'') ASC LIMIT 8").map_err(|error| error.to_string())?;
     let weak_cards = card_statement
         .query_map([&class_id], |row| {
             Ok(StudyInsightCard {
@@ -5341,7 +5344,7 @@ pub fn get_study_insights(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let mut strong_statement = connection.prepare("SELECT c.id, c.set_id, c.front, p.mastery, p.correct_count, p.incorrect_count, p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id INNER JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.deleted_at IS NULL AND p.mastery IN ('mastered', 'familiar') ORDER BY CASE p.mastery WHEN 'mastered' THEN 0 ELSE 1 END, p.consecutive_correct DESC LIMIT 3").map_err(|error| error.to_string())?;
+    let mut strong_statement = connection.prepare("SELECT c.id, c.set_id, c.front, p.mastery, p.correct_count, p.incorrect_count, p.due_at FROM flashcards c INNER JOIN flashcard_sets s ON s.id=c.set_id INNER JOIN card_progress p ON p.card_id=c.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND s.deleted_at IS NULL AND p.mastery IN ('mastered', 'familiar') ORDER BY CASE p.mastery WHEN 'mastered' THEN 0 ELSE 1 END, p.consecutive_correct DESC LIMIT 3").map_err(|error| error.to_string())?;
     let strong_cards = strong_statement
         .query_map([&class_id], |row| {
             Ok(StudyInsightCard {
@@ -5460,6 +5463,9 @@ pub fn empty_trash(database: State<'_, Database>) -> CommandResult<()> {
     connection
         .execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL", [])
         .map_err(|error| error.to_string())?;
+    connection
+        .execute("DELETE FROM flashcard_sets WHERE is_study_web_private=1 AND id NOT IN (SELECT flashcard_set_id FROM study_web_sources)", [])
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -5479,8 +5485,8 @@ pub fn search_library(
         ("SELECT id, NULL, name, COALESCE(course_code, '') FROM classes WHERE archived_at IS NULL AND (name LIKE ?1 OR course_code LIKE ?1) LIMIT 8", "class"),
         ("SELECT id, class_id, title, substr(content_plain, 1, 100) FROM documents WHERE deleted_at IS NULL AND (title LIKE ?1 OR content_plain LIKE ?1) LIMIT 12", "document"),
         ("SELECT id, class_id, title, substr(content_plain, 1, 100) FROM lectures WHERE title LIKE ?1 OR content_plain LIKE ?1 LIMIT 12", "lecture"),
-        ("SELECT id, class_id, title, COALESCE(description, '') FROM flashcard_sets WHERE deleted_at IS NULL AND (title LIKE ?1 OR description LIKE ?1) LIMIT 8", "set"),
-        ("SELECT f.id, s.class_id, f.front, f.back FROM flashcards f INNER JOIN flashcard_sets s ON s.id=f.set_id WHERE s.deleted_at IS NULL AND (f.front LIKE ?1 OR f.back LIKE ?1) LIMIT 12", "card"),
+        ("SELECT id, class_id, title, COALESCE(description, '') FROM flashcard_sets WHERE is_study_web_private=0 AND deleted_at IS NULL AND (title LIKE ?1 OR description LIKE ?1) LIMIT 8", "set"),
+        ("SELECT f.id, s.class_id, f.front, f.back FROM flashcards f INNER JOIN flashcard_sets s ON s.id=f.set_id WHERE s.is_study_web_private=0 AND s.deleted_at IS NULL AND (f.front LIKE ?1 OR f.back LIKE ?1) LIMIT 12", "card"),
     ];
     for (sql, kind) in statements.drain(..) {
         let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;

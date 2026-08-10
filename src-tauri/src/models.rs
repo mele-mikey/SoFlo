@@ -187,6 +187,7 @@ pub struct StudyWebSummary {
     pub updated_at: String,
     pub deleted_at: Option<String>,
     pub out_of_date: bool,
+    pub is_manual: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -229,6 +230,7 @@ pub struct StudyWebDetail {
     pub generated_at: String,
     pub updated_at: String,
     pub out_of_date: bool,
+    pub is_manual: bool,
     pub nodes: Vec<StudyWebNode>,
     pub groups: Vec<StudyWebGroup>,
     pub relationships: Vec<StudyWebRelationship>,
