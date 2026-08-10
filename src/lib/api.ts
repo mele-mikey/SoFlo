@@ -85,6 +85,7 @@ export const api = {
   reviewGrammarText: (modelPath: string, text: string, quick: boolean) => call<string>('review_grammar_text', { modelPath, text, quick }),
   researchAndGradeText: (modelPath: string, text: string) => call<string>('research_and_grade_text', { modelPath, text }),
   defineWord: (modelPath: string, word: string) => call<string>('define_word', { modelPath, word }),
+  aiThesaurus: (modelPath: string, word: string) => call<string>('ai_thesaurus', { modelPath, word }),
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
   stopAiServer: () => call<void>('stop_ai_server'),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),

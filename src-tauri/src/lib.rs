@@ -11,6 +11,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_directory: PathBuf = app
                 .path()
@@ -51,6 +52,7 @@ pub fn run() {
             commands::review_grammar_text,
             commands::research_and_grade_text,
             commands::define_word,
+            commands::ai_thesaurus,
             commands::word_ai_model_ready,
             commands::stop_ai_server,
             commands::download_default_ai_model,

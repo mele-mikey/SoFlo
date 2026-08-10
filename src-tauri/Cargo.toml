@@ -1,6 +1,6 @@
 [package]
 name = "soflo"
-version = "1.0.88"
+version = "1.0.89"
 description = "A local-first notes and study workspace"
 authors = ["Mikey M."]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -23,6 +23,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
 rusqlite = { version = "0.32", features = ["bundled", "serialize", "backup"] }
 uuid = { version = "1.12", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

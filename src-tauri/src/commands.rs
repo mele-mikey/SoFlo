@@ -947,6 +947,66 @@ fn define_word_blocking(
         .ok_or_else(|| "SoFlo could not prepare a word reference.".into())
 }
 
+#[tauri::command]
+pub async fn ai_thesaurus(
+    app: tauri::AppHandle,
+    model_path: String,
+    word: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || ai_thesaurus_blocking(app, model_path, word))
+        .await
+        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+fn ai_thesaurus_blocking(
+    app: tauri::AppHandle,
+    model_path: String,
+    word: String,
+) -> CommandResult<String> {
+    let query = word.trim();
+    if query.is_empty() || query.chars().count() > 120 {
+        return Err("Enter a word or short phrase to explore.".into());
+    }
+    let _ = model_path;
+    let word_model_path = resolve_word_ai_model_path(&app)?;
+    let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            word_ai_port
+        ))
+        .json(&serde_json::json!({
+            "messages": [
+                {"role":"system","content":"You are a precise English thesaurus for college writing. Return only one complete valid JSON object with exactly these keys: query, close, related, broad. Each value must be an array of 3 to 6 concise alternatives. close means nearly interchangeable in the same context; related means useful formal or academic alternatives with a slightly different shade; broad means more distant but relevant words or phrases. Preserve the part of speech and meaning of the query. Use single words or short phrases, never definitions, commentary, Markdown, duplicates, or the queried term itself. Do not invent unusual words."},
+                {"role":"user","content":format!("Find grouped alternatives for: {}", query)}
+            ],
+            "chat_template_kwargs": { "enable_thinking": false },
+            "max_tokens": 700,
+            "temperature": 0.15
+        }))
+        .send()
+        .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
+        .error_for_status()
+        .map_err(|error| format!("SoFlo's local AI model could not find related words: {}", error))?;
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    let output = body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    touch_word_ai_server();
+    json_object_from_response(output)
+        .ok_or_else(|| "SoFlo could not prepare grouped thesaurus suggestions.".into())
+}
+
 fn generate_flashcards_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
