@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "soflo"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "argon2",
  "chacha20poly1305",

@@ -3211,6 +3211,24 @@ struct StudyWebThemeBridge {
     target_parent: String,
     source: String,
     target: String,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebRelationshipPlan {
+    #[serde(default)]
+    connections: Vec<StudyWebRelationshipCandidate>,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebRelationshipCandidate {
+    source: String,
+    target: String,
+    #[serde(default)]
+    relationship_type: String,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3905,7 +3923,21 @@ fn generate_study_web_semantics_layered(
             leaves.push((leaf_id, parent_id.clone(), label, members));
         }
     }
-    let mut relationships = infer_study_web_relationships(&model_cards, &leaves);
+    // The structural backbone keeps the map as one connected whole, but it is
+    // rendered as group-to-group structure instead of claiming that its two
+    // anchor cards are a factual pair. Exact card links come from a dedicated
+    // local-model reasoning pass below.
+    let mut relationships = infer_study_web_relationships(&model_cards, &leaves)
+        .into_iter()
+        .filter(|relationship| matches!(relationship.relationship_type.as_str(), "parent_backbone" | "theme_backbone"))
+        .collect::<Vec<_>>();
+    emit_ai_progress(&app, 80, "Verifying the exact concept connections");
+    relationships.extend(infer_study_web_leaf_relationships(
+        &client,
+        port,
+        &leaves,
+        &model_cards,
+    ));
     let parent_themes = parent_buckets
         .iter()
         .enumerate()
@@ -4081,6 +4113,84 @@ fn study_web_label_words(value: &str) -> HashSet<String> {
         .collect()
 }
 
+fn infer_study_web_leaf_relationships(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    leaves: &[(String, String, String, Vec<String>)],
+    cards: &[StudyWebSourceCard],
+) -> Vec<StudyWebSemanticRelationship> {
+    if leaves.is_empty() {
+        return Vec::new();
+    }
+    let material = leaves
+        .iter()
+        .map(|(leaf_id, parent_id, label, members)| {
+            let concepts = cards
+                .iter()
+                .filter(|card| members.contains(&card.id))
+                .map(|card| {
+                    serde_json::json!({
+                        "id": card.id,
+                        "term": card.front.chars().take(68).collect::<String>(),
+                        "definition": card.back.chars().take(156).collect::<String>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({ "leaf_id": leaf_id, "parent_id": parent_id, "label": label, "cards": concepts })
+        })
+        .collect::<Vec<_>>();
+    let maximum = leaves.len().saturating_mul(2).clamp(3, 28);
+    let system = format!("You are the relationship verifier for an academic Study Web. Return only valid JSON: {{\"connections\":[{{\"source\":\"supplied card id\",\"target\":\"supplied card id\",\"relationship_type\":\"short exact relationship\",\"reason\":\"brief evidence from the supplied definitions\"}}]}}. Read every term and definition. Add at most {maximum} connections. A connection is allowed only when the two exact cards have a specific, direct relationship you can state clearly: part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or a directly evidenced shared mechanism. Never connect cards merely because they are in the same broad subject, body system, category, region, list, or because they are analogous. Do not invent knowledge not supported by the supplied cards. If the connection is uncertain, omit it. Prefer no line over a questionable line. Use every connection's reason to identify the exact link; vague reasons such as 'both are related' are invalid. Do not add commentary, markdown, groups, coordinates, or IDs that were not supplied.");
+    let prompt = format!(
+        "LEAF GROUPS AND FLASHCARDS:\n{}\n\nReturn only the verified direct connections now.",
+        serde_json::to_string(&material).unwrap_or_default()
+    );
+    let raw = match local_chat_text(client, port, &system, &prompt, 1500) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let Some(plan) = json_object_from_response(&raw)
+        .and_then(|json| serde_json::from_str::<StudyWebRelationshipPlan>(&json).ok())
+    else {
+        return Vec::new();
+    };
+    let valid_ids = cards.iter().map(|card| card.id.as_str()).collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    plan.connections
+        .into_iter()
+        .filter_map(|connection| {
+            if connection.source == connection.target
+                || connection.reason.split_whitespace().count() < 3
+                || !valid_ids.contains(connection.source.as_str())
+                || !valid_ids.contains(connection.target.as_str())
+            {
+                return None;
+            }
+            let (source, target) = if connection.source < connection.target {
+                (connection.source, connection.target)
+            } else {
+                (connection.target, connection.source)
+            };
+            if !seen.insert((source.clone(), target.clone())) {
+                return None;
+            }
+            let relationship_type = connection
+                .relationship_type
+                .trim()
+                .chars()
+                .take(32)
+                .collect::<String>();
+            Some(StudyWebSemanticRelationship {
+                source,
+                target,
+                relationship_type: if relationship_type.is_empty() { "direct_relation".into() } else { relationship_type },
+                strength: 0.8,
+            })
+        })
+        .take(maximum)
+        .collect()
+}
+
 fn infer_study_web_theme_bridges(
     client: &reqwest::blocking::Client,
     port: u16,
@@ -4107,7 +4217,7 @@ fn infer_study_web_theme_bridges(
             serde_json::json!({ "parent_id": id, "theme": label, "cards": concepts })
         })
         .collect::<Vec<_>>();
-    let system = "You are creating the sparse backbone of a study concept web. Return only valid JSON with exactly one key, connections. connections is an array of no more than one fewer than the supplied parent themes. Every item has exactly these string keys: source_parent, target_parent, source, target. parent values must be supplied parent_id values. source and target must be supplied card IDs from their named parent themes. Build a connected, calm concept map whenever the material genuinely supports it: pick the most meaningful card-to-card bridge between neighboring themes, such as a direct structural, functional, causal, sequential, prerequisite, contrast, or interaction relationship. Do not connect themes merely because both are academic material or share a broad subject. Never invent IDs, commentary, labels, markdown, or extra keys.";
+    let system = "You are creating the sparse backbone of a study concept web. Return only valid JSON with exactly one key, connections. connections is an array of no more than one fewer than the supplied parent themes. Every item has exactly these string keys: source_parent, target_parent, source, target, reason. parent values must be supplied parent_id values. source and target must be supplied card IDs from their named parent themes. reason must state the exact direct relationship from the supplied definitions in at least three words. Build a connected, calm concept map whenever the material genuinely supports it: pick the most meaningful card-to-card bridge between neighboring themes, such as a direct structural, functional, causal, sequential, prerequisite, contrast, or interaction relationship. Do not connect themes merely because both are academic material or share a broad subject. If no exact bridge is supported, return fewer connections. Never invent IDs, commentary, labels, markdown, or extra keys.";
     let prompt = format!(
         "PARENT THEMES:\n{}\n\nReturn the theme bridges now.",
         serde_json::to_string(&material).unwrap_or_default()
@@ -4130,6 +4240,7 @@ fn infer_study_web_theme_bridges(
         .into_iter()
         .filter_map(|bridge| {
             if bridge.source_parent == bridge.target_parent
+                || bridge.reason.split_whitespace().count() < 3
                 || !members_by_parent
                     .get(bridge.source_parent.as_str())
                     .is_some_and(|members| members.contains(bridge.source.as_str()))
