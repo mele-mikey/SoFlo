@@ -108,13 +108,19 @@ function Flashcards({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordR
   }, [cards, shuffle, starredOnly])
   const [index, setIndex] = useState(0)
   const [flipped, setFlipped] = useState(false)
+  const [flipNonce, setFlipNonce] = useState(0)
+
+  const flipCard = () => {
+    setFlipped((value) => !value)
+    setFlipNonce((value) => value + 1)
+  }
 
   useEffect(() => { setIndex(0); setFlipped(false) }, [starredOnly, shuffle])
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
       if (event.key === ' ' && !['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement)?.tagName)) {
         event.preventDefault()
-        setFlipped((value) => !value)
+        flipCard()
       }
       if (event.key === 'ArrowRight') setIndex((value) => Math.min(value + 1, activeCards.length - 1))
       if (event.key === 'ArrowLeft') setIndex((value) => Math.max(value - 1, 0))
@@ -137,7 +143,7 @@ function Flashcards({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordR
       <button className={shuffle ? 'toggle-study-control active' : 'toggle-study-control'} onClick={() => setShuffle((value) => !value)}><Shuffle size={15} /> Shuffle</button>
     </div>
     {card ? <><p className="study-progress">{index + 1} / {activeCards.length}</p>
-      <button className={`flashcard ${flipped ? 'flipped' : ''}`} onClick={() => setFlipped((value) => !value)}>
+      <button key={flipNonce} className={`flashcard ${flipped ? 'flipped' : ''}${flipNonce ? ' flip-animate' : ''}`} onClick={flipCard}>
         <span className="flashcard-side"><small>{flipped ? 'Definition' : 'Term'}</small><strong>{flipped ? card.back : card.front}</strong><em>Click or press Space to flip</em></span>
       </button>
       <div className="study-footer">

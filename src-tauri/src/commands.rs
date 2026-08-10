@@ -612,9 +612,10 @@ pub async fn review_grammar_text(
     model_path: String,
     text: String,
     quick: bool,
+    paper_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        review_grammar_text_blocking(app, model_path, text, quick)
+        review_grammar_text_blocking(app, model_path, text, quick, paper_context)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -625,6 +626,7 @@ fn review_grammar_text_blocking(
     model_path: String,
     text: String,
     quick: bool,
+    paper_context: String,
 ) -> CommandResult<String> {
     // The editor sends a rotating excerpt for quiet checks so long papers are
     // covered over time instead of silently dropping the latter half.
@@ -635,10 +637,11 @@ fn review_grammar_text_blocking(
     if source.trim().len() < 3 {
         return Ok("[]".into());
     }
+    let paper_context = normalized_paper_context(&paper_context);
     let system_instruction = if quick {
-        "You are SoFlo's fast English spelling checker. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 3 clear spelling errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic and category must be spelling. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Prioritize obvious misspellings and split-word errors. Report one error per object. Do not report grammar, style, punctuation, proper names, or text that is already correct. Return [] only when there are no clear spelling errors."
+        "You are SoFlo's fast, context-aware English mechanics checker. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 3 clear spelling, capitalization, apostrophe, duplicated-space, or obvious punctuation errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only when there are no clear mechanics errors."
     } else {
-        "You are SoFlo's rigorous academic writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning. reason must say specifically why the replacement is more formal, precise, clear, or grammatically correct. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
+        "You are SoFlo's rigorous, context-aware writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning and the document's stated goal. reason must say specifically why the replacement is more precise, clear, contextually grammatical, or better suited to the requested voice. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and contextually correct punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
     emit_ai_progress(&app, 12, "Reading your writing");
     let server_port = if quick {
@@ -675,11 +678,11 @@ fn review_grammar_text_blocking(
         );
         let request = if quick {
             format!(
-                "Review this writing. Return JSON only.\n\n{}",
-                review_source
+                "DOCUMENT GOAL AND VOICE:\n{}\n\nReview this writing. Return JSON only.\n\n{}",
+                paper_context, review_source
             )
         } else {
-            format!("Review this passage. Return 4 to 7 focused suggestions from this passage only. Return JSON only.\n\n{}", review_source)
+            format!("DOCUMENT GOAL AND VOICE:\n{}\n\nReview this passage. Return 4 to 7 focused suggestions from this passage only. Return JSON only.\n\n{}", paper_context, review_source)
         };
         let output = local_chat_text(
             &client,
@@ -712,9 +715,10 @@ pub async fn research_and_grade_text(
     app: tauri::AppHandle,
     model_path: String,
     text: String,
+    paper_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        research_and_grade_text_blocking(app, model_path, text)
+        research_and_grade_text_blocking(app, model_path, text, paper_context)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -756,6 +760,19 @@ fn local_chat_text(
         .unwrap_or_default()
         .trim()
         .to_string())
+}
+
+fn normalized_paper_context(context: &str) -> String {
+    let value = context
+        .split_whitespace()
+        .take(180)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if value.is_empty() {
+        "A college-level formal paper using precise, polished, sophisticated language and standard academic grammar.".into()
+    } else {
+        value
+    }
 }
 
 fn fallback_research_query(text: &str) -> String {
@@ -828,6 +845,7 @@ fn research_and_grade_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
     text: String,
+    paper_context: String,
 ) -> CommandResult<String> {
     let source = text.chars().take(18_000).collect::<String>();
     if source.trim().chars().count() < 80 {
@@ -835,6 +853,7 @@ fn research_and_grade_text_blocking(
             "Write a little more before asking SoFlo to research and grade this paper.".into(),
         );
     }
+    let paper_context = normalized_paper_context(&paper_context);
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 8, "Reading your paper locally");
     let ai_port = ensure_ai_server(&model_path, &app)?;
@@ -847,7 +866,7 @@ fn research_and_grade_text_blocking(
         &local_client,
         ai_port,
         "You turn a student's paper into concise academic database searches. Return only a JSON object with topicQuery and counterQuery. Each query must be 5 to 14 keywords. topicQuery should preserve the paper's topic and central claim. counterQuery should seek a relevant alternate perspective, limitation, or counterargument; if the paper is not making an argument, use a complementary scholarly perspective instead. Do not include personal names unless essential.",
-        &format!("Create two research queries for this paper:\n\n{}", source.chars().take(7_000).collect::<String>()),
+        &format!("DOCUMENT GOAL AND VOICE:\n{}\n\nCreate two research queries for this paper:\n\n{}", paper_context, source.chars().take(7_000).collect::<String>()),
         120,
     )?;
     let query_object = json_object_from_response(&query_output)
@@ -936,8 +955,8 @@ fn research_and_grade_text_blocking(
     let grade_output = local_chat_text(
         &local_client,
         ai_port,
-        "You are a constructive college writing instructor. Grade a student paper approximately, not officially. Use the supplied scholarly research leads only as leads: never claim a source proves something unless its metadata makes that clear. Return only a JSON object with keys grade, overview, strengths, improvements, evidence, reasoning, writingCraft, and researchAdvice. strengths, improvements, and researchAdvice must be arrays of 2 to 5 short strings. writingCraft must be an object with sentenceOpeners, topicSentences, organization, creativity, and length; each is a concise sentence. Clearly discuss the paper's claim, evidence, reasoning, counterarguments or missing perspectives, and practical ways to improve it. Do not write the paper for the student.",
-        &format!("PAPER:\n{}\n\nSCHOLARLY RESEARCH LEADS (metadata only):\n{}", source, source_context),
+        "You are a constructive writing instructor. Grade a student's document approximately, not officially, against its stated goal and voice. Use the supplied scholarly research leads only as leads: never claim a source proves something unless its metadata makes that clear. Return only a JSON object with keys grade, overview, strengths, improvements, evidence, reasoning, writingCraft, and researchAdvice. strengths, improvements, and researchAdvice must be arrays of 2 to 5 short strings. writingCraft must be an object with sentenceOpeners, topicSentences, organization, creativity, and length; each is a concise sentence. Clearly discuss the document's purpose, evidence where applicable, reasoning, context-appropriate punctuation and grammar, counterarguments or missing perspectives where relevant, and practical ways to improve it. Do not force academic conventions when they conflict with the stated goal. Do not write the document for the student.",
+        &format!("DOCUMENT GOAL AND VOICE:\n{}\n\nPAPER:\n{}\n\nSCHOLARLY RESEARCH LEADS (metadata only):\n{}", paper_context, source, source_context),
         1800,
     )?;
     touch_ai_server();
@@ -972,8 +991,9 @@ pub async fn define_word(
     app: tauri::AppHandle,
     model_path: String,
     word: String,
+    paper_context: String,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || define_word_blocking(app, model_path, word))
+    tauri::async_runtime::spawn_blocking(move || define_word_blocking(app, model_path, word, paper_context))
         .await
         .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
@@ -982,12 +1002,14 @@ fn define_word_blocking(
     app: tauri::AppHandle,
     model_path: String,
     word: String,
+    paper_context: String,
 ) -> CommandResult<String> {
     let word = word.trim();
     if word.is_empty() || word.chars().count() > 80 {
         return Err("Select one ordinary word to look it up.".into());
     }
     let _ = model_path;
+    let paper_context = normalized_paper_context(&paper_context);
     let word_model_path = resolve_word_ai_model_path(&app)?;
     let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
@@ -998,8 +1020,8 @@ fn define_word_blocking(
         .post(format!("http://127.0.0.1:{}/v1/chat/completions", word_ai_port))
         .json(&serde_json::json!({
             "messages": [
-                {"role":"system","content":"You are a concise, reliable English dictionary for a college writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated formal, academic, or more precise related alternatives; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
-                {"role":"user","content":format!("Define this one word: {}", word)}
+                {"role":"system","content":"You are a concise, reliable English dictionary for a writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated precise related alternatives suited to the stated document goal; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
+                {"role":"user","content":format!("DOCUMENT GOAL AND VOICE:\n{}\n\nDefine this one word: {}", paper_context, word)}
             ],
             "chat_template_kwargs": { "enable_thinking": false },
             "max_tokens": 900,
@@ -1029,8 +1051,9 @@ pub async fn ai_thesaurus(
     app: tauri::AppHandle,
     model_path: String,
     word: String,
+    paper_context: String,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || ai_thesaurus_blocking(app, model_path, word))
+    tauri::async_runtime::spawn_blocking(move || ai_thesaurus_blocking(app, model_path, word, paper_context))
         .await
         .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
@@ -1039,12 +1062,14 @@ fn ai_thesaurus_blocking(
     app: tauri::AppHandle,
     model_path: String,
     word: String,
+    paper_context: String,
 ) -> CommandResult<String> {
     let query = word.trim();
     if query.is_empty() || query.chars().count() > 120 {
         return Err("Enter a word or short phrase to explore.".into());
     }
     let _ = model_path;
+    let paper_context = normalized_paper_context(&paper_context);
     let word_model_path = resolve_word_ai_model_path(&app)?;
     let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
@@ -1060,7 +1085,7 @@ fn ai_thesaurus_blocking(
             .json(&serde_json::json!({
                 "messages": [
                     {"role":"system","content":instruction},
-                    {"role":"user","content":format!("Find grouped alternatives for: {}", query)}
+                    {"role":"user","content":format!("DOCUMENT GOAL AND VOICE:\n{}\n\nFind grouped alternatives for: {}", paper_context, query)}
                 ],
                 "chat_template_kwargs": { "enable_thinking": false },
                 "max_tokens": max_tokens,

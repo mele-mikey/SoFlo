@@ -22,7 +22,7 @@ import { Transform } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
-import { AlignCenter, AlignLeft, AlignRight, Bold, Check, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pencil, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, RotateCcw, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, Check, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pencil, Pilcrow, Pin, Quote, Redo2, RefreshCw, RemoveFormatting, RotateCcw, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { ChangeSet, simplifyChanges } from 'prosemirror-changeset'
@@ -46,10 +46,10 @@ interface DocumentEditorProps {
   onSpellcheckChange: (value: boolean) => void
   onAiGrammarEnabledChange: (value: boolean) => void
   grammarProgress: { progress: number; message: string } | null
-  onGrammarReview: (text: string, quick: boolean) => Promise<string>
-  onResearchAndGrade: (text: string) => Promise<string>
-  onDefineWord: (word: string) => Promise<string>
-  onAiThesaurus: (word: string) => Promise<string>
+  onGrammarReview: (text: string, quick: boolean, paperContext: string) => Promise<string>
+  onResearchAndGrade: (text: string, paperContext: string) => Promise<string>
+  onDefineWord: (word: string, paperContext: string) => Promise<string>
+  onAiThesaurus: (word: string, paperContext: string) => Promise<string>
   onVersionHistory: () => Promise<RevisionHistoryEntry[]>
   onNameVersion?: (revisionId: string, name: string) => Promise<void>
   onRestoreVersion?: (revisionId: string) => Promise<Pick<DocumentDetail, 'title' | 'content' | 'contentPlain' | 'revision' | 'updatedAt'>>
@@ -63,8 +63,21 @@ interface DocumentEditorProps {
   context?: string
 }
 
-const accentColors = ['#E7E9F0', '#F08B8B', '#F1BD6A', '#86C59A', '#7EB7ED', '#B79CF4']
+const accentColors = ['#000000', '#E7E9F0', '#F08B8B', '#F1BD6A', '#86C59A', '#7EB7ED', '#B79CF4']
 const highlights = ['#FFF0A3', '#F5B7D4', '#BFE9DA', '#C7DDF9', '#E6D4FF']
+const defaultPaperContext = 'A college-level formal paper using precise, polished, sophisticated language and standard academic grammar.'
+type WritingPanelPosition = { left: number; top: number }
+function savedWritingPanelPosition(): WritingPanelPosition | null {
+  try {
+    const raw = globalThis.localStorage?.getItem('soflo-writing-panel-position')
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<WritingPanelPosition>
+    return Number.isFinite(value.left) && Number.isFinite(value.top) ? { left: Number(value.left), top: Number(value.top) } : null
+  } catch { return null }
+}
+function savedWritingPanelPin() {
+  try { return globalThis.localStorage?.getItem('soflo-writing-panel-pinned') === 'true' } catch { return false }
+}
 const FontSize = Extension.create({
   name: 'fontSize',
   addGlobalAttributes() {
@@ -149,6 +162,7 @@ const PaperMeta = Extension.create({
       repeatHeader: { default: false },
       repeatFooter: { default: false },
       showPageNumbers: { default: false },
+      aiContext: { default: defaultPaperContext },
     } }]
   },
 })
@@ -648,6 +662,11 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [thesaurusResult, setThesaurusResult] = useState<ThesaurusResult | null>(null)
   const [thesaurusLoading, setThesaurusLoading] = useState(false)
   const [thesaurusError, setThesaurusError] = useState('')
+  const [paperContext, setPaperContext] = useState(defaultPaperContext)
+  const [paperContextDraft, setPaperContextDraft] = useState(defaultPaperContext)
+  const [paperContextOpen, setPaperContextOpen] = useState(false)
+  const [writingPanelPosition, setWritingPanelPosition] = useState<WritingPanelPosition | null>(savedWritingPanelPosition)
+  const [writingPanelPinned, setWritingPanelPinned] = useState(savedWritingPanelPin)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
   const [versionHistory, setVersionHistory] = useState<RevisionHistoryEntry[]>([])
   const [versionHistorySelectedId, setVersionHistorySelectedId] = useState('current')
@@ -673,9 +692,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const selectedWordRangeRef = useRef<WordSelection | null>(null)
   const selectedGrammarIssueRef = useRef<GrammarIssue | null>(null)
   const ignoredGrammarKeysRef = useRef(new Set<string>())
-  const useWordAlternativeRef = useRef<(alternative: string) => void>(() => undefined)
   const aiEnabledRef = useRef(aiEnabled)
   const defineWordRef = useRef(onDefineWord)
+  const paperContextRef = useRef(paperContext)
+  const writingPanelPinnedRef = useRef(writingPanelPinned)
   aiEnabledRef.current = aiEnabled
   defineWordRef.current = onDefineWord
   const grammarReviewRef = useRef<(quick: boolean) => Promise<boolean>>(async () => false)
@@ -688,6 +708,29 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const nativeSpellcheck = spellcheck && !customAiSpellcheck
   const setActiveLinkPreview = (preview: { href: string; label: string; x: number; y: number } | null) => { linkPreviewRef.current = preview; setLinkPreview(preview) }
   const openExternalLink = (href: string) => { void openUrl(href).catch(() => { globalThis.open(href, '_blank', 'noopener,noreferrer') }) }
+  const closeWordReference = () => {
+    wordReferenceRequestRef.current += 1
+    selectedWordReferenceRef.current = ''
+    selectedWordRangeRef.current = null
+    setWordReference(null)
+    setWordReferenceLoading(false)
+    setWordReferenceError('')
+  }
+  const beginWritingPanelDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if ((event.target as Element).closest('button,input,textarea,a')) return
+    const panel = event.currentTarget.closest<HTMLElement>('.writing-floating-panel')
+    const bounds = panel?.getBoundingClientRect()
+    if (!panel || !bounds) return
+    event.preventDefault()
+    const origin = { x: event.clientX, y: event.clientY, left: bounds.left, top: bounds.top }
+    const move = (next: PointerEvent) => setWritingPanelPosition({
+      left: Math.max(12, Math.min(window.innerWidth - bounds.width - 12, origin.left + next.clientX - origin.x)),
+      top: Math.max(78, Math.min(window.innerHeight - 90, origin.top + next.clientY - origin.y)),
+    })
+    const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
+  }
   const handleLinkClick = (_view: unknown, _position: number, event: MouseEvent) => {
     const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null
     if (!anchor?.href) return false
@@ -736,6 +779,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     }
     if (selectedWordReferenceRef.current) {
       if (currentWord && selectedWordReferenceRef.current.toLocaleLowerCase() === currentWord.toLocaleLowerCase()) return
+      if (writingPanelPinnedRef.current) return
       wordReferenceRequestRef.current += 1
       selectedWordReferenceRef.current = ''
       selectedWordRangeRef.current = null
@@ -756,7 +800,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setWordReference(null)
     setWordReferenceError('')
     setWordReferenceLoading(true)
-    void defineWordRef.current(word).then((raw) => {
+    void defineWordRef.current(word, paperContextRef.current).then((raw) => {
       if (request !== wordReferenceRequestRef.current) return
       const reference = parseWordReference(raw, word)
       if (reference) setWordReference(reference)
@@ -789,7 +833,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     },
     onSelectionUpdate: ({ editor: nextEditor }) => {
       const activeIssue = selectedGrammarIssueRef.current
-      if (activeIssue && !selectionStaysInIssue(nextEditor, activeIssue)) {
+      if (activeIssue && !writingPanelPinnedRef.current && !selectionStaysInIssue(nextEditor, activeIssue)) {
         selectedGrammarIssueRef.current = null
         setGrammarOpen(false)
         setSelectedGrammarIssue(null)
@@ -818,11 +862,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
   }, [document.id, document.content, editor])
   useEffect(() => { selectedGrammarIssueRef.current = selectedGrammarIssue }, [selectedGrammarIssue])
+  useEffect(() => { paperContextRef.current = paperContext }, [paperContext])
+  useEffect(() => { writingPanelPinnedRef.current = writingPanelPinned; try { globalThis.localStorage?.setItem('soflo-writing-panel-pinned', String(writingPanelPinned)) } catch { /* Local layout preferences are optional. */ } }, [writingPanelPinned])
+  useEffect(() => { if (!writingPanelPosition) return; try { globalThis.localStorage?.setItem('soflo-writing-panel-position', JSON.stringify(writingPanelPosition)) } catch { /* Local layout preferences are optional. */ } }, [writingPanelPosition])
   useEffect(() => { editor?.setOptions({ editorProps: { attributes: { class: 'soflo-editor', spellcheck: String(nativeSpellcheck), style: `font-size: ${fontSize}pt` }, handleClick: handleEditorClick } }) }, [editor, fontSize, grammarIssues, nativeSpellcheck])
   useEffect(() => { if (editor) editor.view.dispatch(editor.state.tr.setMeta(paperPaginationKey, measurePaperBreaks(editor.view))) }, [editor, fontSize, lineSpacing, pageMargin, headerPages, footerPages, repeatHeader, repeatFooter])
   useEffect(() => {
     if (!editor) return
-    const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean }
+    const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean; aiContext?: string }
     const legacyHeader = attributes.headerText ?? ''
     const legacyFooter = attributes.footerText ?? ''
     const savedHeaderPages = parseRunningPageMap(attributes.headerPages)
@@ -836,6 +883,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setRepeatHeader(Boolean(attributes.repeatHeader) || isLegacyHeader)
     setRepeatFooter(Boolean(attributes.repeatFooter) || isLegacyFooter)
     setShowPageNumbers(Boolean(attributes.showPageNumbers))
+    const nextPaperContext = attributes.aiContext?.trim() || defaultPaperContext
+    setPaperContext(nextPaperContext)
+    setPaperContextDraft(nextPaperContext)
+    setPaperContextOpen(false)
   }, [document.id, editor])
   useEffect(() => {
     const updatePageCount = (event: Event) => setPageCount((event as CustomEvent<number>).detail || 1)
@@ -935,41 +986,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }, [aiEnabled, aiGrammarEnabled, aiModelReady, document.id, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
   useEffect(() => {
-    const replaceFromWordReference = (event: MouseEvent) => {
-      const chip = event.target instanceof Element ? event.target.closest<HTMLElement>('.word-reference-synonyms > span') : null
-      if (!chip?.textContent) return
-      event.preventDefault()
-      useWordAlternativeRef.current(chip.textContent)
-    }
-    window.addEventListener('click', replaceFromWordReference)
-    return () => window.removeEventListener('click', replaceFromWordReference)
-  }, [])
-
-  useEffect(() => {
-    if (!thesaurusOpen) return
-    const startDrag = (event: PointerEvent) => {
-      const target = event.target as Element | null
-      if (!target?.closest('.thesaurus-sidebar header') || target.closest('button, input')) return
-      const panel = target.closest('.thesaurus-sidebar') as HTMLElement | null
-      const bounds = panel?.getBoundingClientRect()
-      if (!panel || !bounds) return
-      const origin = { x: event.clientX, y: event.clientY, left: bounds.left, top: bounds.top }
-      const move = (next: PointerEvent) => {
-        const left = Math.max(12, Math.min(window.innerWidth - bounds.width - 12, origin.left + next.clientX - origin.x))
-        const top = Math.max(78, Math.min(window.innerHeight - 90, origin.top + next.clientY - origin.y))
-        panel.style.left = `${left}px`
-        panel.style.top = `${top}px`
-        panel.style.right = 'auto'
-        panel.style.bottom = 'auto'
-      }
-      const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
-      window.addEventListener('pointermove', move)
-      window.addEventListener('pointerup', stop)
-    }
-    globalThis.document.addEventListener('pointerdown', startDrag)
-    return () => globalThis.document.removeEventListener('pointerdown', startDrag)
-  }, [thesaurusOpen])
-  useEffect(() => {
     const openCitationMenu = () => setCitationMenuOpen(true)
     window.addEventListener('soflo:open-citation', openCitationMenu)
     return () => window.removeEventListener('soflo:open-citation', openCitationMenu)
@@ -977,7 +993,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   useEffect(() => {
     if (!editor) return
     const syncRunningMetadata = () => {
-      const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean }
+      const attributes = editor.getAttributes('doc') as { headerText?: string; footerText?: string; headerPages?: unknown; footerPages?: unknown; repeatHeader?: boolean; repeatFooter?: boolean; showPageNumbers?: boolean; aiContext?: string }
       const nextHeader = attributes.headerText ?? ''
       const nextFooter = attributes.footerText ?? ''
       const nextHeaderPages = parseRunningPageMap(attributes.headerPages)
@@ -986,6 +1002,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       setHeaderPages(Object.keys(nextHeaderPages).length ? nextHeaderPages : nextHeader ? { '1': nextHeader } : {})
       setFooterPages(Object.keys(nextFooterPages).length ? nextFooterPages : nextFooter ? { '1': nextFooter } : {})
       setRepeatHeader(Boolean(attributes.repeatHeader)); setRepeatFooter(Boolean(attributes.repeatFooter)); setShowPageNumbers(Boolean(attributes.showPageNumbers))
+      const nextPaperContext = attributes.aiContext?.trim() || defaultPaperContext
+      setPaperContext(nextPaperContext); setPaperContextDraft(nextPaperContext)
     }
     if (!versionHistoryOpen) {
       if (!historyWasOpenRef.current) return
@@ -1130,7 +1148,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     }
     try {
       const source = quick ? nextPassiveGrammarExcerpt() : editor.getText()
-      const issues = extractGrammarIssues(await onGrammarReview(source, quick), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+      const issues = extractGrammarIssues(await onGrammarReview(source, quick, paperContext), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       if (quick) {
         const combined = grammarIssues.filter((issue) => {
           if (ignoredGrammarKeysRef.current.has(grammarIssueKey(issue))) return false
@@ -1183,7 +1201,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setWordReferenceLoading(false)
     setWordReferenceError('')
     try {
-      const report = parseResearchGrade(await onResearchAndGrade(editor.getText()))
+      const report = parseResearchGrade(await onResearchAndGrade(editor.getText(), paperContext))
       if (!report) throw new Error('SoFlo could not prepare a research and grade report from the local AI response.')
       setResearchGrade(report)
     } catch (error) {
@@ -1198,7 +1216,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setThesaurusError('')
     setThesaurusResult(null)
     try {
-      const result = parseThesaurus(await onAiThesaurus(query), query)
+      const result = parseThesaurus(await onAiThesaurus(query, paperContext), query)
       if (!result) throw new Error('SoFlo could not prepare grouped thesaurus suggestions.')
       setThesaurusResult(result)
     } catch (error) {
@@ -1251,7 +1269,17 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setWordReferenceError('')
     editor.commands.focus()
   }
-  useWordAlternativeRef.current = useWordAlternative
+  const savePaperContext = () => {
+    const nextContext = paperContextDraft.trim() || defaultPaperContext
+    editor.commands.updateAttributes('doc', { aiContext: nextContext })
+    setPaperContext(nextContext)
+    setPaperContextDraft(nextContext)
+    setPaperContextOpen(false)
+  }
+  const openPaperContext = () => {
+    setPaperContextDraft(paperContext)
+    setPaperContextOpen(true)
+  }
   const openLinkDialog = () => setLinkDialog({ url: (editor.getAttributes('link').href as string | undefined) ?? '', canRemove: editor.isActive('link') })
   const applyLink = (url: string) => {
     const href = url.trim()
@@ -1358,6 +1386,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const selected = entry.id === versionHistorySelectedId
     return <div className={`version-entry${selected ? ' selected' : ''}${nested ? ' nested' : ''}`} key={entry.id}><button className="version-entry-main" onClick={() => setVersionHistorySelectedId(entry.id)}><i /><span><strong>{entry.id === 'current' ? 'Current version' : entry.name || revisionTimeOnly(entry.createdAt)}</strong><small>{entry.id === 'current' ? 'Latest saved work' : revisionSummary(entry, older)}</small>{entry.name && <time>{revisionTimeOnly(entry.createdAt)}</time>}</span></button>{entry.id !== 'current' && <button className="version-name-button" aria-label={`Name version ${entry.revision}`} onClick={() => { setNamingVersionId(entry.id); setVersionName(entry.name ?? '') }}><Pencil size={12} /></button>}{namingVersionId === entry.id && <form className="version-name-form" onSubmit={(event) => { event.preventDefault(); void saveVersionName(entry) }}><input autoFocus value={versionName} onChange={(event) => setVersionName(event.target.value)} placeholder="e.g. First Draft" /><button type="submit"><Check size={12} /></button><button type="button" onClick={() => setNamingVersionId(null)}><X size={12} /></button></form>}</div>
   }
+  const writingPanelStyle = writingPanelPosition ? { left: `${writingPanelPosition.left}px`, top: `${writingPanelPosition.top}px`, right: 'auto', bottom: 'auto' } : undefined
+  const writingPanelControls = (onClose: () => void) => <div className="writing-panel-controls"><button type="button" className={writingPanelPinned ? 'icon-button tiny active' : 'icon-button tiny'} onClick={() => setWritingPanelPinned((pinned) => !pinned)} aria-label={writingPanelPinned ? 'Unpin this panel' : 'Keep this panel open'} aria-pressed={writingPanelPinned}><Pin size={14} /></button><button type="button" className="icon-button tiny" onClick={onClose} aria-label="Close panel"><X size={16} /></button></div>
   return <main className={`editor-view${versionHistoryOpen ? ' version-history-mode' : ''}`}>
     {versionHistoryOpen ? <header className="history-mode-topbar"><div><p className="eyebrow">{collectionLabel === 'Lectures' ? 'LECTURE HISTORY' : 'PAPER HISTORY'}</p><h1>Version history</h1><span>{selectedHistoryEntry.id === 'current' ? 'Current version' : selectedHistoryEntry.name || revisionTimeOnly(selectedHistoryEntry.createdAt)}</span></div><div><button className="button button-quiet" disabled={selectedHistoryEntry.id === 'current' || versionRestoring} onClick={() => void restoreSelectedVersion()}><RotateCcw size={15} />{versionRestoring ? 'Restoring…' : 'Restore this version'}</button><button className="button button-primary" onClick={closeVersionHistory}><Check size={15} />Done</button></div></header> : <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
@@ -1365,11 +1395,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>}
     {!versionHistoryOpen && <div className="editor-toolbar-wrap">
-    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onPaperContext={openPaperContext} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>}
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
     <section className="editor-page-wrap" onMouseDown={focusBlankPaper}><article className={`document-page reading-${readingSurface} page-margin-${pageMargin} page-line-${lineSpacing} has-running-header has-running-footer`} data-running-header={headerText} data-running-footer={footerText} data-running-header-pages={JSON.stringify(headerPages)} data-running-footer-pages={JSON.stringify(footerPages)} data-repeat-header={repeatHeader} data-repeat-footer={repeatFooter} data-show-page-numbers={showPageNumbers} onMouseDown={focusBlankPaper}>{runningRegion('header')}<EditorContent editor={editor} onContextMenu={openContextMenu} />{runningRegion('footer')}</article>{grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar" aria-label="Writing suggestion"><header><div><p className="eyebrow">{selectedGrammarIssue.kind === 'style' ? 'FORMAL WRITING' : selectedGrammarIssue.kind === 'structure' ? 'FLOW & STRUCTURE' : 'SPELLING & WRITING'}</p><h2>{selectedGrammarIssue.kind === 'style' ? 'Formal rewrite' : selectedGrammarIssue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div><button className="icon-button tiny" onClick={() => { setGrammarOpen(false); setSelectedGrammarIssue(null) }} aria-label="Close writing suggestion"><X size={16} /></button></header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p>{selectedGrammarIssue.kind !== 'structure' && selectedGrammarIssue.alternatives.length > 0 && <section><h3>{selectedGrammarIssue.kind === 'style' ? 'Choose a rewrite' : 'Choose a correction'}</h3><div className="grammar-alternatives">{selectedGrammarIssue.alternatives.map((alternative) => <button key={alternative} onClick={() => applyGrammarIssue(selectedGrammarIssue, alternative)}>{alternative}</button>)}</div></section>}<section><h3>{selectedGrammarIssue.kind === 'style' ? 'Why this is better' : selectedGrammarIssue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}{selectedGrammarIssue.kind === 'structure' ? <p className="grammar-structure-note">This is a flow recommendation; move the paragraph yourself if it fits your argument.</p> : <div className="grammar-suggestion-actions"><button className="button button-quiet button-small" onClick={() => ignoreGrammarIssue(selectedGrammarIssue)}>Ignore</button><button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Replace text</button></div>}</div></aside>}{(wordReferenceLoading || wordReference || wordReferenceError) && <aside className="word-reference-sidebar" aria-label="Word reference"><header><div><p className="eyebrow">WORD REFERENCE</p><h2>{wordReference?.word || selectedWordReferenceRef.current}</h2>{wordReference?.pronunciation && <span>{wordReference.pronunciation}</span>}</div><button className="icon-button tiny" onClick={() => { wordReferenceRequestRef.current += 1; selectedWordReferenceRef.current = ''; setWordReference(null); setWordReferenceLoading(false); setWordReferenceError('') }} aria-label="Close word reference"><X size={16} /></button></header><div className="word-reference-detail">{wordReferenceLoading && <div className="word-reference-loading"><i />Looking up this word locally…</div>}{wordReferenceError && <p className="word-reference-error">{wordReferenceError}</p>}{wordReference?.senses.map((sense, index) => <section key={`${sense.partOfSpeech}-${index}`}><h3>{sense.partOfSpeech || 'Definition'}</h3><p><b>{index + 1}.</b>{sense.definition}</p>{sense.example && <em>“{sense.example}”</em>}</section>)}{wordReference && <section><h3>Formal related words</h3><div className="grammar-synonyms word-reference-synonyms">{wordReference.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}</div></aside>}{thesaurusOpen && <aside className="word-reference-sidebar thesaurus-sidebar" aria-label="AI Thesaurus"><header><div><p className="eyebrow">AI WRITING TOOL</p><h2>AI Thesaurus</h2><span>Grouped by closeness</span></div><button className="icon-button tiny" onClick={() => { setThesaurusOpen(false); setThesaurusResult(null); setThesaurusError('') }} aria-label="Close AI thesaurus"><X size={16} /></button></header><form className="thesaurus-form" onSubmit={(event) => void runThesaurus(event)}><label htmlFor="thesaurus-query">What kind of word are you looking for?</label><div><input id="thesaurus-query" value={thesaurusQuery} onChange={(event) => setThesaurusQuery(event.target.value)} placeholder="e.g. important, explain, difficult" autoFocus /><button className="button button-primary button-small" type="submit" disabled={!thesaurusQuery.trim() || thesaurusLoading}>{thesaurusLoading ? 'Finding…' : 'Find words'}</button></div></form>{thesaurusError && <p className="word-reference-error thesaurus-error">{thesaurusError}</p>}{thesaurusLoading && <div className="word-reference-loading"><i />Finding grouped alternatives locally…</div>}{thesaurusResult && <div className="thesaurus-detail"><p className="thesaurus-query">For <strong>{thesaurusResult.query}</strong></p>{[['Closest matches', thesaurusResult.close], ['Related / formal', thesaurusResult.related], ['Broader alternatives', thesaurusResult.broad]].map(([label, words]) => Array.isArray(words) && words.length > 0 && <section key={String(label)}><h3>{String(label)}</h3><div className="grammar-synonyms">{words.map((word) => <span key={word}>{word}</span>)}</div></section>)}</div>}</aside>}</section>
+    {grammarOpen && selectedGrammarIssue && <aside className="grammar-sidebar writing-floating-panel" style={writingPanelStyle} aria-label="Writing suggestion"><header onPointerDown={beginWritingPanelDrag}><div><p className="eyebrow">{selectedGrammarIssue.kind === 'style' ? 'FORMAL WRITING' : selectedGrammarIssue.kind === 'structure' ? 'FLOW & STRUCTURE' : 'SPELLING & WRITING'}</p><h2>{selectedGrammarIssue.kind === 'style' ? 'Formal rewrite' : selectedGrammarIssue.kind === 'structure' ? 'Flow suggestion' : 'Suggestion'}</h2></div>{writingPanelControls(() => { setGrammarOpen(false); setSelectedGrammarIssue(null) })}</header><div className="grammar-suggestion-detail"><small>{selectedGrammarIssue.category}{selectedGrammarIssue.partOfSpeech ? ` · ${selectedGrammarIssue.partOfSpeech}` : ''}</small><p className="grammar-change"><s>{selectedGrammarIssue.original}</s><strong>{selectedGrammarIssue.replacement}</strong></p>{selectedGrammarIssue.kind !== 'structure' && selectedGrammarIssue.alternatives.length > 0 && <section><h3>{selectedGrammarIssue.kind === 'style' ? 'Choose a rewrite' : 'Choose a correction'}</h3><div className="grammar-alternatives">{selectedGrammarIssue.alternatives.map((alternative) => <button key={alternative} onClick={() => applyGrammarIssue(selectedGrammarIssue, alternative)}>{alternative}</button>)}</div></section>}<section><h3>{selectedGrammarIssue.kind === 'style' ? 'Why this is better' : selectedGrammarIssue.kind === 'structure' ? 'Suggested flow' : 'What to fix'}</h3><p>{selectedGrammarIssue.reason}</p></section>{selectedGrammarIssue.definition && <section><h3>Definition</h3><p>{selectedGrammarIssue.definition}</p></section>}{selectedGrammarIssue.useCase && <section><h3>When to use it</h3><p>{selectedGrammarIssue.useCase}</p></section>}{selectedGrammarIssue.synonyms.length > 0 && <section><h3>Related words</h3><div className="grammar-synonyms">{selectedGrammarIssue.synonyms.map((synonym) => <span key={synonym}>{synonym}</span>)}</div></section>}{selectedGrammarIssue.kind === 'structure' ? <p className="grammar-structure-note">This is a flow recommendation; move the paragraph yourself if it fits your argument.</p> : <div className="grammar-suggestion-actions"><button className="button button-quiet button-small" onClick={() => ignoreGrammarIssue(selectedGrammarIssue)}>Ignore</button><button className="button button-primary button-small" onClick={() => applyGrammarIssue(selectedGrammarIssue)}>Replace text</button></div>}</div></aside>}
+    {(wordReferenceLoading || wordReference || wordReferenceError) && <aside className="word-reference-sidebar writing-floating-panel" style={writingPanelStyle} aria-label="Word reference"><header onPointerDown={beginWritingPanelDrag}><div><p className="eyebrow">WORD REFERENCE</p><h2>{wordReference?.word || selectedWordReferenceRef.current}</h2>{wordReference?.pronunciation && <span>{wordReference.pronunciation}</span>}</div>{writingPanelControls(closeWordReference)}</header><div className="word-reference-detail">{wordReferenceLoading && <div className="word-reference-loading"><i />Looking up this word locally…</div>}{wordReferenceError && <p className="word-reference-error">{wordReferenceError}</p>}{wordReference?.senses.map((sense, index) => <section key={`${sense.partOfSpeech}-${index}`}><h3>{sense.partOfSpeech || 'Definition'}</h3><p><b>{index + 1}.</b>{sense.definition}</p>{sense.example && <em>“{sense.example}”</em>}</section>)}{wordReference && <section><h3>Formal related words</h3><div className="grammar-synonyms word-reference-synonyms">{wordReference.synonyms.map((synonym) => <button type="button" key={synonym} onMouseDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.stopPropagation(); useWordAlternative(synonym) }}>{synonym}</button>)}</div></section>}</div></aside>}
+    {thesaurusOpen && <aside className="word-reference-sidebar thesaurus-sidebar writing-floating-panel" style={writingPanelStyle} aria-label="AI Thesaurus"><header onPointerDown={beginWritingPanelDrag}><div><p className="eyebrow">AI WRITING TOOL</p><h2>AI Thesaurus</h2><span>Find language that fits this paper.</span></div>{writingPanelControls(() => { setThesaurusOpen(false); setThesaurusResult(null); setThesaurusError('') })}</header><form className="thesaurus-form" onSubmit={(event) => void runThesaurus(event)}><label htmlFor="thesaurus-query">What kind of word are you looking for?</label><div><input id="thesaurus-query" value={thesaurusQuery} onChange={(event) => setThesaurusQuery(event.target.value)} placeholder="e.g. important, explain, difficult" autoFocus /><button className="button button-primary button-small" type="submit" disabled={!thesaurusQuery.trim() || thesaurusLoading}>{thesaurusLoading ? 'Finding…' : 'Find words'}</button></div></form>{thesaurusError && <p className="word-reference-error thesaurus-error">{thesaurusError}</p>}{thesaurusLoading && <div className="word-reference-loading thesaurus-loading"><i />Finding words that fit…</div>}{thesaurusResult && <div className="thesaurus-detail"><p className="thesaurus-query">For <strong>{thesaurusResult.query}</strong></p>{[['Closest matches', thesaurusResult.close], ['Related / formal', thesaurusResult.related], ['Broader alternatives', thesaurusResult.broad]].map(([label, words]) => Array.isArray(words) && words.length > 0 && <section key={String(label)}><h3>{String(label)}</h3><div className="grammar-synonyms">{words.map((word) => <span key={word}>{word}</span>)}</div></section>)}</div>}</aside>}
     {researchGrade && <aside className="research-grade-sidebar" aria-label="AI research and grade"><header><div><p className="eyebrow">AI RESEARCH & GRADE</p><h2>Approx. {researchGrade.grade || '—'}</h2></div><button className="icon-button tiny" onClick={() => setResearchGrade(null)} aria-label="Close research and grade"><X size={16} /></button></header><div className="research-grade-detail">{researchGrade.overview && <p className="research-overview">{researchGrade.overview}</p>}{researchGrade.researchQuery && <small className="research-query">Research topic: {researchGrade.researchQuery}</small>}{researchGrade.strengths.length > 0 && <section><h3>What is working</h3><ul>{researchGrade.strengths.map((item) => <li key={item}>{item}</li>)}</ul></section>}{researchGrade.improvements.length > 0 && <section><h3>Most important next steps</h3><ul>{researchGrade.improvements.map((item) => <li key={item}>{item}</li>)}</ul></section>}{researchGrade.evidence && <section><h3>Evidence</h3><p>{researchGrade.evidence}</p></section>}{researchGrade.reasoning && <section><h3>Reasoning</h3><p>{researchGrade.reasoning}</p></section>}{Object.entries(researchGrade.writingCraft).length > 0 && <section><h3>Writing craft</h3><dl>{Object.entries(researchGrade.writingCraft).map(([label, detail]) => <div key={label}><dt>{label.replace(/([A-Z])/g, ' $1')}</dt><dd>{detail}</dd></div>)}</dl></section>}{researchGrade.researchAdvice.length > 0 && <section><h3>Research direction</h3><ul>{researchGrade.researchAdvice.map((item) => <li key={item}>{item}</li>)}</ul></section>}{researchGrade.sources.length > 0 && <section><h3>Scholarly research leads</h3><div className="research-source-list">{researchGrade.sources.map((source) => <button key={source.url} onClick={() => openExternalLink(source.url)}><strong>{source.title}</strong><span>{[source.publication, source.year, source.type].filter(Boolean).join(' · ')}</span></button>)}</div>{researchGrade.sourceNote && <small>{researchGrade.sourceNote}</small>}</section>}</div></aside>}
     {researchReviewing && <div className="grammar-review-notice research-review-notice" role="status" aria-live="polite"><i /><div><strong>Researching and grading your paper</strong><span>{grammarProgress?.message || 'Finding scholarly research leads and reviewing your evidence locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
     {researchError && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>Research & Grade needs another pass</strong><span>{researchError}</span></div><button className="icon-button tiny" onClick={() => setResearchError('')} aria-label="Dismiss research and grade message"><X size={15} /></button></div>}
@@ -1379,6 +1412,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history"><header><p className="eyebrow">VERSION HISTORY</p><h2>{collectionLabel === 'Lectures' ? 'Lecture timeline' : 'Paper timeline'}</h2><span>Select a checkpoint to view the real document.</span></header>{versionHistoryLoading && <div className="version-history-loading"><div className="word-reference-loading"><i />Loading saved versions…</div></div>}{versionHistoryError && <p className="word-reference-error version-history-error">{versionHistoryError}</p>}{!versionHistoryLoading && <nav className="version-history-timeline" aria-label="Saved versions">{historyDays.map((day) => <section key={day.label}><h3>{day.label}</h3>{day.clusters.map((cluster) => cluster.entries.length === 1 ? renderVersionEntry(cluster.entries[0]) : <div className="version-cluster" key={cluster.id}><button className="version-cluster-toggle" onClick={() => setExpandedVersionGroups((current) => { const next = new Set(current); if (next.has(cluster.id)) next.delete(cluster.id); else next.add(cluster.id); return next })}><ChevronDown className={expandedVersionGroups.has(cluster.id) ? 'expanded' : ''} size={13} /><span><strong>{revisionTimeOnly(cluster.entries[0].createdAt)}</strong><small>{cluster.entries.length} versions</small></span></button>{expandedVersionGroups.has(cluster.id) && <div className="version-cluster-members">{cluster.entries.map((entry) => renderVersionEntry(entry, true))}</div>}</div>)}</section>)}{versionHistory.length === 0 && <p className="version-history-empty">Your first meaningful checkpoint will appear after another editing session.</p>}</nav>}<footer><span><i className="history-added-key" />Added</span><span><i className="history-removed-key" />Removed</span><small>Changes appear directly on the paper.</small></footer></aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /><hr /><ContextMenuAction label="Insert" shortcut="›" onClick={() => setContextSubmenu(contextSubmenu === 'insert' ? null : 'insert')} />{contextSubmenu === 'insert' && <div className="editor-context-submenu" role="menu" aria-label="Insert menu"><ContextMenuAction label="Citation" shortcut="›" onClick={() => window.dispatchEvent(new Event('soflo:open-citation'))} /></div>}</div>}
     {citationMenuOpen && contextMenu && <div className="editor-context-menu citation-menu" style={{ left: contextMenu.x + 205, top: contextMenu.y + 38 }} role="menu" aria-label="Citation styles"><ContextMenuAction label="MLA" shortcut="" onClick={() => insertCitation('mla')} /><ContextMenuAction label="APA" shortcut="" onClick={() => insertCitation('apa')} /><ContextMenuAction label="Chicago" shortcut="" onClick={() => insertCitation('chicago')} /></div>}
+    {paperContextOpen && <PaperContextDialog value={paperContextDraft} onChange={setPaperContextDraft} onClose={() => setPaperContextOpen(false)} onReset={() => setPaperContextDraft(defaultPaperContext)} onSave={savePaperContext} />}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}
     {imageDialog && <ImageDialog source={imageDialog.src} onClose={() => setImageDialog(null)} onSourceChange={(src) => setImageDialog({ src })} onInsert={insertImage} />}
     {tableDialog && <TableDialog table={tableDialog} onClose={() => setTableDialog(null)} onChange={setTableDialog} onInsert={insertTable} />}
@@ -1390,6 +1424,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
 function LinkDialog({ initialUrl, canRemove, onClose, onApply, onRemove }: { initialUrl: string; canRemove: boolean; onClose: () => void; onApply: (url: string) => void; onRemove: () => void }) {
   const [url, setUrl] = useState(initialUrl)
   return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog" aria-label="Add or edit link" onSubmit={(event) => { event.preventDefault(); onApply(url) }}><header><div><p className="eyebrow">LINK</p><h2>{canRemove ? 'Edit link' : 'Add link'}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close link dialog"><X size={18} /></button></header><div className="editor-dialog-content"><label>Web address<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com" inputMode="url" /></label><p>Highlight text first, then apply a link to it.</p></div><footer>{canRemove && <button type="button" className="button button-danger button-small" onClick={onRemove}>Remove link</button>}<span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!url.trim()}>Apply link</button></footer></form></div>
+}
+
+function PaperContextDialog({ value, onChange, onClose, onReset, onSave }: { value: string; onChange: (value: string) => void; onClose: () => void; onReset: () => void; onSave: () => void }) {
+  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog paper-context-dialog" aria-label="AI Paper Context" onSubmit={(event) => { event.preventDefault(); onSave() }}><header><div><p className="eyebrow">AI WRITING</p><h2>AI Paper Context</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close AI Paper Context"><X size={18} /></button></header><div className="editor-dialog-content"><label>What would you like the AI to know about what this document is trying to achieve?<textarea autoFocus rows={7} value={value} onChange={(event) => onChange(event.target.value)} placeholder={defaultPaperContext} /></label><p>SoFlo uses this context when it reviews, grades, defines, and suggests language for this document.</p></div><footer><button type="button" className="button button-quiet" onClick={onReset}>Reset to default</button><span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary">Save context</button></footer></form></div>
 }
 
 function ImageDialog({ source, onClose, onSourceChange, onInsert }: { source: string; onClose: () => void; onSourceChange: (source: string) => void; onInsert: (source: string) => void }) {
@@ -1411,14 +1449,14 @@ function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { lab
   return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
 }
 
-function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onVersionHistory, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onVersionHistory: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
+function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onPaperContext, onVersionHistory, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onPaperContext: () => void; onVersionHistory: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
   const pasteWithoutFormatting = async () => {
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
     <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
     <Divider />
-    <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button><button onClick={onAiThesaurus}>AI Thesaurus</button></ToolbarMenu>
+    <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button onClick={onPaperContext}>AI Paper Context</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button><button onClick={onAiThesaurus}>AI Thesaurus</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="Paragraph"><button onClick={() => editor.chain().focus().setParagraph().run()}><Pilcrow size={15} />Paragraph</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}>Heading 1</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}>Heading 2</button><button onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}>Heading 3</button></ToolbarMenu>
     <Divider />
@@ -1427,8 +1465,8 @@ function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, gramma
     <ToolButton label="Underline" active={editor.isActive('underline')} onClick={() => editor.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16} /></ToolButton>
     <ToolButton label="Strikethrough" active={editor.isActive('strike')} onClick={() => editor.chain().focus().toggleStrike().run()}><Strikethrough size={16} /></ToolButton>
     <ToolbarMenu label="Text size"><button onClick={() => editor.chain().focus().setMark('textStyle', { fontSize: null }).run()}>Default (11 pt)</button>{[9, 10, 11, 12, 14, 16, 18].map((size) => <button onClick={() => editor.chain().focus().setMark('textStyle', { fontSize: `${size}pt` }).run()} key={size}>{size} pt</button>)}</ToolbarMenu>
-    <ToolbarMenu label="Text color" icon={<Palette size={16} />}>{accentColors.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().setColor(color).run()} key={color}><i style={{ background: color }} />{color === '#E7E9F0' ? 'Default' : color}</button>)}<button onClick={() => editor.chain().focus().unsetColor().run()}>Reset color</button></ToolbarMenu>
-    <ToolbarMenu label="Highlight" icon={<Highlighter size={16} />}>{highlights.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().toggleHighlight({ color }).run()} key={color}><i style={{ background: color }} />{color}</button>)}<button onClick={() => editor.chain().focus().unsetHighlight().run()}>Clear highlight</button></ToolbarMenu>
+    <ToolbarMenu label="Text color" icon={<Palette size={16} />}>{accentColors.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().setColor(color).run()} key={color}><i style={{ background: color }} />{color === '#000000' ? 'Black' : color === '#E7E9F0' ? 'Soft white' : color}</button>)}<CustomHexColorControl label="Custom text color" initial="#000000" onApply={(color) => editor.chain().focus().setColor(color).run()} /><button onClick={() => editor.chain().focus().unsetColor().run()}>Reset color</button></ToolbarMenu>
+    <ToolbarMenu label="Highlight" icon={<Highlighter size={16} />}>{highlights.map((color) => <button className="color-choice" onClick={() => editor.chain().focus().toggleHighlight({ color }).run()} key={color}><i style={{ background: color }} />{color}</button>)}<CustomHexColorControl label="Custom highlight" initial="#fff0a3" onApply={(color) => editor.chain().focus().setHighlight({ color }).run()} /><button onClick={() => editor.chain().focus().unsetHighlight().run()}>Clear highlight</button></ToolbarMenu>
     <Divider />
     <ToolButton label="Bullet list" active={editor.isActive('bulletList')} onClick={() => editor.chain().focus().toggleBulletList().run()}><List size={17} /></ToolButton>
     <ToolButton label="Numbered list" active={editor.isActive('orderedList')} onClick={() => editor.chain().focus().toggleOrderedList().updateAttributes('orderedList', { listStyle: 'decimal' }).run()}><ListOrdered size={17} /></ToolButton>
@@ -1483,7 +1521,18 @@ function ToolbarMenu({ label, icon, children, disabled = false, iconOnly = false
     globalThis.document.addEventListener('mousedown', dismiss)
     return () => globalThis.document.removeEventListener('mousedown', dismiss)
   }, [open])
-  return <div className="toolbar-menu"><button ref={anchor} className="toolbar-select" aria-label={label} title={label} disabled={disabled} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}>{icon}{!iconOnly && <span>{label}</span>}{!iconOnly && <ChevronDown size={13} />}</button>{open && position && createPortal(<div ref={popover} className={`toolbar-popover toolbar-popover-floating ${popoverClassName}`} style={position} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}>{children}</div>, globalThis.document.body)}</div>
+  return <div className="toolbar-menu"><button ref={anchor} className="toolbar-select" aria-label={label} title={label} disabled={disabled} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((value) => !value)}>{icon}{!iconOnly && <span>{label}</span>}{!iconOnly && <ChevronDown size={13} />}</button>{open && position && createPortal(<div ref={popover} className={`toolbar-popover toolbar-popover-floating ${popoverClassName}`} style={position} onMouseDown={(event) => { if (!(event.target as Element).closest('input')) event.preventDefault() }} onClick={(event) => { if (!(event.target as Element).closest('.toolbar-custom-color')) setOpen(false) }}>{children}</div>, globalThis.document.body)}</div>
+}
+
+function CustomHexColorControl({ label, initial, onApply }: { label: string; initial: string; onApply: (color: string) => void }) {
+  const [value, setValue] = useState(initial)
+  const valid = /^#[0-9a-fA-F]{6}$/.test(value.trim())
+  const apply = (event: React.FormEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (valid) onApply(value.trim())
+  }
+  return <form className="toolbar-custom-color" onSubmit={apply} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><label>{label}<input value={value} onChange={(event) => setValue(event.target.value)} placeholder="#000000" spellCheck={false} /></label><input type="color" value={valid ? value : initial} aria-label={`${label} picker`} onChange={(event) => setValue(event.target.value)} /><button type="submit" disabled={!valid}>Apply</button></form>
 }
 
 function Divider() { return <span className="toolbar-divider" /> }
