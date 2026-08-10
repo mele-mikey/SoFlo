@@ -562,23 +562,33 @@ fn review_grammar_text_blocking(
         return Ok("[]".into());
     }
     let system_instruction = if quick {
-        "You are SoFlo's quiet, precise academic spelling and mechanics checker. Scan the complete supplied excerpt from beginning to end. Return only one complete valid JSON array: no Markdown, no code fences, no commentary. Return up to 6 clear errors, prioritizing obvious misspellings when there are many. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must always be mechanic. original must be copied exactly from a continuous excerpt of the input, including capitalization. replacement must be the smallest correct replacement. alternatives must be a JSON array with zero to two short strings. Find clear spelling, apostrophe, capitalization, hyphenation, duplicate-space, and basic punctuation errors. Do not skip an obvious common typo because there are other errors. Do not rewrite a sentence, suggest style or fluency changes, alter the writer's voice, flag citations, or flag a proper name merely because it is unfamiliar. Keep original, replacement, and each alternative to one to three words or a short punctuation or space sequence. Keep reason to one short sentence. Return [] only when there are no clear errors."
+        "You are SoFlo's fast English spelling checker. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 3 clear spelling errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic and category must be spelling. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Prioritize obvious misspellings and split-word errors. Report one error per object. Do not report grammar, style, punctuation, proper names, or text that is already correct. Return [] only when there are no clear spelling errors."
     } else {
         "You are SoFlo's rigorous academic writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning. reason must say specifically why the replacement is more formal, precise, clear, or grammatically correct. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
     emit_ai_progress(&app, 12, "Reading your writing");
-    // A quiet spelling pass needs the same reasoning quality as a deliberate
-    // review. The compact companion remains dedicated to word definitions;
-    // the 4B model produces the actual custom spelling marks.
-    let general_model_path = resolve_ai_model_path(&app, &model_path)?;
-    ensure_ai_server(&general_model_path, &app)?;
-    let server_port = AI_SERVER_PORT;
+    let server_port = if quick {
+        let writing_model_path = resolve_word_ai_model_path(&app)?;
+        ensure_word_ai_server(&writing_model_path, &app)?;
+        WORD_AI_SERVER_PORT
+    } else {
+        let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+        ensure_ai_server(&general_model_path, &app)?;
+        AI_SERVER_PORT
+    };
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(if quick { 30 } else { 50 }))
+        .timeout(Duration::from_secs(if quick { 15 } else { 50 }))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let review_sources = vec![source];
+    let review_sources = if quick {
+        split_source_for_ai(&source, 750)
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+    } else {
+        vec![source]
+    };
     let mut suggestions = Vec::new();
     for (index, review_source) in review_sources.iter().enumerate() {
         let progress = 45 + ((index as u8).saturating_mul(38) / review_sources.len().max(1) as u8);
@@ -593,15 +603,19 @@ fn review_grammar_text_blocking(
             server_port,
             system_instruction,
             &request,
-            if quick { 450 } else { 800 },
+            if quick { 320 } else { 800 },
         )?;
         if let Some(array) = json_array_from_response(&output) {
             if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
-                suggestions.extend(items.into_iter().take(if quick { 6 } else { 7 }));
+                suggestions.extend(items.into_iter().take(if quick { 3 } else { 7 }));
             }
         }
     }
-    touch_ai_server();
+    if quick {
+        touch_word_ai_server();
+    } else {
+        touch_ai_server();
+    }
     emit_ai_progress(&app, 90, "Preparing suggestions");
     let output = serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".into());
     emit_ai_progress(&app, 100, "Grammar review ready");

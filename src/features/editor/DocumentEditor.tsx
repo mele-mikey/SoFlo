@@ -28,6 +28,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../../lib/api'
 import { importPdfAsEditableNote } from './pdfImport'
+import { isolateMechanicalChange } from './grammar'
 
 interface DocumentEditorProps {
   document: DocumentDetail
@@ -137,21 +138,6 @@ type ResearchSource = { title: string; publication: string; year: string; type: 
 type ResearchGrade = { grade: string; overview: string; strengths: string[]; improvements: string[]; evidence: string; reasoning: string; writingCraft: Record<string, string>; researchAdvice: string[]; researchQuery: string; sources: ResearchSource[]; sourceNote: string }
 function grammarIssueKey(issue: Pick<GrammarIssue, 'kind' | 'original' | 'replacement'>) {
   return `${issue.kind}\u0000${issue.original.toLocaleLowerCase()}\u0000${issue.replacement.toLocaleLowerCase()}`
-}
-function isolateMechanicalChange(original: string, replacement: string) {
-  const originalParts = original.match(/\s+|\S+/g) ?? []
-  const replacementParts = replacement.match(/\s+|\S+/g) ?? []
-  let prefix = 0
-  while (prefix < originalParts.length && prefix < replacementParts.length && originalParts[prefix].toLocaleLowerCase() === replacementParts[prefix].toLocaleLowerCase()) prefix += 1
-  let originalEnd = originalParts.length
-  let replacementEnd = replacementParts.length
-  while (originalEnd > prefix && replacementEnd > prefix && originalParts[originalEnd - 1].toLocaleLowerCase() === replacementParts[replacementEnd - 1].toLocaleLowerCase()) {
-    originalEnd -= 1
-    replacementEnd -= 1
-  }
-  const narrowedOriginal = originalParts.slice(prefix, originalEnd).join('').trim()
-  const narrowedReplacement = replacementParts.slice(prefix, replacementEnd).join('').trim()
-  return narrowedOriginal && narrowedReplacement ? { original: narrowedOriginal, replacement: narrowedReplacement } : { original, replacement }
 }
 const GrammarReview = Extension.create({
   name: 'grammarReview',
@@ -846,7 +832,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       const source = quick ? nextPassiveGrammarExcerpt() : editor.getText()
       const issues = extractGrammarIssues(await onGrammarReview(source, quick), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       if (quick) {
-        const combined = [...issues, ...grammarIssues.filter((issue) => issue.kind !== 'mechanic' && !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))]
+        const combined = grammarIssues.filter((issue) => {
+          if (ignoredGrammarKeysRef.current.has(grammarIssueKey(issue))) return false
+          return editor.state.doc.textBetween(issue.from, issue.to, ' ').toLocaleLowerCase() === issue.original.toLocaleLowerCase()
+        })
+        for (const issue of issues) {
+          if (!combined.some((current) => current.from === issue.from && current.to === issue.to && current.kind === issue.kind)) combined.push(issue)
+        }
         setGrammarIssues(combined)
         setGrammarDecorations(combined)
       } else if (issues.length) {
