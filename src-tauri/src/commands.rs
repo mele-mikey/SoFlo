@@ -3178,6 +3178,20 @@ struct StudyWebLeafAssignment {
     leaf: String,
 }
 
+#[derive(serde::Deserialize)]
+struct StudyWebThemeBridgePlan {
+    #[serde(default)]
+    connections: Vec<StudyWebThemeBridge>,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebThemeBridge {
+    source_parent: String,
+    target_parent: String,
+    source: String,
+    target: String,
+}
+
 fn default_study_web_relationship_type() -> String {
     "related_to".into()
 }
@@ -3695,7 +3709,19 @@ fn generate_study_web_semantics_layered(
             leaves.push((leaf_id, parent_id.clone(), label, members));
         }
     }
-    let relationships = infer_study_web_relationships(&model_cards, &leaves);
+    let mut relationships = infer_study_web_relationships(&model_cards, &leaves);
+    let parent_themes = parent_buckets
+        .iter()
+        .enumerate()
+        .map(|(index, (label, members))| (format!("parent-{}", index + 1), label.clone(), members.clone()))
+        .collect::<Vec<_>>();
+    emit_ai_progress(&app, 86, "Finding the strongest bridges between themes");
+    relationships.extend(infer_study_web_theme_bridges(
+        &client,
+        port,
+        &parent_themes,
+        &model_cards,
+    ));
     let plan = StudyWebSemanticPlan {
         groups,
         relationships,
@@ -3856,6 +3882,80 @@ fn study_web_label_words(value: &str) -> HashSet<String> {
                 )
         })
         .map(str::to_string)
+        .collect()
+}
+
+fn infer_study_web_theme_bridges(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    themes: &[(String, String, Vec<String>)],
+    cards: &[StudyWebSourceCard],
+) -> Vec<StudyWebSemanticRelationship> {
+    if themes.len() < 2 {
+        return Vec::new();
+    }
+    let material = themes
+        .iter()
+        .map(|(id, label, members)| {
+            let concepts = cards
+                .iter()
+                .filter(|card| members.contains(&card.id))
+                .map(|card| {
+                    serde_json::json!({
+                        "id": card.id,
+                        "term": card.front.chars().take(68).collect::<String>(),
+                        "definition": card.back.chars().take(88).collect::<String>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({ "parent_id": id, "theme": label, "cards": concepts })
+        })
+        .collect::<Vec<_>>();
+    let system = "You are creating the sparse backbone of a study concept web. Return only valid JSON with exactly one key, connections. connections is an array of no more than one fewer than the supplied parent themes. Every item has exactly these string keys: source_parent, target_parent, source, target. parent values must be supplied parent_id values. source and target must be supplied card IDs from their named parent themes. Build a connected, calm concept map whenever the material genuinely supports it: pick the most meaningful card-to-card bridge between neighboring themes, such as a direct structural, functional, causal, sequential, prerequisite, contrast, or interaction relationship. Do not connect themes merely because both are academic material or share a broad subject. Never invent IDs, commentary, labels, markdown, or extra keys.";
+    let prompt = format!(
+        "PARENT THEMES:\n{}\n\nReturn the theme bridges now.",
+        serde_json::to_string(&material).unwrap_or_default()
+    );
+    let raw = match local_chat_text(client, port, system, &prompt, 800) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let Some(plan) = json_object_from_response(&raw)
+        .and_then(|json| serde_json::from_str::<StudyWebThemeBridgePlan>(&json).ok())
+    else {
+        return Vec::new();
+    };
+    let members_by_parent = themes
+        .iter()
+        .map(|(id, _, members)| (id.as_str(), members.iter().map(String::as_str).collect::<HashSet<_>>()))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    plan.connections
+        .into_iter()
+        .filter_map(|bridge| {
+            if bridge.source_parent == bridge.target_parent
+                || !members_by_parent
+                    .get(bridge.source_parent.as_str())
+                    .is_some_and(|members| members.contains(bridge.source.as_str()))
+                || !members_by_parent
+                    .get(bridge.target_parent.as_str())
+                    .is_some_and(|members| members.contains(bridge.target.as_str()))
+            {
+                return None;
+            }
+            let (source, target) = if bridge.source < bridge.target {
+                (bridge.source, bridge.target)
+            } else {
+                (bridge.target, bridge.source)
+            };
+            seen.insert((source.clone(), target.clone())).then_some(StudyWebSemanticRelationship {
+                source,
+                target,
+                relationship_type: "theme_bridge".into(),
+                strength: 0.68,
+            })
+        })
+        .take(themes.len().saturating_sub(1))
         .collect()
 }
 
@@ -4550,8 +4650,11 @@ fn layout_study_web_nodes(
         }
     }
     let parent_columns = (parent_clusters.len().max(1) as f64).sqrt().ceil() as usize;
-    let parent_cell_width = (max_leaf_size.sqrt() * 340.0 + 1_680.0).max(1_900.0);
-    let parent_cell_height = (max_leaf_size.sqrt() * 300.0 + 1_420.0).max(1_650.0);
+    // Start the force layout compactly. Meaningful theme bridges then pull
+    // neighboring systems into one web, while collision forces preserve room
+    // for every card instead of scattering entire themes into distant cells.
+    let parent_cell_width = (max_leaf_size.sqrt() * 210.0 + 900.0).max(1_040.0);
+    let parent_cell_height = (max_leaf_size.sqrt() * 190.0 + 820.0).max(960.0);
     let mut leaf_centers = HashMap::<usize, (f64, f64)>::new();
     for (parent_index, (_, children)) in parent_clusters.iter().enumerate() {
         let parent_x = (parent_index % parent_columns) as f64 * parent_cell_width;
@@ -4567,9 +4670,9 @@ fn layout_study_web_nodes(
             let radius = if count <= 1 {
                 0.0
             } else if count <= 4 {
-                525.0
+                330.0
             } else {
-                620.0 + ((child_index / 5) as f64 * 140.0)
+                390.0 + ((child_index / 5) as f64 * 95.0)
             };
             leaf_centers.insert(
                 *group_index,
@@ -4610,9 +4713,9 @@ fn layout_study_web_nodes(
             let local_radius = if *member_count <= 1 {
                 0.0
             } else if *member_count <= 4 {
-                235.0
+                158.0
             } else {
-                285.0 + ((*member_index / 6) as f64 * 125.0)
+                190.0 + ((*member_index / 6) as f64 * 82.0)
             };
             x += *center_x + angle.cos() * local_radius;
             y += *center_y + angle.sin() * local_radius;
@@ -4622,7 +4725,7 @@ fn layout_study_web_nodes(
             (x / memberships.len() as f64, y / memberships.len() as f64),
         );
     }
-    for _ in 0..180 {
+    for _ in 0..240 {
         let mut delta = cards
             .iter()
             .map(|card| (card.id.clone(), (0.0_f64, 0.0_f64)))
@@ -4634,7 +4737,8 @@ fn layout_study_web_nodes(
                 let dx = a.0 - b.0;
                 let dy = a.1 - b.1;
                 let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-                let force = 70_000.0 / (distance * distance);
+                let force = 38_000.0 / (distance * distance)
+                    + (330.0 - distance).max(0.0) * 0.24;
                 let unit = (dx / distance * force, dy / distance * force);
                 if let Some(value) = delta.get_mut(&cards[left].id) {
                     value.0 += unit.0;
@@ -4651,7 +4755,7 @@ fn layout_study_web_nodes(
                 let dx = b.0 - a.0;
                 let dy = b.1 - a.1;
                 let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-                let force = (distance - 425.0) * 0.018 * strength;
+                let force = (distance - 335.0) * 0.032 * strength;
                 let unit = (dx / distance * force, dy / distance * force);
                 if let Some(value) = delta.get_mut(source) {
                     value.0 += unit.0;

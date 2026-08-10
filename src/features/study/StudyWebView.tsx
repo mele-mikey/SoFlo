@@ -36,21 +36,16 @@ function resolveNodeOverlap(nodes: StudyWebNode[], expanded: string | null, card
 function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number }>) {
   const childrenByParent = new Map<string, StudyWebGroup[]>()
   for (const group of groups) if (group.parentGroupId) childrenByParent.set(group.parentGroupId, [...(childrenByParent.get(group.parentGroupId) ?? []), group])
-  const collectCardIds = (group: StudyWebGroup, visited = new Set<string>()): string[] => {
-    if (visited.has(group.id)) return []
-    visited.add(group.id)
-    const cardIds = new Set(group.cardIds)
-    for (const child of childrenByParent.get(group.id) ?? []) for (const cardId of collectCardIds(child, visited)) cardIds.add(cardId)
-    return [...cardIds]
-  }
   return groups.flatMap((group) => {
-    const groupNodes = collectCardIds(group).map((id) => nodes.get(id)).filter((node): node is { x: number; y: number } => Boolean(node))
+    // The narrow label is the useful label on the canvas. Broad parent themes
+    // organize the layout internally, but repeating them in the middle makes
+    // the web harder to scan.
+    if (childrenByParent.has(group.id)) return []
+    const groupNodes = group.cardIds.map((id) => nodes.get(id)).filter((node): node is { x: number; y: number } => Boolean(node))
     if (!groupNodes.length) return []
-    const parent = childrenByParent.has(group.id)
     const minX = Math.min(...groupNodes.map((node) => node.x))
-    const maxX = Math.max(...groupNodes.map((node) => node.x + nodeWidth))
     const minY = Math.min(...groupNodes.map((node) => node.y))
-    return [{ id: group.id, label: group.label, parent, x: parent ? (minX + maxX) / 2 : minX, y: minY - (parent ? 68 : 31) }]
+    return [{ id: group.id, label: group.label, parent: false, x: minX, y: minY - 31 }]
   })
 }
 
