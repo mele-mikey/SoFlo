@@ -10,7 +10,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { api } from './lib/api'
-import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureSummary, SecurityStatus, Semester } from './lib/types'
+import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureSummary, SecurityStatus, Semester, StudyWebDetail, StudyWebSummary } from './lib/types'
 import { ClassView } from './features/classes/ClassView'
 import { DocumentEditor } from './features/editor/DocumentEditor'
 import { importAiFormattedNote, importPdfAsEditableNote, isLikelyMlaPaperImport } from './features/editor/pdfImport'
@@ -24,6 +24,7 @@ import { ArchiveView } from './features/organization/ArchiveView'
 import { SettingsView } from './features/settings/SettingsView'
 import { HelpView } from './features/help/HelpView'
 import { StudyView } from './features/study/StudyView'
+import { StudyWebView } from './features/study/StudyWebView'
 
 type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
@@ -84,12 +85,16 @@ function App() {
   const [sets, setSets] = useState<FlashcardSetSummary[]>([])
   const [trashedSets, setTrashedSets] = useState<FlashcardSetSummary[]>([])
   const [allCards, setAllCards] = useState<Flashcard[]>([])
+  const [studyWebs, setStudyWebs] = useState<StudyWebSummary[]>([])
   const [archivedSemesters, setArchivedSemesters] = useState<Semester[]>([])
   const [archivedClasses, setArchivedClasses] = useState<CourseClass[]>([])
   const [recentDocuments, setRecentDocuments] = useState<DocumentSummary[]>([])
   const [activeDocument, setActiveDocument] = useState<DocumentDetail | null>(null)
   const [activeLecture, setActiveLecture] = useState<LectureDetail | null>(null)
   const [activeSet, setActiveSet] = useState<FlashcardSetDetail | null>(null)
+  const [activeStudySets, setActiveStudySets] = useState<FlashcardSetDetail[]>([])
+  const [activeStudyWeb, setActiveStudyWeb] = useState<StudyWebDetail | null>(null)
+  const [activeStudyWebSet, setActiveStudyWebSet] = useState<FlashcardSetDetail | null>(null)
   const [modal, setModal] = useState<ModalState>(null)
   const [commandOpen, setCommandOpen] = useState(false)
   const [globalFindOpen, setGlobalFindOpen] = useState(false)
@@ -123,12 +128,13 @@ function App() {
   }, [showToast])
   const loadClassContent = useCallback(async (classId: string) => {
     try {
-      const [nextDocuments, nextFolders, nextLectures, nextSets, nextCards] = await Promise.all([api.listDocuments(classId), api.listDocumentFolders(classId), api.listLectures(classId), api.listSets(classId), api.listAllCards(classId)])
+      const [nextDocuments, nextFolders, nextLectures, nextSets, nextCards, nextStudyWebs] = await Promise.all([api.listDocuments(classId), api.listDocumentFolders(classId), api.listLectures(classId), api.listSets(classId), api.listAllCards(classId), api.listStudyWebs(classId)])
       setDocuments(nextDocuments)
       setDocumentFolders(nextFolders)
       setLectures(nextLectures)
       setSets(nextSets)
       setAllCards(nextCards)
+      setStudyWebs(nextStudyWebs)
     } catch (error) { showToast(error instanceof Error ? error.message : 'Class materials could not be loaded.', 'error') }
   }, [showToast])
   useEffect(() => { void loadLibrary() }, [loadLibrary])
@@ -143,7 +149,7 @@ function App() {
     try { setWordAiModelReady(await api.wordAiModelReady()) } catch { setWordAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
   useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, refreshWordAiModelStatus])
-  const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' ? view.classId : null
+  const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' || view.kind === 'studyWeb' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])
   useEffect(() => {
     if (view.kind !== 'class' || view.tab !== 'syllabus') return
@@ -161,7 +167,19 @@ function App() {
   useEffect(() => {
     if (view.kind === 'document') { setActiveDocument(null); void api.getDocument(view.documentId).then(setActiveDocument).catch(() => showToast('That paper could not be opened.', 'error')) }
     if (view.kind === 'lecture') { setActiveLecture(null); void api.getLecture(view.lectureId).then(setActiveLecture).catch(() => showToast('That lecture could not be opened.', 'error')) }
-    if (view.kind === 'flashcardSet' || view.kind === 'study') { setActiveSet(null); void api.getSet(view.setId).then(setActiveSet).catch(() => showToast('That flashcard set could not be opened.', 'error')) }
+    if (view.kind === 'flashcardSet') { setActiveSet(null); void api.getSet(view.setId).then(setActiveSet).catch(() => showToast('That flashcard set could not be opened.', 'error')) }
+    if (view.kind === 'study') {
+      setActiveStudySets([])
+      void Promise.all(view.setIds.map((setId) => api.getSet(setId))).then(setActiveStudySets).catch(() => showToast('One or more flashcard sets could not be opened.', 'error'))
+    }
+    if (view.kind === 'studyWeb') {
+      setActiveStudyWeb(null)
+      setActiveStudyWebSet(null)
+      void api.getStudyWeb(view.webId).then(async (web) => {
+        setActiveStudyWeb(web)
+        setActiveStudyWebSet(await api.getSet(web.flashcardSetId))
+      }).catch(() => showToast('That Study Web could not be opened.', 'error'))
+    }
   }, [showToast, view])
   useEffect(() => {
     setWritingModelDeferred(false)
@@ -447,6 +465,26 @@ function App() {
       await loadClassContent(targetClassId); setModal(null); navigate({ kind: 'flashcardSet', classId: targetClassId, setId: set.id }); showToast(`${cards.length} flashcards created.`)
     } catch (error) { console.error('SoFlo AI flashcard generation failed.', error); showToast(aiFailureMessage(error), 'error') } finally { setAiWorking(false); setAiProgress(null) }
   }
+  const createStudyWeb = async (target: FlashcardSetSummary, existingWebId?: string) => {
+    try {
+      const modelPath = await ensureAiModel()
+      if (!modelPath) throw new Error('Turn on AI in Settings to create a Study Web.')
+      setAiWorking(true)
+      setAiProgress({ progress: 3, message: existingWebId ? 'Preparing your Study Web again' : 'Preparing your Study Web' })
+      const web = await api.generateStudyWeb({ setId: target.id, modelPath, studyWebId: existingWebId })
+      await loadClassContent(target.classId)
+      const sourceSet = await api.getSet(target.id)
+      setActiveStudyWeb(web)
+      setActiveStudyWebSet(sourceSet)
+      navigate({ kind: 'studyWeb', classId: target.classId, webId: web.id })
+      showToast(existingWebId ? 'Study Web regenerated.' : 'Study Web created.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'SoFlo could not create that Study Web.', 'error')
+    } finally {
+      setAiWorking(false)
+      setAiProgress(null)
+    }
+  }
   const updateDocument = (partial: Partial<Pick<DocumentDetail, 'content' | 'contentPlain' | 'title'>>) => {
     setActiveDocument((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleDocumentSave(next); return next })
   }
@@ -569,7 +607,7 @@ function App() {
       return true
     } catch (error) { showToast(error instanceof Error ? error.message : 'The walkthrough flashcards could not be prepared.', 'error'); return false }
   }
-  const startWalkthroughFlashcards = () => { if (activeSet) navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode: 'flashcards' }) }
+  const startWalkthroughFlashcards = () => { if (activeSet) navigate({ kind: 'study', classId: activeSet.classId, setIds: [activeSet.id], mode: 'flashcards' }) }
   const openWalkthroughFlashcardSets = () => { if (activeLecture) navigate({ kind: 'class', classId: activeLecture.classId, tab: 'flashcards' }) }
   const removeWalkthroughExample = async () => {
     if (!library) return false
@@ -620,11 +658,12 @@ function App() {
         {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} wordAiModelReady={wordAiModelReady} onModelsUpdated={() => void refreshWordAiModelStatus()} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} onStartWalkthrough={() => library.settings.walkthroughExampleClassId ? setModal({ type: 'restartWalkthrough' }) : void startWalkthrough()} />}
         {view.kind === 'help' && <HelpView />}
         {view.kind === 'archive' && <ArchiveView semesters={archivedSemesters} classes={archivedClasses} onRestore={(course) => void restoreClass(course)} />}
-        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onRenameDocumentFolder={(id, title) => void renamePaperFolder(id, title)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setId, mode: 'learn', cardIds })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} />}
+        {view.kind === 'class' && activeCourse && <ClassView course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus} aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} studyWebs={studyWebs} onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()} onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()} onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })} onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })} onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)} onTrashDocument={(document) => void trashPaper(document)} onDuplicateDocument={(document, title) => void duplicatePaper(document, title)} onBulkRename={(papers) => void bulkRenamePapers(papers)} onGroupDocuments={(id, targetId) => void groupPapers(id, targetId)} onUngroupDocument={(id) => void ungroupPaper(id)} onRenameDocumentFolder={(id, title) => void renamePaperFolder(id, title)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })} onStudy={(setIds, mode, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds, mode, cardIds })} onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds: [setId], mode: 'learn', cardIds })} onCreateStudyWeb={(set) => void createStudyWeb(set)} onOpenStudyWeb={(webId) => navigate({ kind: 'studyWeb', classId: activeCourse.id, webId })} onDuplicateSet={(set, title) => void duplicateSet(set, title)} onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled && !writingModelDeferred} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listDocumentRevisions(activeDocument.id)} onReleaseAi={releaseAiModel} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
         {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
-        {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
-        {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => { void api.getSet(activeSet.id).then(setActiveSet); navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id }) }} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
+        {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setIds: [activeSet.id], mode })} onCreateStudyWeb={() => { const summary = sets.find((item) => item.id === activeSet.id); if (summary) void createStudyWeb(summary) }} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
+        {view.kind === 'study' && (activeStudySets.length ? <StudyView sets={activeStudySets} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'flashcards' })} onModeChange={(mode) => navigate({ kind: 'study', classId: view.classId, setIds: view.setIds, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
+        {view.kind === 'studyWeb' && (activeStudyWeb && activeStudyWebSet ? <StudyWebView web={activeStudyWeb} set={activeStudyWebSet} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'flashcards' })} onRegenerate={() => { const summary = sets.find((item) => item.id === activeStudyWeb.flashcardSetId); if (summary) void createStudyWeb(summary, activeStudyWeb.id) }} onStudyCard={(cardId) => navigate({ kind: 'study', classId: view.classId, setIds: [activeStudyWeb.flashcardSetId], mode: 'flashcards', cardIds: [cardId] })} /> : <LoadingView />)}
       </section>
     </div>
     <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} classes={library.classes} onNavigate={navigate} onNewNote={() => void createDocument()} onNewSet={() => void createSet()} />

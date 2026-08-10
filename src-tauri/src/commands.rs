@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     net::{SocketAddr, TcpListener, TcpStream},
@@ -3062,6 +3063,217 @@ pub fn list_all_cards(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[derive(Clone)]
+struct StudyWebSourceCard {
+    id: String,
+    front: String,
+    back: String,
+    updated_at: String,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebSemanticPlan {
+    #[serde(default)]
+    groups: Vec<StudyWebSemanticGroup>,
+    #[serde(default)]
+    relationships: Vec<StudyWebSemanticRelationship>,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebSemanticGroup {
+    id: String,
+    label: String,
+    #[serde(default)]
+    members: Vec<String>,
+    #[serde(default, alias = "parentId")]
+    parent_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebSemanticRelationship {
+    source: String,
+    target: String,
+    #[serde(default = "default_study_web_relationship_type", alias = "relationshipType")]
+    relationship_type: String,
+    #[serde(default = "default_study_web_strength")]
+    strength: f64,
+}
+
+fn default_study_web_relationship_type() -> String { "related_to".into() }
+fn default_study_web_strength() -> f64 { 0.5 }
+
+fn study_web_source(database: &Database, set_id: &str) -> CommandResult<(String, String, Vec<StudyWebSourceCard>)> {
+    let connection = database.open()?;
+    let (class_id, title): (String, String) = connection.query_row("SELECT class_id, title FROM flashcard_sets WHERE id=?1 AND deleted_at IS NULL", [set_id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|_| "That flashcard set could not be found.".to_string())?;
+    let mut statement = connection.prepare("SELECT id, front, back, updated_at FROM flashcards WHERE set_id=?1 ORDER BY position ASC, created_at ASC").map_err(|error| error.to_string())?;
+    let cards = statement.query_map([set_id], |row| Ok(StudyWebSourceCard { id: row.get(0)?, front: row.get(1)?, back: row.get(2)?, updated_at: row.get(3)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok((class_id, title, cards))
+}
+
+fn study_web_source_hash(cards: &[StudyWebSourceCard]) -> String {
+    cards.iter().map(|card| format!("{}:{}:{}:{}", card.id, card.front, card.back, card.updated_at)).collect::<Vec<_>>().join("\u{1f}")
+}
+
+fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<StudyWebDetail> {
+    let (id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at): (String, String, String, String, String, String, String) = connection.query_row("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).map_err(|_| "That Study Web could not be found.".to_string())?;
+    let mut node_statement = connection.prepare("SELECT flashcard_id, x, y, manually_positioned FROM study_web_nodes WHERE study_web_id=?1 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
+    let nodes = node_statement.query_map([&id], |row| Ok(StudyWebNode { card_id: row.get(0)?, x: row.get(1)?, y: row.get(2)?, manually_positioned: row.get::<_, i32>(3)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut group_statement = connection.prepare("SELECT id, label, parent_group_id FROM study_web_groups WHERE study_web_id=?1 ORDER BY label COLLATE NOCASE").map_err(|error| error.to_string())?;
+    let group_rows = group_statement.query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut groups = Vec::new();
+    for (group_id, label, parent_group_id) in group_rows {
+        let mut members = connection.prepare("SELECT flashcard_id FROM study_web_group_members WHERE study_web_id=?1 AND group_id=?2 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
+        let card_ids = members.query_map(params![&id, &group_id], |row| row.get(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<String>, _>>().map_err(|error| error.to_string())?;
+        groups.push(StudyWebGroup { id: group_id, label, parent_group_id, card_ids });
+    }
+    let mut relationship_statement = connection.prepare("SELECT id, source_flashcard_id, target_flashcard_id, relationship_type, strength FROM study_web_relationships WHERE study_web_id=?1 ORDER BY strength DESC, id").map_err(|error| error.to_string())?;
+    let relationships = relationship_statement.query_map([&id], |row| Ok(StudyWebRelationship { id: row.get(0)?, source_card_id: row.get(1)?, target_card_id: row.get(2)?, relationship_type: row.get(3)?, strength: row.get(4)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let (_, _, cards) = study_web_source_from_connection(connection, &flashcard_set_id)?;
+    Ok(StudyWebDetail { id, class_id, flashcard_set_id, name, generated_at, updated_at, out_of_date: source_hash != study_web_source_hash(&cards), nodes, groups, relationships })
+}
+
+fn study_web_source_from_connection(connection: &Connection, set_id: &str) -> CommandResult<(String, String, Vec<StudyWebSourceCard>)> {
+    let (class_id, title): (String, String) = connection.query_row("SELECT class_id, title FROM flashcard_sets WHERE id=?1", [set_id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|_| "That flashcard set could not be found.".to_string())?;
+    let mut statement = connection.prepare("SELECT id, front, back, updated_at FROM flashcards WHERE set_id=?1 ORDER BY position ASC, created_at ASC").map_err(|error| error.to_string())?;
+    let cards = statement.query_map([set_id], |row| Ok(StudyWebSourceCard { id: row.get(0)?, front: row.get(1)?, back: row.get(2)?, updated_at: row.get(3)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok((class_id, title, cards))
+}
+
+#[tauri::command]
+pub fn list_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> {
+    let connection = database.open()?;
+    let mut statement = connection.prepare("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE class_id=?1 ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
+    let rows = statement.query_map([&class_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))).map_err(|error| error.to_string())?;
+    let mut webs = Vec::new();
+    for row in rows {
+        let (id, class_id, set_id, name, source_hash, generated_at, updated_at) = row.map_err(|error| error.to_string())?;
+        let card_count = connection.query_row("SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
+        let group_count = connection.query_row("SELECT COUNT(*) FROM study_web_groups WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
+        let (_, _, cards) = study_web_source_from_connection(&connection, &set_id)?;
+        webs.push(StudyWebSummary { id, class_id, flashcard_set_id: set_id, name, card_count, group_count, generated_at, updated_at, out_of_date: source_hash != study_web_source_hash(&cards) });
+    }
+    Ok(webs)
+}
+
+#[tauri::command]
+pub fn get_study_web(database: State<'_, Database>, id: String) -> CommandResult<StudyWebDetail> { read_study_web_detail(&database.open()?, &id) }
+
+#[tauri::command]
+pub fn save_study_web_node_position(database: State<'_, Database>, input: SaveStudyWebNodePositionInput) -> CommandResult<()> {
+    if !input.x.is_finite() || !input.y.is_finite() { return Err("That Study Web position is invalid.".into()); }
+    let connection = database.open()?;
+    connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1 WHERE study_web_id=?3 AND flashcard_id=?4", params![input.x, input.y, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+    connection.execute("UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.study_web_id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn generate_study_web(app: tauri::AppHandle, database: State<'_, Database>, set_id: String, model_path: String, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
+    let database = database.inner().clone();
+    let (class_id, set_title, cards) = study_web_source(&database, &set_id)?;
+    if cards.len() < 2 { return Err("Add a few more cards before creating a Study Web.".into()); }
+    let app_for_ai = app.clone();
+    let cards_for_ai = cards.clone();
+    let semantic = tauri::async_runtime::spawn_blocking(move || generate_study_web_semantics(app_for_ai, model_path, cards_for_ai)).await.map_err(|_| "SoFlo's Study Web task stopped unexpectedly.".to_string())??;
+    save_generated_study_web(&database, &class_id, &set_id, &set_title, &cards, semantic, study_web_id)
+}
+
+fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards: Vec<StudyWebSourceCard>) -> CommandResult<StudyWebSemanticPlan> {
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
+    emit_ai_progress(&app, 8, "Starting your private local model");
+    let port = ensure_ai_server(&model_path, &app)?;
+    emit_ai_progress(&app, 30, "Finding meaningful concept relationships");
+    let material = cards.iter().take(180).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(120).collect::<String>(), "definition": card.back.chars().take(360).collect::<String>() })).collect::<Vec<_>>();
+    let prompt = format!("FLASHCARDS:\n{}\n\nReturn the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
+    let system = "You organize an existing flashcard set into a calm academic concept web. Return JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short meaningful category\",\"members\":[\"flashcard id\"],\"parentId\":null}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"belongs_to|example_of|part_of|causes|requires|precedes|contrasts_with|related_to|produces|contains\",\"strength\":0.0}]}. Use only supplied IDs. Identify a few useful overlapping groups and only strong, academically meaningful relationships. Do not invent cards, coordinates, markdown, or commentary. Include every card in at least one group when possible. Keep the graph readable: no duplicate or self connections.";
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let raw = local_chat_text(&client, port, system, &prompt, 6000)?;
+    emit_ai_progress(&app, 82, "Validating concept relationships");
+    touch_ai_server();
+    let json = json_object_from_response(&raw).ok_or_else(|| "SoFlo could not read the Study Web the local model returned.".to_string())?;
+    let plan = serde_json::from_str::<StudyWebSemanticPlan>(&json).map_err(|_| "SoFlo could not understand the Study Web relationships the local model returned.".to_string())?;
+    emit_ai_progress(&app, 100, "Arranging your Study Web");
+    Ok(plan)
+}
+
+fn save_generated_study_web(database: &Database, class_id: &str, set_id: &str, set_title: &str, cards: &[StudyWebSourceCard], plan: StudyWebSemanticPlan, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
+    let known = cards.iter().map(|card| card.id.clone()).collect::<HashSet<_>>();
+    let mut semantic_group_ids = HashSet::new();
+    let mut groups = plan.groups.into_iter().filter_map(|group| {
+        let id = group.id.trim().to_string();
+        let label = group.label.trim().chars().take(72).collect::<String>();
+        if id.is_empty() || label.is_empty() || !semantic_group_ids.insert(id.clone()) { return None; }
+        let members = group.members.into_iter().filter(|member| known.contains(member)).collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
+        if members.is_empty() { return None; }
+        Some((id, label, group.parent_id, members))
+    }).collect::<Vec<_>>();
+    let grouped = groups.iter().flat_map(|(_, _, _, members)| members.iter().cloned()).collect::<HashSet<_>>();
+    let missing = cards.iter().filter(|card| !grouped.contains(&card.id)).map(|card| card.id.clone()).collect::<Vec<_>>();
+    if !missing.is_empty() { groups.push(("additional".into(), "Additional concepts".into(), None, missing)); }
+    if groups.is_empty() { groups.push(("core".into(), "Core concepts".into(), None, cards.iter().map(|card| card.id.clone()).collect())); }
+    let mut seen_edges = HashSet::new();
+    let mut edges = Vec::new();
+    for relationship in plan.relationships {
+        if !known.contains(&relationship.source) || !known.contains(&relationship.target) || relationship.source == relationship.target { continue; }
+        let (source, target) = if relationship.source < relationship.target { (relationship.source, relationship.target) } else { (relationship.target, relationship.source) };
+        if !seen_edges.insert((source.clone(), target.clone())) { continue; }
+        let relationship_type = relationship.relationship_type.trim().chars().take(32).collect::<String>();
+        edges.push((source, target, if relationship_type.is_empty() { "related_to".into() } else { relationship_type }, relationship.strength.clamp(0.1, 1.0)));
+    }
+    let positions = layout_study_web_nodes(cards, &groups, &edges);
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let web_id = study_web_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    if let Some(existing_set) = transaction.query_row("SELECT flashcard_set_id FROM study_webs WHERE id=?1", [&web_id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())? {
+        if existing_set != set_id { return Err("That Study Web belongs to a different flashcard set.".into()); }
+        transaction.execute("DELETE FROM study_webs WHERE id=?1", [&web_id]).map_err(|error| error.to_string())?;
+    }
+    transaction.execute("INSERT INTO study_webs (id, class_id, flashcard_set_id, name, source_hash) VALUES (?1,?2,?3,?4,?5)", params![&web_id, class_id, set_id, format!("{} Study Web", set_title.trim()), study_web_source_hash(cards)]).map_err(|error| error.to_string())?;
+    let mut saved_group_ids = HashMap::new();
+    for (semantic_id, label, _, members) in &groups {
+        let group_id = Uuid::new_v4().to_string();
+        saved_group_ids.insert(semantic_id.clone(), group_id.clone());
+        transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, parent_group_id) VALUES (?1,?2,?3,NULL)", params![&group_id, &web_id, label]).map_err(|error| error.to_string())?;
+        for card_id in members { transaction.execute("INSERT INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, &group_id, card_id]).map_err(|error| error.to_string())?; }
+    }
+    for (semantic_id, _, parent_semantic_id, _) in &groups {
+        let Some(parent_semantic_id) = parent_semantic_id else { continue; };
+        let (Some(group_id), Some(parent_group_id)) = (saved_group_ids.get(semantic_id), saved_group_ids.get(parent_semantic_id)) else { continue; };
+        transaction.execute("UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2", params![parent_group_id, group_id]).map_err(|error| error.to_string())?;
+    }
+    for card in cards { let (x, y) = positions.get(&card.id).copied().unwrap_or((0.0, 0.0)); transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y) VALUES (?1,?2,?3,?4)", params![&web_id, &card.id, x, y]).map_err(|error| error.to_string())?; }
+    for (source, target, relationship_type, strength) in edges { transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, source, target, relationship_type, strength]).map_err(|error| error.to_string())?; }
+    transaction.commit().map_err(|error| error.to_string())?;
+    read_study_web_detail(&database.open()?, &web_id)
+}
+
+fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, String, Option<String>, Vec<String>)], edges: &[(String, String, String, f64)]) -> HashMap<String, (f64, f64)> {
+    let count = cards.len().max(1) as f64;
+    let radius = (count.sqrt() * 220.0).max(360.0);
+    let mut primary_group = HashMap::new();
+    for (index, (_, _, _, members)) in groups.iter().enumerate() { for card_id in members { primary_group.entry(card_id.clone()).or_insert(index); } }
+    let mut positions = HashMap::new();
+    for (index, card) in cards.iter().enumerate() {
+        let group_index = *primary_group.get(&card.id).unwrap_or(&0);
+        let group_angle = (group_index as f64 / groups.len().max(1) as f64) * std::f64::consts::TAU;
+        let local_angle = (index as f64 * 2.399_963_229_728_653) + group_angle;
+        let group_radius = if groups.len() <= 1 { 0.0 } else { radius };
+        positions.insert(card.id.clone(), (group_angle.cos() * group_radius + local_angle.cos() * 160.0, group_angle.sin() * group_radius + local_angle.sin() * 160.0));
+    }
+    for _ in 0..180 {
+        let mut delta = cards.iter().map(|card| (card.id.clone(), (0.0_f64, 0.0_f64))).collect::<HashMap<_, _>>();
+        for left in 0..cards.len() { for right in left + 1..cards.len() {
+            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 18_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
+            if let Some(value) = delta.get_mut(&cards[left].id) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(&cards[right].id) { value.0 -= unit.0; value.1 -= unit.1; }
+        }}
+        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 280.0) * 0.018 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
+        for (id, movement) in delta { if let Some(position) = positions.get_mut(&id) { position.0 += movement.0.clamp(-18.0, 18.0); position.1 += movement.1.clamp(-18.0, 18.0); } }
+    }
+    let min_x = positions.values().map(|position| position.0).fold(f64::INFINITY, f64::min); let min_y = positions.values().map(|position| position.1).fold(f64::INFINITY, f64::min);
+    for position in positions.values_mut() { position.0 = (position.0 - min_x + 240.0).round(); position.1 = (position.1 - min_y + 220.0).round(); }
+    positions
 }
 
 #[tauri::command]

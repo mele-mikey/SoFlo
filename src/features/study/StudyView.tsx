@@ -5,7 +5,7 @@ import type { Flashcard, FlashcardSetDetail } from '../../lib/types'
 import { createQuestion, createTest, isCorrect, shuffled, type StudyQuestion, type TestOptions } from './engine'
 
 interface StudyViewProps {
-  set: FlashcardSetDetail
+  sets: FlashcardSetDetail[]
   mode: 'flashcards' | 'learn' | 'test' | 'match' | 'teachItBack'
   cardIds?: string[]
   aiEnabled: boolean
@@ -41,37 +41,42 @@ function parseTeachGrade(raw: string): TeachGrade | null {
   } catch { return null }
 }
 
-export function StudyView({ set, mode, cardIds, aiEnabled, onGenerateTeachQuestion, onGradeTeachAnswer, onBack, onModeChange }: StudyViewProps) {
-  const sessionRef = useRef<string | null>(null)
+export function StudyView({ sets, mode, cardIds, aiEnabled, onGenerateTeachQuestion, onGradeTeachAnswer, onBack, onModeChange }: StudyViewProps) {
+  const sessionRef = useRef<Record<string, string>>({})
+  const set = sets[0]
   const cards = useMemo(
-    () => cardIds?.length ? set.cards.filter((card) => cardIds.includes(card.id)) : set.cards,
-    [cardIds, set.cards],
+    () => {
+      const allCards = sets.flatMap((item) => item.cards)
+      return cardIds?.length ? allCards.filter((card) => cardIds.includes(card.id)) : allCards
+    },
+    [cardIds, sets],
   )
-  const [progress, setProgress] = useState(set.progress)
+  const [progress, setProgress] = useState(() => sets.flatMap((item) => item.progress))
   const mastery = useMemo(() => progress.reduce<Record<string, number>>((summary, item) => {
     summary[item.mastery] = (summary[item.mastery] ?? 0) + 1
     return summary
   }, {}), [progress])
 
-  useEffect(() => setProgress(set.progress), [set.id, set.progress])
+  useEffect(() => setProgress(sets.flatMap((item) => item.progress)), [sets])
   useEffect(() => {
     let disposed = false
-    void api.startStudySession({ setId: set.id, mode }).then((session) => {
-      if (disposed) void api.completeStudySession(session.id)
-      else sessionRef.current = session.id
-    }).catch(() => { sessionRef.current = null })
+    sessionRef.current = {}
+    void Promise.all(sets.map((item) => api.startStudySession({ setId: item.id, mode }).then((session) => ({ setId: item.id, sessionId: session.id })))).then((sessions) => {
+      if (disposed) sessions.forEach((session) => void api.completeStudySession(session.sessionId))
+      else sessionRef.current = Object.fromEntries(sessions.map((session) => [session.setId, session.sessionId]))
+    }).catch(() => { sessionRef.current = {} })
 
     return () => {
       disposed = true
-      const sessionId = sessionRef.current
-      sessionRef.current = null
-      if (sessionId) void api.completeStudySession(sessionId)
+      const sessions = Object.values(sessionRef.current)
+      sessionRef.current = {}
+      sessions.forEach((sessionId) => void api.completeStudySession(sessionId))
     }
-  }, [mode, set.id])
+  }, [mode, sets])
 
   const record: RecordResponse = (cardId, isCorrectAnswer, questionType, answer) => {
     void api.recordCardResponse(cardId, isCorrectAnswer, {
-      sessionId: sessionRef.current ?? undefined,
+      sessionId: sessionRef.current[cards.find((card) => card.id === cardId)?.setId ?? ''] ?? undefined,
       mode,
       questionType,
       answer,
@@ -87,14 +92,14 @@ export function StudyView({ set, mode, cardIds, aiEnabled, onGenerateTeachQuesti
 
   return <main className="study-view">
     <header className="study-header">
-      <button className="back-button" onClick={onBack}><ChevronLeft size={18} /> {set.title}</button>
+      <button className="back-button" onClick={onBack}><ChevronLeft size={18} /> {sets.length === 1 ? set?.title : `${sets.length} selected sets`}</button>
       <nav>{(['flashcards', 'learn', 'test', 'match', 'teachItBack'] as const).map((item) => <button key={item} disabled={item === 'teachItBack' && !aiEnabled} title={item === 'teachItBack' && !aiEnabled ? 'Enable AI in Settings to use Teach It Back' : undefined} onClick={() => onModeChange(item)} className={`${mode === item ? 'study-tab active' : 'study-tab'}${item === 'teachItBack' ? ' ai-study-tab' : ''}`}>{item === 'flashcards' ? 'Flashcards' : item === 'learn' ? 'Learn' : item === 'test' ? 'Test' : item === 'match' ? 'Match' : <><Sparkles size={12} /> Teach It Back</>}</button>)}</nav>
       <span className="study-local">{mastery.mastered ?? 0} mastered · {mastery.needsWork ?? 0} need work</span>
     </header>
     {mode === 'flashcards' && <Flashcards cards={cards} onRecord={record} />}
     {mode === 'learn' && <Learn cards={cards} onRecord={record} />}
-    {mode === 'test' && <Test setId={set.id} cards={cards} onRecord={record} />}
-    {mode === 'match' && <Match setId={set.id} cards={cards} onRecord={record} />}
+    {mode === 'test' && <Test setId={set?.id ?? ''} cards={cards} onRecord={record} />}
+    {mode === 'match' && <Match setId={set?.id ?? ''} cards={cards} onRecord={record} />}
     {mode === 'teachItBack' && <TeachItBack cards={cards} onRecord={record} onGenerateQuestion={onGenerateTeachQuestion} onGradeAnswer={onGradeTeachAnswer} />}
   </main>
 }

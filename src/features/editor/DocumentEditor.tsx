@@ -1439,6 +1439,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     element.focus()
   }
   const focusBlankPaper = (event: React.MouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return
     const target = event.target as HTMLElement
     if (target.closest('.soflo-editor, .document-title, button, input, textarea, a, .paper-running-header, .paper-running-footer')) return
     event.preventDefault()

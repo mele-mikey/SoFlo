@@ -173,6 +173,63 @@ pub struct FlashcardSetDetail {
     pub updated_at: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyWebSummary {
+    pub id: String,
+    pub class_id: String,
+    pub flashcard_set_id: String,
+    pub name: String,
+    pub card_count: i32,
+    pub group_count: i32,
+    pub generated_at: String,
+    pub updated_at: String,
+    pub out_of_date: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyWebGroup {
+    pub id: String,
+    pub label: String,
+    pub parent_group_id: Option<String>,
+    pub card_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyWebNode {
+    pub card_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub manually_positioned: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyWebRelationship {
+    pub id: String,
+    pub source_card_id: String,
+    pub target_card_id: String,
+    pub relationship_type: String,
+    pub strength: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyWebDetail {
+    pub id: String,
+    pub class_id: String,
+    pub flashcard_set_id: String,
+    pub name: String,
+    pub generated_at: String,
+    pub updated_at: String,
+    pub out_of_date: bool,
+    pub nodes: Vec<StudyWebNode>,
+    pub groups: Vec<StudyWebGroup>,
+    pub relationships: Vec<StudyWebRelationship>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -412,6 +469,15 @@ pub struct SaveFlashcardInput {
     pub image_path: Option<String>,
     pub position: i32,
     pub is_starred: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveStudyWebNodePositionInput {
+    pub study_web_id: String,
+    pub card_id: String,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Deserialize)]

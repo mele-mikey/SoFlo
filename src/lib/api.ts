@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary, RevisionHistoryEntry,
-  Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, TestAttemptSummary,
+  Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, StudyWebDetail, StudyWebSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'generate_study_web', 'save_study_web_node_position', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -61,6 +61,10 @@ export const api = {
   saveCard: (input: { id?: string; setId: string; front: string; back: string; notes?: string | null; imagePath?: string | null; position: number; isStarred: boolean }) => call<Flashcard>('save_flashcard', { input }),
   deleteCard: (id: string) => call<void>('delete_flashcard', { id }),
   listAllCards: (classId: string) => call<Flashcard[]>('list_all_cards', { classId }),
+  listStudyWebs: (classId: string) => call<StudyWebSummary[]>('list_study_webs', { classId }),
+  getStudyWeb: (id: string) => call<StudyWebDetail>('get_study_web', { id }),
+  generateStudyWeb: (input: { setId: string; modelPath: string; studyWebId?: string }) => call<StudyWebDetail>('generate_study_web', { setId: input.setId, modelPath: input.modelPath, studyWebId: input.studyWebId ?? null }),
+  saveStudyWebNodePosition: (input: { studyWebId: string; cardId: string; x: number; y: number }) => call<void>('save_study_web_node_position', { input }),
   recordCardResponse: (cardId: string, isCorrect: boolean, details?: { sessionId?: string; mode?: string; questionType?: string; answer?: string }) => call<CardProgress>('record_card_response', { input: { cardId, isCorrect, ...details } }),
   startStudySession: (input: { setId: string; mode: string }) => call<StudySessionSummary>('start_study_session', { input }),
   completeStudySession: (id: string) => call<void>('complete_study_session', { input: { id } }),

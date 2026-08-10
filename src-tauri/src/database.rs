@@ -575,7 +575,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 8 {
+        if version >= 9 {
             return Ok(());
         }
         if version < 1 {
@@ -671,6 +671,52 @@ impl Database {
                 ALTER TABLE lecture_revisions ADD COLUMN name TEXT;
                 ALTER TABLE lecture_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
                 PRAGMA user_version = 8;
+            "#).map_err(|error| error.to_string())?;
+        }
+        if version < 9 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS study_webs (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    flashcard_set_id TEXT NOT NULL REFERENCES flashcard_sets(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    source_hash TEXT NOT NULL DEFAULT '',
+                    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS study_web_groups (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    study_web_id TEXT NOT NULL REFERENCES study_webs(id) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    parent_group_id TEXT
+                );
+                CREATE TABLE IF NOT EXISTS study_web_nodes (
+                    study_web_id TEXT NOT NULL REFERENCES study_webs(id) ON DELETE CASCADE,
+                    flashcard_id TEXT NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE,
+                    x REAL NOT NULL,
+                    y REAL NOT NULL,
+                    manually_positioned INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (study_web_id, flashcard_id)
+                );
+                CREATE TABLE IF NOT EXISTS study_web_group_members (
+                    study_web_id TEXT NOT NULL REFERENCES study_webs(id) ON DELETE CASCADE,
+                    group_id TEXT NOT NULL REFERENCES study_web_groups(id) ON DELETE CASCADE,
+                    flashcard_id TEXT NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE,
+                    PRIMARY KEY (study_web_id, group_id, flashcard_id)
+                );
+                CREATE TABLE IF NOT EXISTS study_web_relationships (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    study_web_id TEXT NOT NULL REFERENCES study_webs(id) ON DELETE CASCADE,
+                    source_flashcard_id TEXT NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE,
+                    target_flashcard_id TEXT NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE,
+                    relationship_type TEXT NOT NULL DEFAULT 'related_to',
+                    strength REAL NOT NULL DEFAULT 0.5
+                );
+                CREATE INDEX IF NOT EXISTS idx_study_webs_class ON study_webs(class_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_study_web_nodes_web ON study_web_nodes(study_web_id);
+                CREATE INDEX IF NOT EXISTS idx_study_web_relationships_web ON study_web_relationships(study_web_id);
+                PRAGMA user_version = 9;
             "#).map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -867,7 +913,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -875,6 +921,10 @@ mod tests {
             assert!(columns.contains(&"content_plain".to_string()));
             assert!(columns.contains(&"name".to_string()));
             assert!(columns.contains(&"source".to_string()));
+        }
+        for table in ["study_webs", "study_web_groups", "study_web_nodes", "study_web_group_members", "study_web_relationships"] {
+            let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("study web table lookup");
+            assert_eq!(exists, 1, "missing {table}");
         }
         drop(connection);
         drop(database);
