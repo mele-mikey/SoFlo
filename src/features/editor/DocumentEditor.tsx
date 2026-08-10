@@ -138,6 +138,21 @@ type ResearchGrade = { grade: string; overview: string; strengths: string[]; imp
 function grammarIssueKey(issue: Pick<GrammarIssue, 'kind' | 'original' | 'replacement'>) {
   return `${issue.kind}\u0000${issue.original.toLocaleLowerCase()}\u0000${issue.replacement.toLocaleLowerCase()}`
 }
+function isolateMechanicalChange(original: string, replacement: string) {
+  const originalParts = original.match(/\s+|\S+/g) ?? []
+  const replacementParts = replacement.match(/\s+|\S+/g) ?? []
+  let prefix = 0
+  while (prefix < originalParts.length && prefix < replacementParts.length && originalParts[prefix].toLocaleLowerCase() === replacementParts[prefix].toLocaleLowerCase()) prefix += 1
+  let originalEnd = originalParts.length
+  let replacementEnd = replacementParts.length
+  while (originalEnd > prefix && replacementEnd > prefix && originalParts[originalEnd - 1].toLocaleLowerCase() === replacementParts[replacementEnd - 1].toLocaleLowerCase()) {
+    originalEnd -= 1
+    replacementEnd -= 1
+  }
+  const narrowedOriginal = originalParts.slice(prefix, originalEnd).join('').trim()
+  const narrowedReplacement = replacementParts.slice(prefix, replacementEnd).join('').trim()
+  return narrowedOriginal && narrowedReplacement ? { original: narrowedOriginal, replacement: narrowedReplacement } : { original, replacement }
+}
 const GrammarReview = Extension.create({
   name: 'grammarReview',
   addProseMirrorPlugins() {
@@ -160,8 +175,12 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
     if (!allowDeepSuggestions && kind !== 'mechanic') continue
     const suppliedOriginal = typeof candidate.original === 'string' ? candidate.original : ''
     const suppliedReplacement = typeof candidate.replacement === 'string' ? candidate.replacement : typeof candidate.suggestion === 'string' ? candidate.suggestion : ''
-    const original = suppliedOriginal.trim() || (/^\s{2,3}$/.test(suppliedOriginal) ? suppliedOriginal : '')
-    const replacement = suppliedReplacement.trim() || (/^\s{1,3}$/.test(suppliedReplacement) ? suppliedReplacement : '')
+    let original = suppliedOriginal.trim() || (/^\s{2,3}$/.test(suppliedOriginal) ? suppliedOriginal : '')
+    let replacement = suppliedReplacement.trim() || (/^\s{1,3}$/.test(suppliedReplacement) ? suppliedReplacement : '')
+    // Small local models sometimes preserve sentence context even when asked
+    // for a word-level correction. Keep the useful correction by narrowing
+    // both strings to their actual changed fragment.
+    if (kind === 'mechanic') ({ original, replacement } = isolateMechanicalChange(original, replacement))
     const originalWords = original.trim().split(/\s+/).filter(Boolean)
     const replacementWords = replacement.trim().split(/\s+/).filter(Boolean)
     // AI Review asks for 1–9-word formal rewrites. Allow a small amount of
