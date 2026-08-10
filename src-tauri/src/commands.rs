@@ -1232,12 +1232,38 @@ fn ensure_model_server(
     let address: SocketAddr = format!("127.0.0.1:{}", port_number)
         .parse()
         .map_err(|_| "SoFlo could not start the local AI connection.".to_string())?;
-    for _ in 0..45 {
+    // A cold 4B model can take well over 20 seconds to become ready on a
+    // laptop even though the helper process itself started correctly. Keep
+    // waiting for that owned child instead of treating a normal cold load as
+    // a failed review.
+    emit_ai_progress(app, 22, "Loading your private local model");
+    let startup_started = Instant::now();
+    let startup_deadline = startup_started + Duration::from_secs(75);
+    while Instant::now() < startup_deadline {
+        if let Some(state) = server_state.get() {
+            let mut server = state
+                .lock()
+                .map_err(|_| "SoFlo's local AI state is unavailable.".to_string())?;
+            if let Some(active) = server.as_mut() {
+                if active
+                    .child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                {
+                    *server = None;
+                    return Err("SoFlo's local AI helper stopped while loading.".into());
+                }
+            }
+        }
         if TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
             && ai_server_ready(port_number)
         {
             emit_ai_progress(app, 32, "Your local model is ready");
             return Ok(port_number);
+        }
+        if startup_started.elapsed() >= Duration::from_secs(30) {
+            emit_ai_progress(app, 28, "Still loading your private local model");
         }
         thread::sleep(Duration::from_millis(400));
     }
