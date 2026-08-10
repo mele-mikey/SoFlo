@@ -9,7 +9,7 @@ import type { Flashcard, FlashcardSetDetail } from '../../lib/types'
 interface FlashcardSetEditorProps {
   set: FlashcardSetDetail
   onBack: () => void
-  onStudy: (mode: 'flashcards' | 'learn' | 'test' | 'match') => void
+  onStudy: (mode: 'flashcards' | 'learn' | 'test' | 'match' | 'teachItBack') => void
   onUpdated: (set: FlashcardSetDetail) => void
   onDelete: () => void
   onToast: (message: string, kind?: 'success' | 'error') => void

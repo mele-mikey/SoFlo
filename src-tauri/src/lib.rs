@@ -49,6 +49,8 @@ pub fn run() {
             commands::import_word_text,
             commands::refine_document_text,
             commands::generate_flashcards_text,
+            commands::generate_teach_it_back_question,
+            commands::grade_teach_it_back_answer,
             commands::review_grammar_text,
             commands::research_and_grade_text,
             commands::define_word,

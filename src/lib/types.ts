@@ -214,7 +214,7 @@ export type AppView =
   | { kind: 'document'; classId: string; documentId: string }
   | { kind: 'lecture'; classId: string; lectureId: string }
   | { kind: 'flashcardSet'; classId: string; setId: string }
-  | { kind: 'study'; classId: string; setId: string; mode: 'flashcards' | 'learn' | 'test' | 'match'; cardIds?: string[] }
+  | { kind: 'study'; classId: string; setId: string; mode: 'flashcards' | 'learn' | 'test' | 'match' | 'teachItBack'; cardIds?: string[] }
   | { kind: 'archive' }
   | { kind: 'settings' }
   | { kind: 'help' }

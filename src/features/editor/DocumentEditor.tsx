@@ -15,9 +15,9 @@ import TextAlign from '@tiptap/extension-text-align'
 import { TextStyle } from '@tiptap/extension-text-style'
 import Typography from '@tiptap/extension-typography'
 import Underline from '@tiptap/extension-underline'
-import { Extension, type Editor } from '@tiptap/core'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { Extension, Node as TiptapNode, type Editor } from '@tiptap/core'
+import { NodeSelection, Plugin, PluginKey } from '@tiptap/pm/state'
+import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, ClipboardPaste, Code2, Columns3, FileDown, FileText, Highlighter, ImagePlus, Import, IndentDecrease, IndentIncrease, Italic, Link2, List, ListOrdered, ListTodo, Menu, Palette, Pilcrow, Quote, Redo2, RefreshCw, RemoveFormatting, Search, Settings2, Sparkles, SpellCheck2, Strikethrough, Subscript as SubscriptIcon, Superscript as SuperscriptIcon, Table2, Underline as UnderlineIcon, Undo2, X } from 'lucide-react'
@@ -71,6 +71,17 @@ const OrderedListStyle = Extension.create({
   addGlobalAttributes() {
     return [{ types: ['orderedList'], attributes: { listStyle: { default: null, parseHTML: (element: HTMLElement) => element.style.listStyleType || null, renderHTML: (attributes: { listStyle?: string | null }) => attributes.listStyle ? { style: `list-style-type: ${attributes.listStyle}` } : {} } } }]
   },
+})
+const CitationPlaceholder = TiptapNode.create({
+  name: 'citationPlaceholder',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  addAttributes() { return { label: { default: 'Citation detail' } } },
+  parseHTML() { return [{ tag: 'span[data-citation-placeholder]' }] },
+  renderHTML({ node }) { return ['span', { class: 'citation-placeholder', 'data-citation-placeholder': '', 'data-citation-label': String(node.attrs.label || 'Citation detail') }, 'Null'] },
+  renderText() { return 'Null' },
 })
 function changeSelectedBlockIndent(editor: Editor, amount: 1 | -1) {
   if (editor.isActive('table')) return false
@@ -141,12 +152,18 @@ function formatRevisionTime(value: string) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 function wordCount(value: string) { return value.trim() ? value.trim().split(/\s+/).length : 0 }
-function revisionChangeSummary(newer: string, older: string) {
-  if (!older) return 'Earlier snapshot saved before text comparison was available.'
+function revisionChangeDetail(newer: string, older: string) {
+  if (newer === older) return { added: '', removed: '', summary: 'No text changed in this save.' }
+  let start = 0
+  while (start < newer.length && start < older.length && newer[start] === older[start]) start += 1
+  let newerEnd = newer.length
+  let olderEnd = older.length
+  while (newerEnd > start && olderEnd > start && newer[newerEnd - 1] === older[olderEnd - 1]) { newerEnd -= 1; olderEnd -= 1 }
+  const added = newer.slice(start, newerEnd).trim()
+  const removed = older.slice(start, olderEnd).trim()
   const delta = wordCount(newer) - wordCount(older)
-  if (delta > 0) return `${delta} word${delta === 1 ? '' : 's'} added since this version.`
-  if (delta < 0) return `${Math.abs(delta)} word${delta === -1 ? '' : 's'} removed since this version.`
-  return 'Text length stayed about the same; wording or formatting may have changed.'
+  const summary = delta > 0 ? `${delta} word${delta === 1 ? '' : 's'} added` : delta < 0 ? `${Math.abs(delta)} word${delta === -1 ? '' : 's'} removed` : added || removed ? 'Wording changed' : 'Spacing or formatting changed'
+  return { added, removed, summary }
 }
 type WordSelection = { word: string; from: number; to: number }
 type ResearchSource = { title: string; publication: string; year: string; type: string; perspective: string; citations: number; url: string }
@@ -527,6 +544,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const [thesaurusError, setThesaurusError] = useState('')
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
   const [versionHistory, setVersionHistory] = useState<RevisionHistoryEntry[]>([])
+  const [versionHistorySelectedId, setVersionHistorySelectedId] = useState('current')
   const [versionHistoryLoading, setVersionHistoryLoading] = useState(false)
   const [versionHistoryError, setVersionHistoryError] = useState('')
   const linkPreviewRef = useRef<{ href: string; label: string; x: number; y: number } | null>(null)
@@ -568,6 +586,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return true
   }
   const handleEditorClick = (view: unknown, position: number, event: MouseEvent) => {
+    const citation = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-citation-placeholder]') : null
+    if (citation) {
+      event.preventDefault()
+      const editorView = view as EditorView
+      editorView.dispatch(editorView.state.tr.setSelection(NodeSelection.create(editorView.state.doc, position)))
+      editorView.focus()
+      return true
+    }
     const marked = event.target instanceof Element ? event.target.closest<HTMLElement>('.ai-grammar-issue, .ai-writing-style, .ai-writing-structure') : null
     const issueIndex = Number(marked?.dataset.grammarIssue)
     if (Number.isInteger(issueIndex) && grammarIssues[issueIndex]) {
@@ -629,7 +655,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
-      Underline, TextStyle, FontSize, OrderedListStyle, PaperIndent, PaperMeta, PaperPagination, GrammarReview, Color, Highlight.configure({ multicolor: true }),
+      Underline, TextStyle, FontSize, OrderedListStyle, CitationPlaceholder, PaperIndent, PaperMeta, PaperPagination, GrammarReview, Color, Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }), TaskList, TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
       Image.configure({ inline: false, allowBase64: true }), Table.configure({ resizable: true, allowTableNodeSelection: true }), TableRow, TableHeader, TableCell,
@@ -874,18 +900,21 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     try { await navigator.clipboard.writeText(text); if (action === 'cut') editor.commands.deleteSelection() } catch { /* The browser command is the best available fallback. */ }
   }
   const insertCitation = (style: 'mla' | 'apa' | 'chicago') => {
+    const placeholder = (label: string) => ({ type: 'citationPlaceholder', attrs: { label } })
+    const text = (value: string) => ({ type: 'text', text: value })
     const templates = {
-      mla: '[Author Last, First]. "[Title]." [Container], [Publisher], [Year].',
-      apa: '[Author, A. A.]. ([Year]). [Title]. [Publisher].',
-      chicago: '[Author First Last]. "[Title]." [Publication], [Date].',
+      mla: [placeholder('Author last name'), text(', '), placeholder('Author first name'), text('. “'), placeholder('Title of the work'), text('.” '), placeholder('Publication or container'), text(', '), placeholder('Publisher'), text(', '), placeholder('Publication day'), text(' '), placeholder('Publication month'), text(' '), placeholder('Publication year'), text('.')],
+      apa: [placeholder('Author last name'), text(', '), placeholder('Author initials'), text('. ('), placeholder('Publication year'), text(', '), placeholder('Publication month'), text(' '), placeholder('Publication day'), text('). '), placeholder('Title of the work'), text('. '), placeholder('Publisher or publication'), text('.')],
+      chicago: [placeholder('Author first name'), text(' '), placeholder('Author last name'), text('. “'), placeholder('Title of the work'), text('.” '), placeholder('Publication or container'), text(', '), placeholder('Publication month'), text(' '), placeholder('Publication day'), text(', '), placeholder('Publication year'), text('.')],
     }
-    editor.chain().focus().insertContentAt(editor.state.selection.to, ` ${templates[style]}`).run()
+    editor.chain().focus().insertContent([text(' '), ...templates[style]]).run()
     setContextMenu(null)
     setContextSubmenu(null)
     setCitationMenuOpen(false)
   }
   const openVersionHistory = async () => {
     setVersionHistoryOpen(true)
+    setVersionHistorySelectedId('current')
     setVersionHistoryLoading(true)
     setVersionHistoryError('')
     try { setVersionHistory(await onVersionHistory()) } catch (error) { setVersionHistoryError(error instanceof Error ? error.message : 'Version history could not be loaded.') } finally { setVersionHistoryLoading(false) }
@@ -1146,6 +1175,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const Ref = region === 'header' ? headerRef : footerRef
     return <div ref={Ref} className={`paper-running-${region}${active ? ' editing' : ''}${value || active ? '' : ' empty'}`} contentEditable={active} suppressContentEditableWarning onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); beginRunningEdit(region, 1, event.currentTarget, event.clientX, event.clientY) }} onBlur={(event) => saveRunningRegion(region, 1, serializeRunningRegion(event.currentTarget))} />
   }
+  const currentHistoryEntry: RevisionHistoryEntry = { id: 'current', revision: document.revision, title: document.title, contentPlain: document.contentPlain, createdAt: document.updatedAt }
+  const historyTimeline = [currentHistoryEntry, ...versionHistory]
+  const selectedHistoryIndex = Math.max(0, historyTimeline.findIndex((entry) => entry.id === versionHistorySelectedId))
+  const selectedHistoryEntry = historyTimeline[selectedHistoryIndex] ?? currentHistoryEntry
+  const olderHistoryEntry = selectedHistoryIndex === 0 ? historyTimeline[1] ?? currentHistoryEntry : selectedHistoryEntry
+  const newerHistoryEntry = selectedHistoryIndex === 0 ? currentHistoryEntry : historyTimeline[selectedHistoryIndex - 1] ?? currentHistoryEntry
+  const selectedHistoryChanges = revisionChangeDetail(newerHistoryEntry.contentPlain, olderHistoryEntry.contentPlain)
   return <main className="editor-view">
     <header className="editor-topbar">
       <div className="editor-breadcrumb"><button className="editor-breadcrumb-link" onClick={onBack}><FileText size={15} />{collectionLabel}</button><span className="breadcrumb-separator">/</span><span>{document.title || 'Untitled paper'}</span>{context && <small className="editor-context">{context}</small>}</div>
@@ -1164,7 +1200,15 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     {grammarReviewing && <div className="grammar-review-notice" role="status" aria-live="polite"><i /><div><strong>Checking your writing</strong><span>{grammarProgress?.message || 'Reviewing spelling and grammar locally.'}</span></div><small>{grammarProgress ? `${grammarProgress.progress}%` : '…'}</small></div>}
     {grammarMessage && <div className="grammar-review-notice grammar-review-error" role="status"><div><strong>AI Review needs another pass</strong><span>{grammarMessage}</span></div><button className="icon-button tiny" onClick={() => setGrammarMessage('')} aria-label="Dismiss grammar review message"><X size={15} /></button></div>}
     {linkPreview && <aside className="editor-link-preview" style={{ left: linkPreview.x, top: linkPreview.y }} aria-label="Link destination"><div><small>LINK DESTINATION</small><strong title={linkPreview.href}>{linkPreview.label}</strong><span title={linkPreview.href}>{linkPreview.href}</span></div><button className="button button-primary button-small" onClick={() => { openExternalLink(linkPreview.href); setActiveLinkPreview(null) }}>Open</button><button className="icon-button tiny" onClick={() => setActiveLinkPreview(null)} aria-label="Close link preview"><X size={15} /></button></aside>}
-    {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history"><header><div><p className="eyebrow">DOCUMENT</p><h2>Version history</h2><span>{collectionLabel === 'Lectures' ? 'Lecture note' : 'Paper'} · edits saved locally</span></div><button className="icon-button tiny" onClick={() => setVersionHistoryOpen(false)} aria-label="Close version history"><X size={16} /></button></header><div className="version-history-detail">{versionHistoryLoading && <div className="word-reference-loading"><i />Loading saved versions…</div>}{versionHistoryError && <p className="word-reference-error">{versionHistoryError}</p>}{!versionHistoryLoading && !versionHistoryError && <><article className="version-history-entry current"><div><strong>Current version · {document.revision}</strong><time>{formatRevisionTime(document.updatedAt)}</time></div><p>{document.title || 'Untitled'}</p><small>Current saved version. AI edits are recorded as your edits.</small></article>{versionHistory.length === 0 && <p className="version-history-empty">Earlier snapshots will appear here as you continue editing.</p>}{versionHistory.map((entry, index) => <article className="version-history-entry" key={entry.id}><div><strong>Version {entry.revision}</strong><time>{formatRevisionTime(entry.createdAt)}</time></div><p>{entry.title || 'Untitled'}</p><small>{revisionChangeSummary(index === 0 ? document.contentPlain : versionHistory[index - 1].contentPlain, entry.contentPlain)}</small></article>)}</>}</div></aside>}
+    {versionHistoryOpen && <aside className="version-history-sidebar" aria-label="Version history">
+      <header><div><p className="eyebrow">LOCAL EDIT TIMELINE</p><h2>Version history</h2><span>{collectionLabel === 'Lectures' ? 'Lecture note' : 'Paper'} · AI changes count as your edits</span></div><button className="icon-button tiny" onClick={() => setVersionHistoryOpen(false)} aria-label="Close version history"><X size={16} /></button></header>
+      {versionHistoryLoading && <div className="version-history-loading"><div className="word-reference-loading"><i />Loading saved versions…</div></div>}
+      {versionHistoryError && <p className="word-reference-error version-history-error">{versionHistoryError}</p>}
+      {!versionHistoryLoading && !versionHistoryError && <div className="version-history-workspace">
+        <nav className="version-history-timeline" aria-label="Saved versions">{historyTimeline.map((entry, index) => { const newer = index === 0 ? entry : historyTimeline[index - 1]; const detail = revisionChangeDetail(newer.contentPlain, entry.contentPlain); return <button className={`${entry.id === versionHistorySelectedId ? 'selected' : ''}${entry.id === 'current' ? ' current' : ''}`} onClick={() => setVersionHistorySelectedId(entry.id)} key={entry.id}><i /><span><strong>{entry.id === 'current' ? 'Current version' : `Version ${entry.revision}`}</strong><time>{formatRevisionTime(entry.createdAt)}</time><small>{entry.id === 'current' ? 'Latest saved work' : detail.summary}</small></span></button> })}{versionHistory.length === 0 && <p className="version-history-empty">Make another edit and an earlier snapshot will appear here.</p>}</nav>
+        <section className="version-history-change-preview"><div className="version-history-change-heading"><span><small>SELECTED SNAPSHOT</small><strong>{selectedHistoryEntry.id === 'current' ? 'Current version' : `Version ${selectedHistoryEntry.revision}`}</strong></span><time>{formatRevisionTime(selectedHistoryEntry.createdAt)}</time></div><p className="version-history-change-summary">{selectedHistoryChanges.summary}</p>{newerHistoryEntry.title !== olderHistoryEntry.title && <div className="version-title-change"><span>− {olderHistoryEntry.title || 'Untitled'}</span><span>+ {newerHistoryEntry.title || 'Untitled'}</span></div>}{selectedHistoryChanges.removed && <div className="version-diff removed"><b>REMOVED</b><p>{selectedHistoryChanges.removed}</p></div>}{selectedHistoryChanges.added && <div className="version-diff added"><b>ADDED</b><p>{selectedHistoryChanges.added}</p></div>}{!selectedHistoryChanges.added && !selectedHistoryChanges.removed && newerHistoryEntry.title === olderHistoryEntry.title && <div className="version-history-no-change">This snapshot contains formatting, spacing, or save-state changes without a visible text replacement.</div>}<small className="version-history-note">Snapshots stay on this computer with the rest of your SoFlo library.</small></section>
+      </div>}
+    </aside>}
     {contextMenu && <div className="editor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" aria-label="Paper editing menu"><ContextMenuAction label="Undo" shortcut="Ctrl Z" disabled={!editor.can().undo()} onClick={() => void runContextAction('undo')} /><ContextMenuAction label="Redo" shortcut="Ctrl Shift Z" disabled={!editor.can().redo()} onClick={() => void runContextAction('redo')} /><hr /><ContextMenuAction label="Cut" shortcut="Ctrl X" disabled={editor.state.selection.empty} onClick={() => void runContextAction('cut')} /><ContextMenuAction label="Copy" shortcut="Ctrl C" disabled={editor.state.selection.empty} onClick={() => void runContextAction('copy')} /><ContextMenuAction label="Paste" shortcut="Ctrl V" onClick={() => void runContextAction('paste')} /><hr /><ContextMenuAction label="Select all" shortcut="Ctrl A" onClick={() => void runContextAction('selectAll')} /><hr /><ContextMenuAction label="Insert" shortcut="›" onClick={() => setContextSubmenu(contextSubmenu === 'insert' ? null : 'insert')} />{contextSubmenu === 'insert' && <div className="editor-context-submenu" role="menu" aria-label="Insert menu"><ContextMenuAction label="Citation" shortcut="›" onClick={() => window.dispatchEvent(new Event('soflo:open-citation'))} /></div>}</div>}
     {citationMenuOpen && contextMenu && <div className="editor-context-menu citation-menu" style={{ left: contextMenu.x + 205, top: contextMenu.y + 38 }} role="menu" aria-label="Citation styles"><ContextMenuAction label="MLA" shortcut="" onClick={() => insertCitation('mla')} /><ContextMenuAction label="APA" shortcut="" onClick={() => insertCitation('apa')} /><ContextMenuAction label="Chicago" shortcut="" onClick={() => insertCitation('chicago')} /></div>}
     {linkDialog && <LinkDialog initialUrl={linkDialog.url} canRemove={linkDialog.canRemove} onClose={() => setLinkDialog(null)} onApply={applyLink} onRemove={() => { editor.chain().focus().unsetLink().run(); setLinkDialog(null) }} />}

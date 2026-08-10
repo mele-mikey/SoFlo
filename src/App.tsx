@@ -366,6 +366,16 @@ function App() {
     }
     return api.aiThesaurus(modelPath, word)
   }
+  const generateTeachItBackQuestion = async (front: string, back: string, shownSide: 'front' | 'back') => {
+    const aiModelPath = await ensureAiModel()
+    if (!aiModelPath) throw new Error('Turn on AI in Settings to use Teach It Back.')
+    return api.generateTeachItBackQuestion(aiModelPath, front, back, shownSide)
+  }
+  const gradeTeachItBackAnswer = async (front: string, back: string, question: string, target: string, answer: string) => {
+    const aiModelPath = await ensureAiModel()
+    if (!aiModelPath) throw new Error('Turn on AI in Settings to use Teach It Back.')
+    return api.gradeTeachItBackAnswer(aiModelPath, front, back, question, target, answer)
+  }
   const releaseAiModel = useCallback(async () => { await api.stopAiServer() }, [])
   const importPdfAsNewNote = async () => {
     if (!classId) { showToast('Open a class before importing a PDF.', 'error'); return }
@@ -450,7 +460,14 @@ function App() {
       await loadLibrary(); navigate({ kind: 'home' }); showToast(`${activeCourse.name} has been archived.`)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That class could not be archived.', 'error') }
   }
-  const restoreClass = async (course: CourseClass) => { await api.updateClass({ ...course, archived: false }); await loadLibrary(); setArchivedClasses((current) => current.filter((item) => item.id !== course.id)); showToast(`${course.name} has been restored.`) }
+  const restoreClass = async (course: CourseClass) => {
+    const semester = archivedSemesters.find((item) => item.id === course.semesterId)
+    if (semester?.archivedAt) await api.updateSemester({ ...semester, archived: false })
+    await api.updateClass({ ...course, archived: false })
+    await loadLibrary()
+    setArchivedClasses((current) => current.filter((item) => item.id !== course.id))
+    showToast(`${course.name} has been restored.`)
+  }
   const deleteDocument = async () => { if (!activeDocument) return; await flushDocument(); await api.setDocumentDeleted(activeDocument.id, true); await loadClassContent(activeDocument.classId); navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' }); showToast('Paper moved to trash.') }
   const deleteLecture = async (lecture: Pick<LectureDetail, 'id' | 'classId' | 'title'>) => {
     if (activeLecture?.id === lecture.id) await flushLecture()
@@ -607,7 +624,7 @@ function App() {
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled && !writingModelDeferred} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listDocumentRevisions(activeDocument.id)} onReleaseAi={releaseAiModel} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
         {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={library.settings.editorFontSize} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode })} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
-        {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} cardIds={view.cardIds} onBack={() => { void api.getSet(activeSet.id).then(setActiveSet); navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id }) }} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
+        {view.kind === 'study' && (activeSet ? <StudyView set={activeSet} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => { void api.getSet(activeSet.id).then(setActiveSet); navigate({ kind: 'flashcardSet', classId: activeSet.classId, setId: activeSet.id }) }} onModeChange={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setId: activeSet.id, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
       </section>
     </div>
     <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} classes={library.classes} onNavigate={navigate} onNewNote={() => void createDocument()} onNewSet={() => void createSet()} />

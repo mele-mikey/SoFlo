@@ -530,6 +530,81 @@ pub async fn generate_flashcards_text(
 }
 
 #[tauri::command]
+pub async fn generate_teach_it_back_question(
+    app: tauri::AppHandle,
+    model_path: String,
+    front: String,
+    back: String,
+    shown_side: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let front = front.trim();
+        let back = back.trim();
+        if front.is_empty() || back.is_empty() {
+            return Err("This card needs both a term and definition before Teach It Back can use it.".into());
+        }
+        let shown_side = if shown_side.eq_ignore_ascii_case("back") { "back" } else { "front" };
+        let resolved = resolve_ai_model_path(&app, &model_path)?;
+        emit_ai_progress(&app, 12, "Preparing a teach-back question");
+        let port = ensure_ai_server(&resolved, &app)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let system = "You create one focused teach-back question from a two-sided flashcard. The front is normally the term or prompt and the back is normally its meaning or explanation. Use both sides as private context, but build the question around the side the student is shown. Ask the student to explain the idea in their own words, including enough context that the question makes sense. Do not reveal the hidden answer. Return only one valid JSON object with exactly these string keys: question, target, hint. target is a short private description of what a strong answer should cover. hint is one short optional nudge that does not give away the answer.";
+        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nSIDE SHOWN TO STUDENT: {}\nCreate the question now.", front, back, shown_side);
+        let output = local_chat_text(&client, port, system, &prompt, 520)?;
+        touch_ai_server();
+        if let Some(object) = json_object_from_response(&output) {
+            return Ok(object);
+        }
+        let retry = local_chat_text(&client, port, "Return JSON only. Create one teach-back question using the supplied flashcard. Use exactly: {\"question\":\"...\",\"target\":\"...\",\"hint\":\"...\"}.", &prompt, 620)?;
+        touch_ai_server();
+        json_object_from_response(&retry)
+            .ok_or_else(|| "SoFlo could not prepare this teach-back question.".into())
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+pub async fn grade_teach_it_back_answer(
+    app: tauri::AppHandle,
+    model_path: String,
+    front: String,
+    back: String,
+    question: String,
+    target: String,
+    answer: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if answer.trim().is_empty() {
+            return Err("Write what you understand before asking SoFlo to review it.".into());
+        }
+        let resolved = resolve_ai_model_path(&app, &model_path)?;
+        emit_ai_progress(&app, 18, "Listening to your explanation");
+        let port = ensure_ai_server(&resolved, &app)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(65))
+            .build()
+            .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let system = "You grade a student's teach-back explanation against a flashcard. Reward correct meaning expressed in the student's own words; do not demand exact wording. Be encouraging and specific. A mostly correct answer scores 60 or above. A vague, materially incorrect, or empty answer scores below 60. Return only one valid JSON object with exactly these keys: score (integer 0-100), verdict (one of strong, good, developing, review), feedback (two concise sentences), understood (array of up to 3 short strings), missed (array of up to 3 short strings).";
+        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nQUESTION:\n{}\n\nSTRONG ANSWER TARGET:\n{}\n\nSTUDENT EXPLANATION:\n{}\n\nGrade the explanation for meaning and understanding.", front.trim(), back.trim(), question.trim(), target.trim(), answer.trim());
+        let output = local_chat_text(&client, port, system, &prompt, 720)?;
+        touch_ai_server();
+        if let Some(object) = json_object_from_response(&output) {
+            return Ok(object);
+        }
+        let retry = local_chat_text(&client, port, "Return JSON only using exactly: {\"score\":0,\"verdict\":\"review\",\"feedback\":\"...\",\"understood\":[],\"missed\":[]}.", &prompt, 820)?;
+        touch_ai_server();
+        json_object_from_response(&retry)
+            .ok_or_else(|| "SoFlo could not finish grading this explanation.".into())
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
 pub async fn review_grammar_text(
     app: tauri::AppHandle,
     model_path: String,
@@ -986,14 +1061,18 @@ fn ai_thesaurus_blocking(
                     {"role":"user","content":format!("Find grouped alternatives for: {}", query)}
                 ],
                 "chat_template_kwargs": { "enable_thinking": false },
-                "response_format": { "type": "json_object" },
                 "max_tokens": max_tokens,
                 "temperature": 0.1
             }))
             .send()
             .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
             .error_for_status()
-            .map_err(|error| format!("SoFlo's local AI model could not find related words: {}", error))?;
+            .map_err(|error| {
+                format!(
+                    "SoFlo's local AI model could not find related words: {}",
+                    error
+                )
+            })?;
         let body: serde_json::Value = response
             .json()
             .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
@@ -1009,16 +1088,150 @@ fn ai_thesaurus_blocking(
     let instruction = "You are a precise English thesaurus for college writing. Return only one complete valid JSON object with exactly these keys: query, close, related, broad. Each value must be an array of 3 to 6 concise alternatives. close means nearly interchangeable in the same context; related means useful formal or academic alternatives with a slightly different shade; broad means more distant but relevant words or phrases. Preserve the part of speech and meaning of the query. Use single words or short phrases, never definitions, commentary, Markdown, duplicates, or the queried term itself. Do not invent unusual words.";
     let output = request(instruction, 700)?;
     touch_word_ai_server();
-    if let Some(object) = json_object_from_response(&output) {
+    if let Some(object) = thesaurus_json_from_response(&output, query) {
         return Ok(object);
     }
     let retry = request("Return only valid compact JSON in this exact shape: {\"query\":\"input\",\"close\":[\"word\"],\"related\":[\"word\"],\"broad\":[\"word\"]}. Replace input and each word with useful alternatives. No Markdown, explanation, or extra keys.", 1100)?;
-    if let Some(object) = json_object_from_response(&retry) {
+    if let Some(object) = thesaurus_json_from_response(&retry, query) {
         return Ok(object);
     }
-    let final_retry = request("Output one compact JSON object and nothing else. Use exactly these keys and arrays: query (string), close (array), related (array), broad (array). Each array must contain 3 short English alternatives. Do not use markdown or commentary.", 1200)?;
-    json_object_from_response(&final_retry)
+    let final_retry = request("Give thesaurus alternatives as three plain lines only. Use exactly: CLOSE: word, word, word; RELATED: word, word, word; BROAD: word, word, word. No definitions or commentary.", 700)?;
+    thesaurus_json_from_response(&final_retry, query)
         .ok_or_else(|| "SoFlo could not prepare grouped thesaurus suggestions.".into())
+}
+
+fn thesaurus_json_from_response(output: &str, query: &str) -> Option<String> {
+    let unique_words = |values: Vec<String>| {
+        let mut result = Vec::<String>::new();
+        for value in values {
+            let word = value
+                .trim()
+                .trim_matches(|character: char| {
+                    matches!(
+                        character,
+                        '"' | '\'' | '`' | '[' | ']' | '(' | ')' | '.' | ':'
+                    )
+                })
+                .trim()
+                .to_string();
+            if word.is_empty()
+                || word.eq_ignore_ascii_case(query)
+                || word.split_whitespace().count() > 5
+                || result
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&word))
+            {
+                continue;
+            }
+            result.push(word);
+            if result.len() == 6 {
+                break;
+            }
+        }
+        result
+    };
+    if let Some(object) = json_object_from_response(output) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&object) {
+            let list = |keys: &[&str]| -> Vec<String> {
+                keys.iter()
+                    .find_map(|key| value.get(*key).and_then(|entry| entry.as_array()))
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let close = unique_words(list(&["close", "closest", "synonyms"]));
+            let related = unique_words(list(&["related", "formal", "academic"]));
+            let broad = unique_words(list(&["broad", "broader", "distant"]));
+            if !close.is_empty() || !related.is_empty() || !broad.is_empty() {
+                return serde_json::to_string(&serde_json::json!({ "query": query, "close": close, "related": related, "broad": broad })).ok();
+            }
+        }
+    }
+    let mut close = Vec::new();
+    let mut related = Vec::new();
+    let mut broad = Vec::new();
+    let mut unlabeled = Vec::new();
+    let mut current = "";
+    for raw_line in output.lines() {
+        let mut line = raw_line.trim().trim_matches('`').trim();
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("close") || lower.contains("closest") {
+            current = "close";
+        } else if lower.contains("related")
+            || lower.contains("formal")
+            || lower.contains("academic")
+        {
+            current = "related";
+        } else if lower.contains("broad") || lower.contains("distant") {
+            current = "broad";
+        }
+        if let Some((label, rest)) = line.split_once(':') {
+            let label = label.to_ascii_lowercase();
+            if label.contains("close") {
+                current = "close";
+                line = rest;
+            } else if label.contains("related") || label.contains("formal") {
+                current = "related";
+                line = rest;
+            } else if label.contains("broad") {
+                current = "broad";
+                line = rest;
+            }
+        }
+        let values = line
+            .split([',', ';', '|'])
+            .map(|item| {
+                item.trim_start_matches(|character: char| {
+                    character.is_ascii_digit() || matches!(character, '-' | '*' | '.' | ')' | ' ')
+                })
+                .to_string()
+            })
+            .filter(|item| !item.trim().is_empty())
+            .collect::<Vec<_>>();
+        match current {
+            "close" => close.extend(values),
+            "related" => related.extend(values),
+            "broad" => broad.extend(values),
+            _ => {
+                let trimmed = raw_line.trim_start();
+                let looks_like_list = trimmed.starts_with(['-', '*'])
+                    || trimmed
+                        .chars()
+                        .next()
+                        .is_some_and(|character| character.is_ascii_digit())
+                    || raw_line.contains([',', ';', '|']);
+                if looks_like_list
+                    && !lower.contains("suggestion")
+                    && !lower.contains("alternative")
+                {
+                    unlabeled.extend(values);
+                }
+            }
+        }
+    }
+    let mut close = unique_words(close);
+    let mut related = unique_words(related);
+    let mut broad = unique_words(broad);
+    if close.is_empty() && related.is_empty() && broad.is_empty() {
+        for (index, word) in unique_words(unlabeled).into_iter().enumerate() {
+            match index % 3 {
+                0 => close.push(word),
+                1 => related.push(word),
+                _ => broad.push(word),
+            }
+        }
+    }
+    if close.is_empty() && related.is_empty() && broad.is_empty() {
+        return None;
+    }
+    serde_json::to_string(
+        &serde_json::json!({ "query": query, "close": close, "related": related, "broad": broad }),
+    )
+    .ok()
 }
 
 fn generate_flashcards_text_blocking(
@@ -1739,6 +1952,8 @@ fn get_settings(
 pub fn bootstrap(database: State<'_, Database>) -> CommandResult<BootstrapData> {
     let connection = database.open()?;
     purge_expired_trash(&connection)?;
+    let auto_archived =
+        auto_archive_finished_semesters(&connection, chrono::Local::now().date_naive())?;
     let semesters = list_semesters_from(&connection, false)?;
     let classes = list_classes_from(&connection, false)?;
     let installer_model_path = database.installer_model_path();
@@ -1746,12 +1961,55 @@ pub fn bootstrap(database: State<'_, Database>) -> CommandResult<BootstrapData> 
     if installer_model_path.is_some() {
         database.clear_installer_model_path()?;
     }
-    Ok(BootstrapData {
+    let result = BootstrapData {
         semesters,
         classes,
         settings,
         data_location: database.data_path().display().to_string(),
-    })
+    };
+    drop(connection);
+    if auto_archived {
+        database.sync_encrypted()?;
+    }
+    Ok(result)
+}
+
+fn semester_end_date(term: &str, year: i32) -> Option<chrono::NaiveDate> {
+    let (month, day) = match term.trim().to_ascii_lowercase().as_str() {
+        "spring" => (5, 12),
+        "fall" => (12, 12),
+        _ => return None,
+    };
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn auto_archive_finished_semesters(
+    connection: &Connection,
+    today: chrono::NaiveDate,
+) -> CommandResult<bool> {
+    let mut statement = connection
+        .prepare("SELECT id, term, year FROM semesters WHERE archived_at IS NULL")
+        .map_err(|error| error.to_string())?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut changed = false;
+    for (semester_id, term, year) in candidates {
+        if semester_end_date(&term, year).is_some_and(|cutoff| today >= cutoff) {
+            connection.execute("UPDATE classes SET archived_at=COALESCE(archived_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE semester_id=?1", [&semester_id]).map_err(|error| error.to_string())?;
+            changed |= connection.execute("UPDATE semesters SET archived_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&semester_id]).map_err(|error| error.to_string())? > 0;
+        }
+    }
+    Ok(changed)
 }
 
 fn list_semesters_from(
@@ -2114,22 +2372,20 @@ pub fn save_lecture(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) = transaction
-        .query_row(
-            "SELECT content, revision, content_plain, title FROM lectures WHERE id=?1",
-            [&input.id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|error| error.to_string())?;
-    let next_revision = if existing != input.content {
-        revision + 1
-    } else {
-        revision
-    };
+    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) =
+        transaction
+            .query_row(
+                "SELECT content, revision, content_plain, title FROM lectures WHERE id=?1",
+                [&input.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+    let changed = existing != input.content || existing_title != input.title.trim();
+    let next_revision = if changed { revision + 1 } else { revision };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
-    if existing != input.content && next_revision % 15 == 0 {
+    if changed {
         transaction.execute("INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
-        transaction.execute("DELETE FROM lecture_revisions WHERE id IN (SELECT id FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC LIMIT -1 OFFSET 30)", [&input.id]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM lecture_revisions WHERE id IN (SELECT id FROM lecture_revisions WHERE lecture_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 100)", [&input.id]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     get_lecture(database, input.id)
@@ -2156,19 +2412,20 @@ pub fn save_document(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) = transaction
-        .query_row(
-            "SELECT content, revision, content_plain, title FROM documents WHERE id=?1",
-            [&input.id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|error| error.to_string())?;
-    let changed = existing != input.content;
+    let (existing, revision, existing_plain, existing_title): (String, i32, String, String) =
+        transaction
+            .query_row(
+                "SELECT content, revision, content_plain, title FROM documents WHERE id=?1",
+                [&input.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+    let changed = existing != input.content || existing_title != input.title.trim();
     let next_revision = if changed { revision + 1 } else { revision };
     transaction.execute("UPDATE documents SET title=?1, content=?2, content_plain=?3, is_favorite=?4, revision=?5, updated_at=CURRENT_TIMESTAMP WHERE id=?6", params![input.title.trim(), input.content, input.content_plain, input.is_favorite as i32, next_revision, input.id]).map_err(|error| error.to_string())?;
-    if changed && next_revision % 15 == 0 {
+    if changed {
         transaction.execute("INSERT INTO document_revisions (id, document_id, title, content, content_plain, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![Uuid::new_v4().to_string(), input.id, existing_title, existing, existing_plain, revision]).map_err(|error| error.to_string())?;
-        transaction.execute("DELETE FROM document_revisions WHERE id IN (SELECT id FROM document_revisions WHERE document_id=?1 ORDER BY created_at DESC LIMIT -1 OFFSET 30)", [&input.id]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM document_revisions WHERE id IN (SELECT id FROM document_revisions WHERE document_id=?1 ORDER BY revision DESC LIMIT -1 OFFSET 100)", [&input.id]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     get_document(database, input.id)
@@ -3067,7 +3324,7 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 mod tests {
     use super::{
         available_loopback_port, is_visual_line_echo, json_array_from_response,
-        json_object_from_response,
+        json_object_from_response, semester_end_date, thesaurus_json_from_response,
     };
 
     #[test]
@@ -3101,5 +3358,40 @@ mod tests {
             json_object_from_response(response).as_deref(),
             Some("{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}")
         );
+    }
+
+    #[test]
+    fn uses_the_requested_spring_and_fall_archive_dates() {
+        assert_eq!(
+            semester_end_date("Spring", 2027).unwrap().to_string(),
+            "2027-05-12"
+        );
+        assert_eq!(
+            semester_end_date("Fall", 2026).unwrap().to_string(),
+            "2026-12-12"
+        );
+        assert!(semester_end_date("Summer", 2027).is_none());
+    }
+
+    #[test]
+    fn salvages_plain_grouped_thesaurus_output() {
+        let raw = "CLOSE: essential, significant, vital\nRELATED: consequential, notable, meaningful\nBROAD: central, influential, weighty";
+        let parsed: serde_json::Value = serde_json::from_str(
+            &thesaurus_json_from_response(raw, "important").expect("grouped thesaurus JSON"),
+        )
+        .expect("valid JSON");
+        assert_eq!(parsed["close"][0], "essential");
+        assert_eq!(parsed["related"][1], "notable");
+        assert_eq!(parsed["broad"][2], "weighty");
+
+        let unlabeled = "1. essential\n2. significant\n3. consequential\n4. notable\n5. central\n6. influential";
+        let parsed: serde_json::Value = serde_json::from_str(
+            &thesaurus_json_from_response(unlabeled, "important")
+                .expect("unlabeled thesaurus JSON"),
+        )
+        .expect("valid JSON");
+        assert_eq!(parsed["close"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["related"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["broad"].as_array().map(Vec::len), Some(2));
     }
 }

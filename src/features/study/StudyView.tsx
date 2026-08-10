@@ -1,4 +1,4 @@
-import { Check, ChevronLeft, ChevronRight, Clock3, RotateCcw, Shuffle, Sparkles, Star, X } from 'lucide-react'
+import { BrainCircuit, Check, ChevronLeft, ChevronRight, Clock3, Lightbulb, LoaderCircle, RotateCcw, Shuffle, Sparkles, Star, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import type { Flashcard, FlashcardSetDetail } from '../../lib/types'
@@ -6,15 +6,42 @@ import { createQuestion, createTest, isCorrect, shuffled, type StudyQuestion, ty
 
 interface StudyViewProps {
   set: FlashcardSetDetail
-  mode: 'flashcards' | 'learn' | 'test' | 'match'
+  mode: 'flashcards' | 'learn' | 'test' | 'match' | 'teachItBack'
   cardIds?: string[]
+  aiEnabled: boolean
+  onGenerateTeachQuestion: (front: string, back: string, shownSide: 'front' | 'back') => Promise<string>
+  onGradeTeachAnswer: (front: string, back: string, question: string, target: string, answer: string) => Promise<string>
   onBack: () => void
   onModeChange: (mode: StudyViewProps['mode']) => void
 }
 
 type RecordResponse = (cardId: string, isCorrect: boolean, questionType: string, answer?: string) => void
 
-export function StudyView({ set, mode, cardIds, onBack, onModeChange }: StudyViewProps) {
+type TeachQuestion = { question: string; target: string; hint: string }
+type TeachGrade = { score: number; verdict: 'strong' | 'good' | 'developing' | 'review'; feedback: string; understood: string[]; missed: string[] }
+
+function parseTeachQuestion(raw: string): TeachQuestion | null {
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>
+    const question = typeof value.question === 'string' ? value.question.trim() : ''
+    if (!question) return null
+    return { question, target: typeof value.target === 'string' ? value.target.trim() : '', hint: typeof value.hint === 'string' ? value.hint.trim() : '' }
+  } catch { return null }
+}
+
+function parseTeachGrade(raw: string): TeachGrade | null {
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>
+    const score = Math.max(0, Math.min(100, Math.round(Number(value.score))))
+    if (!Number.isFinite(score)) return null
+    const list = (key: string) => Array.isArray(value[key]) ? value[key].filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean).slice(0, 3) : []
+    const allowed = ['strong', 'good', 'developing', 'review'] as const
+    const verdict = allowed.includes(value.verdict as typeof allowed[number]) ? value.verdict as typeof allowed[number] : score >= 85 ? 'strong' : score >= 60 ? 'good' : score >= 35 ? 'developing' : 'review'
+    return { score, verdict, feedback: typeof value.feedback === 'string' ? value.feedback.trim() : '', understood: list('understood'), missed: list('missed') }
+  } catch { return null }
+}
+
+export function StudyView({ set, mode, cardIds, aiEnabled, onGenerateTeachQuestion, onGradeTeachAnswer, onBack, onModeChange }: StudyViewProps) {
   const sessionRef = useRef<string | null>(null)
   const cards = useMemo(
     () => cardIds?.length ? set.cards.filter((card) => cardIds.includes(card.id)) : set.cards,
@@ -61,13 +88,14 @@ export function StudyView({ set, mode, cardIds, onBack, onModeChange }: StudyVie
   return <main className="study-view">
     <header className="study-header">
       <button className="back-button" onClick={onBack}><ChevronLeft size={18} /> {set.title}</button>
-      <nav>{(['flashcards', 'learn', 'test', 'match'] as const).map((item) => <button key={item} onClick={() => onModeChange(item)} className={mode === item ? 'study-tab active' : 'study-tab'}>{item === 'flashcards' ? 'Flashcards' : item === 'learn' ? 'Learn' : item === 'test' ? 'Test' : 'Match'}</button>)}</nav>
+      <nav>{(['flashcards', 'learn', 'test', 'match', 'teachItBack'] as const).map((item) => <button key={item} disabled={item === 'teachItBack' && !aiEnabled} title={item === 'teachItBack' && !aiEnabled ? 'Enable AI in Settings to use Teach It Back' : undefined} onClick={() => onModeChange(item)} className={`${mode === item ? 'study-tab active' : 'study-tab'}${item === 'teachItBack' ? ' ai-study-tab' : ''}`}>{item === 'flashcards' ? 'Flashcards' : item === 'learn' ? 'Learn' : item === 'test' ? 'Test' : item === 'match' ? 'Match' : <><Sparkles size={12} /> Teach It Back</>}</button>)}</nav>
       <span className="study-local">{mastery.mastered ?? 0} mastered · {mastery.needsWork ?? 0} need work</span>
     </header>
     {mode === 'flashcards' && <Flashcards cards={cards} onRecord={record} />}
     {mode === 'learn' && <Learn cards={cards} onRecord={record} />}
     {mode === 'test' && <Test setId={set.id} cards={cards} onRecord={record} />}
     {mode === 'match' && <Match setId={set.id} cards={cards} onRecord={record} />}
+    {mode === 'teachItBack' && <TeachItBack cards={cards} onRecord={record} onGenerateQuestion={onGenerateTeachQuestion} onGradeAnswer={onGradeTeachAnswer} />}
   </main>
 }
 
@@ -117,6 +145,81 @@ function Flashcards({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordR
         {flipped ? <><button className="button response-button learning" onClick={() => advance(false)}><X size={17} /> I don’t know it</button><button className="button response-button know" onClick={() => advance(true)}><Check size={17} /> I know it</button></> : <span className="study-hint">Flip the card to self-check</span>}
         <button className="round-button" disabled={index === activeCards.length - 1} onClick={() => advance()} aria-label="Next card"><ChevronRight size={21} /></button>
       </div></> : <div className="flashcard-filter-empty"><Star size={22} /><h2>{starredOnly ? 'No starred cards yet.' : 'No cards in this set.'}</h2><p>{starredOnly ? 'Uncheck Starred only to keep studying every card.' : 'Add cards to this set before starting a session.'}</p>{starredOnly && <button className="button button-soft button-small" onClick={() => setStarredOnly(false)}>Show all cards</button>}</div>}
+  </section>
+}
+
+function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer }: { cards: Flashcard[]; onRecord: RecordResponse; onGenerateQuestion: StudyViewProps['onGenerateTeachQuestion']; onGradeAnswer: StudyViewProps['onGradeTeachAnswer'] }) {
+  const [queue, setQueue] = useState(() => shuffled(cards))
+  const [index, setIndex] = useState(0)
+  const [question, setQuestion] = useState<TeachQuestion | null>(null)
+  const [answer, setAnswer] = useState('')
+  const [grade, setGrade] = useState<TeachGrade | null>(null)
+  const [loadingQuestion, setLoadingQuestion] = useState(false)
+  const [grading, setGrading] = useState(false)
+  const [showHint, setShowHint] = useState(false)
+  const [error, setError] = useState('')
+  const [correctCount, setCorrectCount] = useState(0)
+  const generateQuestionRef = useRef(onGenerateQuestion)
+  generateQuestionRef.current = onGenerateQuestion
+  const card = queue[index]
+  const shownSide: 'front' | 'back' = index % 2 === 0 ? 'front' : 'back'
+
+  useEffect(() => {
+    if (!card) return
+    let cancelled = false
+    setQuestion(null)
+    setAnswer('')
+    setGrade(null)
+    setShowHint(false)
+    setError('')
+    setLoadingQuestion(true)
+    void generateQuestionRef.current(card.front, card.back, shownSide).then((raw) => {
+      if (cancelled) return
+      const parsed = parseTeachQuestion(raw)
+      if (parsed) setQuestion(parsed)
+      else setQuestion({ question: shownSide === 'front' ? `Describe ${card.front} in your own words. What does it mean?` : 'What idea does this description represent? Explain it in your own words.', target: shownSide === 'front' ? card.back : card.front, hint: shownSide === 'front' ? card.back.split(/\s+/).slice(0, 4).join(' ') : card.front })
+    }).catch((caught: unknown) => {
+      if (!cancelled) {
+        setError(caught instanceof Error ? caught.message : 'SoFlo could not prepare this question.')
+        setQuestion({ question: shownSide === 'front' ? `Describe ${card.front} in your own words. What does it mean?` : 'What idea does this description represent? Explain it in your own words.', target: shownSide === 'front' ? card.back : card.front, hint: '' })
+      }
+    }).finally(() => { if (!cancelled) setLoadingQuestion(false) })
+    return () => { cancelled = true }
+  }, [card, shownSide])
+
+  if (!cards.length) return <StudyEmpty text="Add cards before using Teach It Back." />
+  if (!card) return <section className="teach-back-study teach-back-complete"><span className="teach-back-orb"><BrainCircuit size={29} /></span><p className="eyebrow">TEACH IT BACK</p><h1>You explained the whole set.</h1><p>{correctCount} of {queue.length} explanations showed solid understanding. Every response has been added to your mastery history.</p><button className="button button-primary ai-action" onClick={() => { setQueue(shuffled(cards)); setIndex(0); setCorrectCount(0) }}><RotateCcw size={16} /> Teach it again</button></section>
+
+  const submit = async () => {
+    if (!question || !answer.trim() || grading || grade) return
+    setGrading(true)
+    setError('')
+    try {
+      const parsed = parseTeachGrade(await onGradeAnswer(card.front, card.back, question.question, question.target, answer.trim()))
+      if (!parsed) throw new Error('SoFlo could not read this teach-back review.')
+      setGrade(parsed)
+      const correct = parsed.score >= 60
+      if (correct) setCorrectCount((value) => value + 1)
+      onRecord(card.id, correct, 'teachItBack', answer.trim())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'SoFlo could not grade this explanation.')
+      setGrade({ score: 0, verdict: 'review', feedback: 'The local model could not grade this response, so SoFlo kept your session moving. Review the card once more when you are ready.', understood: [], missed: [] })
+      onRecord(card.id, false, 'teachItBack', answer.trim())
+    } finally { setGrading(false) }
+  }
+  const next = () => setIndex((value) => value + 1)
+
+  return <section className="teach-back-study">
+    <div className="teach-back-heading"><div><p className="eyebrow">AI STUDY GAME</p><h1>Teach It Back.</h1><p>Explain the idea naturally. SoFlo checks your understanding, then always moves you forward.</p></div><span>{index + 1} / {queue.length}</span></div>
+    <article className="teach-back-card">
+      <div className="teach-back-clue"><small>{shownSide === 'front' ? 'TERM / PROMPT' : 'DEFINITION / CONTEXT'}</small><strong>{shownSide === 'front' ? card.front : card.back}</strong></div>
+      <div className="teach-back-question">{loadingQuestion ? <div className="teach-back-loading"><LoaderCircle size={19} /> Building a question from both sides of this card…</div> : <><small>DESCRIBE IT IN YOUR OWN WORDS</small><h2>{question?.question}</h2></>}</div>
+      {question?.hint && !grade && <button className="teach-back-hint" onClick={() => setShowHint((value) => !value)}><Lightbulb size={14} /> {showHint ? question.hint : 'Need a small hint?'}</button>}
+      <textarea value={answer} disabled={loadingQuestion || Boolean(grade)} onChange={(event) => setAnswer(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void submit() }} rows={6} placeholder="Explain what this means as if you were teaching it to someone else…" />
+      {error && <p className="teach-back-error">{error}</p>}
+      {!grade && <button className="button button-primary ai-action teach-back-submit" disabled={loadingQuestion || grading || !answer.trim()} onClick={() => void submit()}>{grading ? <><LoaderCircle className="teach-back-spin" size={16} /> Reviewing your explanation…</> : <><Sparkles size={16} /> Check my explanation</>}</button>}
+      {grade && <div className={`teach-back-grade ${grade.score >= 60 ? 'passed' : 'review'}`}><div><span>{grade.score}</span><div><small>{grade.verdict}</small><strong>{grade.score >= 60 ? 'You understand this.' : 'Give this one another look.'}</strong></div></div><p>{grade.feedback}</p>{grade.understood.length > 0 && <section><strong>What you understood</strong><ul>{grade.understood.map((item) => <li key={item}>{item}</li>)}</ul></section>}{grade.missed.length > 0 && <section><strong>Worth reviewing</strong><ul>{grade.missed.map((item) => <li key={item}>{item}</li>)}</ul></section>}<button className="button button-primary" onClick={next}>{index === queue.length - 1 ? 'Finish set' : 'Next question'} <ChevronRight size={15} /></button></div>}
+    </article>
   </section>
 }
 
