@@ -575,7 +575,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 9 {
+        if version >= 10 {
             return Ok(());
         }
         if version < 1 {
@@ -942,6 +942,26 @@ mod tests {
         }
         drop(connection);
         drop(database);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn upgrades_existing_study_web_schema_to_multi_set_sources() {
+        let directory = std::env::temp_dir().join(format!("soflo-study-web-upgrade-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("soflo.sqlite3");
+        let database = Database::new(path.clone()).expect("create database");
+        let connection = database.open().expect("open database");
+        connection.execute_batch("DROP TABLE study_web_sources; PRAGMA user_version = 9;").expect("simulate schema version 9");
+        drop(connection);
+        drop(database);
+        let upgraded = Database::new(path).expect("upgrade database");
+        let connection = upgraded.open().expect("open upgraded database");
+        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
+        assert_eq!(version, 10);
+        assert_eq!(exists, 1);
+        drop(connection);
+        drop(upgraded);
         let _ = fs::remove_dir_all(directory);
     }
 

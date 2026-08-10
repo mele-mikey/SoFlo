@@ -480,7 +480,7 @@ function App() {
       navigate({ kind: 'studyWeb', classId: targets[0].classId, webId: web.id })
       showToast(existingWebId ? 'Study Web regenerated.' : 'Study Web created.')
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'SoFlo could not create that Study Web.', 'error')
+      showToast(aiFailureMessage(error), 'error')
     } finally {
       setAiWorking(false)
       setAiProgress(null)
