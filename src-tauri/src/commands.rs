@@ -138,6 +138,7 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 const AI_CONTEXT_SIZE: &str = "8192";
+const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
 // Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
 // the very slow half-CPU/half-GPU split that made generation drag on.
@@ -151,6 +152,8 @@ const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
 struct AiServer {
     child: Child,
     model_path: String,
+    context_size: String,
+    reasoning: String,
     port: u16,
     last_used: Instant,
 }
@@ -995,9 +998,11 @@ pub async fn define_word(
     word: String,
     paper_context: String,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || define_word_blocking(app, model_path, word, paper_context))
-        .await
-        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        define_word_blocking(app, model_path, word, paper_context)
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
 fn define_word_blocking(
@@ -1055,9 +1060,11 @@ pub async fn ai_thesaurus(
     word: String,
     paper_context: String,
 ) -> CommandResult<String> {
-    tauri::async_runtime::spawn_blocking(move || ai_thesaurus_blocking(app, model_path, word, paper_context))
-        .await
-        .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_thesaurus_blocking(app, model_path, word, paper_context)
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
 fn ai_thesaurus_blocking(
@@ -1469,6 +1476,10 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u
     ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "on")
 }
 
+fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "on")
+}
+
 fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     ensure_model_server(
         &WORD_AI_SERVER,
@@ -1492,6 +1503,8 @@ fn ensure_model_server(
         .map_err(|_| "SoFlo's local AI state is unavailable.".to_string())?;
     if let Some(server) = guard.as_mut() {
         if server.model_path == model_path
+            && server.context_size == context_size
+            && server.reasoning == reasoning
             && server.last_used.elapsed() < AI_WARM_WINDOW
             && server
                 .child
@@ -1541,6 +1554,8 @@ fn ensure_model_server(
     *guard = Some(AiServer {
         child,
         model_path: model_path.to_string(),
+        context_size: context_size.to_string(),
+        reasoning: reasoning.to_string(),
         port: port_number,
         last_used: Instant::now(),
     });
@@ -2296,11 +2311,23 @@ pub fn name_document_revision(
     name: String,
 ) -> CommandResult<()> {
     let trimmed = name.trim();
-    let changed = database.open()?.execute(
-        "UPDATE document_revisions SET name=?1 WHERE id=?2",
-        params![if trimmed.is_empty() { None::<String> } else { Some(trimmed.to_string()) }, revision_id],
-    ).map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("That saved version could not be found.".into()); }
+    let changed = database
+        .open()?
+        .execute(
+            "UPDATE document_revisions SET name=?1 WHERE id=?2",
+            params![
+                if trimmed.is_empty() {
+                    None::<String>
+                } else {
+                    Some(trimmed.to_string())
+                },
+                revision_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("That saved version could not be found.".into());
+    }
     Ok(())
 }
 
@@ -2311,17 +2338,22 @@ pub fn restore_document_revision(
     revision_id: String,
 ) -> CommandResult<DocumentDetail> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let (restore_title, restore_content, restore_plain): (String, String, String) = transaction.query_row(
         "SELECT title, content, content_plain FROM document_revisions WHERE id=?1 AND document_id=?2",
         params![revision_id, id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|_| "That saved version could not be found.".to_string())?;
-    let (current_title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
-        "SELECT title, content, content_plain, revision FROM documents WHERE id=?1",
-        [&id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).map_err(|error| error.to_string())?;
+    let (current_title, current_content, current_plain, revision): (String, String, String, i32) =
+        transaction
+            .query_row(
+                "SELECT title, content, content_plain, revision FROM documents WHERE id=?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
     transaction.execute(
         "INSERT INTO document_revisions (id, document_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
         params![Uuid::new_v4().to_string(), id, current_title, current_content, current_plain, revision],
@@ -2424,11 +2456,23 @@ pub fn name_lecture_revision(
     name: String,
 ) -> CommandResult<()> {
     let trimmed = name.trim();
-    let changed = database.open()?.execute(
-        "UPDATE lecture_revisions SET name=?1 WHERE id=?2",
-        params![if trimmed.is_empty() { None::<String> } else { Some(trimmed.to_string()) }, revision_id],
-    ).map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("That saved lecture version could not be found.".into()); }
+    let changed = database
+        .open()?
+        .execute(
+            "UPDATE lecture_revisions SET name=?1 WHERE id=?2",
+            params![
+                if trimmed.is_empty() {
+                    None::<String>
+                } else {
+                    Some(trimmed.to_string())
+                },
+                revision_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("That saved lecture version could not be found.".into());
+    }
     Ok(())
 }
 
@@ -2439,17 +2483,22 @@ pub fn restore_lecture_revision(
     revision_id: String,
 ) -> CommandResult<LectureDetail> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let (restore_title, restore_content, restore_plain): (String, String, String) = transaction.query_row(
         "SELECT title, content, content_plain FROM lecture_revisions WHERE id=?1 AND lecture_id=?2",
         params![revision_id, id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|_| "That saved lecture version could not be found.".to_string())?;
-    let (current_title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
-        "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
-        [&id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).map_err(|error| error.to_string())?;
+    let (current_title, current_content, current_plain, revision): (String, String, String, i32) =
+        transaction
+            .query_row(
+                "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
     transaction.execute(
         "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
         params![Uuid::new_v4().to_string(), id, current_title, current_content, current_plain, revision],
@@ -3096,197 +3145,1040 @@ struct StudyWebSemanticGroup {
 struct StudyWebSemanticRelationship {
     source: String,
     target: String,
-    #[serde(default = "default_study_web_relationship_type", alias = "relationshipType")]
+    #[serde(
+        default = "default_study_web_relationship_type",
+        alias = "relationshipType"
+    )]
     relationship_type: String,
     #[serde(default = "default_study_web_strength")]
     strength: f64,
 }
 
-fn default_study_web_relationship_type() -> String { "related_to".into() }
-fn default_study_web_strength() -> f64 { 0.5 }
+#[derive(serde::Deserialize)]
+struct StudyWebParentClassification {
+    #[serde(default)]
+    assignments: Vec<StudyWebParentAssignment>,
+}
 
-fn study_web_sources(database: &Database, set_ids: &[String]) -> CommandResult<(String, Vec<String>, Vec<StudyWebSourceCard>)> {
+#[derive(serde::Deserialize)]
+struct StudyWebParentAssignment {
+    id: String,
+    parent: String,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebLeafClassification {
+    #[serde(default)]
+    assignments: Vec<StudyWebLeafAssignment>,
+}
+
+#[derive(serde::Deserialize)]
+struct StudyWebLeafAssignment {
+    id: String,
+    leaf: String,
+}
+
+fn default_study_web_relationship_type() -> String {
+    "related_to".into()
+}
+fn default_study_web_strength() -> f64 {
+    0.5
+}
+
+fn study_web_sources(
+    database: &Database,
+    set_ids: &[String],
+) -> CommandResult<(String, Vec<String>, Vec<StudyWebSourceCard>)> {
     study_web_sources_from_connection(&database.open()?, set_ids)
 }
 
-fn study_web_sources_from_connection(connection: &Connection, set_ids: &[String]) -> CommandResult<(String, Vec<String>, Vec<StudyWebSourceCard>)> {
-    let unique_ids = set_ids.iter().filter(|id| !id.trim().is_empty()).fold(Vec::<String>::new(), |mut values, id| { if !values.contains(id) { values.push(id.clone()); } values });
-    if unique_ids.is_empty() { return Err("Choose at least one flashcard set for this Study Web.".into()); }
-    if unique_ids.len() > 5 { return Err("A Study Web can combine up to five flashcard sets.".into()); }
+fn study_web_sources_from_connection(
+    connection: &Connection,
+    set_ids: &[String],
+) -> CommandResult<(String, Vec<String>, Vec<StudyWebSourceCard>)> {
+    let unique_ids = set_ids.iter().filter(|id| !id.trim().is_empty()).fold(
+        Vec::<String>::new(),
+        |mut values, id| {
+            if !values.contains(id) {
+                values.push(id.clone());
+            }
+            values
+        },
+    );
+    if unique_ids.is_empty() {
+        return Err("Choose at least one flashcard set for this Study Web.".into());
+    }
+    if unique_ids.len() > 5 {
+        return Err("A Study Web can combine up to five flashcard sets.".into());
+    }
     let mut class_id = None;
     let mut titles = Vec::new();
     let mut cards = Vec::new();
     for set_id in &unique_ids {
-        let (next_class_id, title, next_cards) = study_web_source_from_connection(connection, set_id)?;
+        let (next_class_id, title, next_cards) =
+            study_web_source_from_connection(connection, set_id)?;
         if let Some(current_class_id) = &class_id {
-            if current_class_id != &next_class_id { return Err("All Study Web sets must belong to the same class.".into()); }
-        } else { class_id = Some(next_class_id); }
+            if current_class_id != &next_class_id {
+                return Err("All Study Web sets must belong to the same class.".into());
+            }
+        } else {
+            class_id = Some(next_class_id);
+        }
         titles.push(title);
         cards.extend(next_cards);
     }
     Ok((class_id.unwrap_or_default(), titles, cards))
 }
 
-fn study_web_set_ids(connection: &Connection, web_id: &str, fallback_set_id: &str) -> CommandResult<Vec<String>> {
+fn study_web_set_ids(
+    connection: &Connection,
+    web_id: &str,
+    fallback_set_id: &str,
+) -> CommandResult<Vec<String>> {
     let mut statement = connection.prepare("SELECT flashcard_set_id FROM study_web_sources WHERE study_web_id=?1 ORDER BY position, flashcard_set_id").map_err(|error| error.to_string())?;
-    let ids = statement.query_map([web_id], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    Ok(if ids.is_empty() { vec![fallback_set_id.to_string()] } else { ids })
+    let ids = statement
+        .query_map([web_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(if ids.is_empty() {
+        vec![fallback_set_id.to_string()]
+    } else {
+        ids
+    })
 }
 
 fn study_web_source_hash(cards: &[StudyWebSourceCard]) -> String {
-    cards.iter().map(|card| format!("{}:{}:{}:{}", card.id, card.front, card.back, card.updated_at)).collect::<Vec<_>>().join("\u{1f}")
+    cards
+        .iter()
+        .map(|card| {
+            format!(
+                "{}:{}:{}:{}",
+                card.id, card.front, card.back, card.updated_at
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
 }
 
 fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<StudyWebDetail> {
     let (id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at): (String, String, String, String, String, String, String) = connection.query_row("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).map_err(|_| "That Study Web could not be found.".to_string())?;
     let mut node_statement = connection.prepare("SELECT flashcard_id, x, y, manually_positioned, pinned FROM study_web_nodes WHERE study_web_id=?1 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
-    let nodes = node_statement.query_map([&id], |row| Ok(StudyWebNode { card_id: row.get(0)?, x: row.get(1)?, y: row.get(2)?, manually_positioned: row.get::<_, i32>(3)? != 0, pinned: row.get::<_, i32>(4)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let nodes = node_statement
+        .query_map([&id], |row| {
+            Ok(StudyWebNode {
+                card_id: row.get(0)?,
+                x: row.get(1)?,
+                y: row.get(2)?,
+                manually_positioned: row.get::<_, i32>(3)? != 0,
+                pinned: row.get::<_, i32>(4)? != 0,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let mut group_statement = connection.prepare("SELECT id, label, parent_group_id FROM study_web_groups WHERE study_web_id=?1 ORDER BY label COLLATE NOCASE").map_err(|error| error.to_string())?;
-    let group_rows = group_statement.query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let group_rows = group_statement
+        .query_map([&id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let mut groups = Vec::new();
     for (group_id, label, parent_group_id) in group_rows {
         let mut members = connection.prepare("SELECT flashcard_id FROM study_web_group_members WHERE study_web_id=?1 AND group_id=?2 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
-        let card_ids = members.query_map(params![&id, &group_id], |row| row.get(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<String>, _>>().map_err(|error| error.to_string())?;
-        groups.push(StudyWebGroup { id: group_id, label, parent_group_id, card_ids });
+        let card_ids = members
+            .query_map(params![&id, &group_id], |row| row.get(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|error| error.to_string())?;
+        groups.push(StudyWebGroup {
+            id: group_id,
+            label,
+            parent_group_id,
+            card_ids,
+        });
     }
     let mut relationship_statement = connection.prepare("SELECT id, source_flashcard_id, target_flashcard_id, relationship_type, strength FROM study_web_relationships WHERE study_web_id=?1 ORDER BY strength DESC, id").map_err(|error| error.to_string())?;
-    let relationships = relationship_statement.query_map([&id], |row| Ok(StudyWebRelationship { id: row.get(0)?, source_card_id: row.get(1)?, target_card_id: row.get(2)?, relationship_type: row.get(3)?, strength: row.get(4)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let relationships = relationship_statement
+        .query_map([&id], |row| {
+            Ok(StudyWebRelationship {
+                id: row.get(0)?,
+                source_card_id: row.get(1)?,
+                target_card_id: row.get(2)?,
+                relationship_type: row.get(3)?,
+                strength: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let flashcard_set_ids = study_web_set_ids(connection, &id, &flashcard_set_id)?;
     let (_, _, cards) = study_web_sources_from_connection(connection, &flashcard_set_ids)?;
-    Ok(StudyWebDetail { id, class_id, flashcard_set_id, flashcard_set_ids, name, generated_at, updated_at, out_of_date: source_hash != study_web_source_hash(&cards), nodes, groups, relationships })
+    Ok(StudyWebDetail {
+        id,
+        class_id,
+        flashcard_set_id,
+        flashcard_set_ids,
+        name,
+        generated_at,
+        updated_at,
+        out_of_date: source_hash != study_web_source_hash(&cards),
+        nodes,
+        groups,
+        relationships,
+    })
 }
 
-fn study_web_source_from_connection(connection: &Connection, set_id: &str) -> CommandResult<(String, String, Vec<StudyWebSourceCard>)> {
-    let (class_id, title): (String, String) = connection.query_row("SELECT class_id, title FROM flashcard_sets WHERE id=?1 AND deleted_at IS NULL", [set_id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|_| "That flashcard set could not be found.".to_string())?;
+fn study_web_source_from_connection(
+    connection: &Connection,
+    set_id: &str,
+) -> CommandResult<(String, String, Vec<StudyWebSourceCard>)> {
+    let (class_id, title): (String, String) = connection
+        .query_row(
+            "SELECT class_id, title FROM flashcard_sets WHERE id=?1 AND deleted_at IS NULL",
+            [set_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "That flashcard set could not be found.".to_string())?;
     let mut statement = connection.prepare("SELECT id, front, back, updated_at FROM flashcards WHERE set_id=?1 ORDER BY position ASC, created_at ASC").map_err(|error| error.to_string())?;
-    let cards = statement.query_map([set_id], |row| Ok(StudyWebSourceCard { id: row.get(0)?, front: row.get(1)?, back: row.get(2)?, updated_at: row.get(3)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let cards = statement
+        .query_map([set_id], |row| {
+            Ok(StudyWebSourceCard {
+                id: row.get(0)?,
+                front: row.get(1)?,
+                back: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     Ok((class_id, title, cards))
 }
 
 #[tauri::command]
-fn list_study_webs_by_deleted(database: State<'_, Database>, class_id: String, deleted: bool) -> CommandResult<Vec<StudyWebSummary>> {
+fn list_study_webs_by_deleted(
+    database: State<'_, Database>,
+    class_id: String,
+    deleted: bool,
+) -> CommandResult<Vec<StudyWebSummary>> {
     let connection = database.open()?;
     let mut statement = connection.prepare("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at, deleted_at FROM study_webs WHERE class_id=?1 AND (deleted_at IS NOT NULL)=?2 ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![&class_id, deleted as i32], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![&class_id, deleted as i32], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
     let mut webs = Vec::new();
     for row in rows {
-        let (id, class_id, set_id, name, source_hash, generated_at, updated_at, deleted_at) = row.map_err(|error| error.to_string())?;
-        let card_count = connection.query_row("SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
-        let group_count = connection.query_row("SELECT COUNT(*) FROM study_web_groups WHERE study_web_id=?1", [&id], |row| row.get(0)).unwrap_or(0);
+        let (id, class_id, set_id, name, source_hash, generated_at, updated_at, deleted_at) =
+            row.map_err(|error| error.to_string())?;
+        let card_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let group_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM study_web_groups WHERE study_web_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         let flashcard_set_ids = study_web_set_ids(&connection, &id, &set_id)?;
         let (_, _, cards) = study_web_sources_from_connection(&connection, &flashcard_set_ids)?;
-        webs.push(StudyWebSummary { id, class_id, flashcard_set_id: set_id, flashcard_set_ids, name, card_count, group_count, generated_at, updated_at, deleted_at, out_of_date: source_hash != study_web_source_hash(&cards) });
+        webs.push(StudyWebSummary {
+            id,
+            class_id,
+            flashcard_set_id: set_id,
+            flashcard_set_ids,
+            name,
+            card_count,
+            group_count,
+            generated_at,
+            updated_at,
+            deleted_at,
+            out_of_date: source_hash != study_web_source_hash(&cards),
+        });
     }
     Ok(webs)
 }
 
 #[tauri::command]
-pub fn list_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> { list_study_webs_by_deleted(database, class_id, false) }
+pub fn list_study_webs(
+    database: State<'_, Database>,
+    class_id: String,
+) -> CommandResult<Vec<StudyWebSummary>> {
+    list_study_webs_by_deleted(database, class_id, false)
+}
 
 #[tauri::command]
-pub fn list_trashed_study_webs(database: State<'_, Database>, class_id: String) -> CommandResult<Vec<StudyWebSummary>> { list_study_webs_by_deleted(database, class_id, true) }
+pub fn list_trashed_study_webs(
+    database: State<'_, Database>,
+    class_id: String,
+) -> CommandResult<Vec<StudyWebSummary>> {
+    list_study_webs_by_deleted(database, class_id, true)
+}
 
 #[tauri::command]
-pub fn set_study_web_deleted(database: State<'_, Database>, id: String, deleted: bool) -> CommandResult<()> {
+pub fn set_study_web_deleted(
+    database: State<'_, Database>,
+    id: String,
+    deleted: bool,
+) -> CommandResult<()> {
     let connection = database.open()?;
     let changed = connection.execute("UPDATE study_webs SET deleted_at=CASE WHEN ?1 THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![deleted as i32, id]).map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("That Study Web could not be found.".into()); }
+    if changed == 0 {
+        return Err("That Study Web could not be found.".into());
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_study_web(database: State<'_, Database>, id: String) -> CommandResult<StudyWebDetail> { read_study_web_detail(&database.open()?, &id) }
+pub fn get_study_web(database: State<'_, Database>, id: String) -> CommandResult<StudyWebDetail> {
+    read_study_web_detail(&database.open()?, &id)
+}
 
 #[tauri::command]
-pub fn save_study_web_node_position(database: State<'_, Database>, input: SaveStudyWebNodePositionInput) -> CommandResult<()> {
-    if !input.x.is_finite() || !input.y.is_finite() { return Err("That Study Web position is invalid.".into()); }
+pub fn save_study_web_node_position(
+    database: State<'_, Database>,
+    input: SaveStudyWebNodePositionInput,
+) -> CommandResult<()> {
+    if !input.x.is_finite() || !input.y.is_finite() {
+        return Err("That Study Web position is invalid.".into());
+    }
     let connection = database.open()?;
     if let Some(pinned) = input.pinned {
         connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1, pinned=?3 WHERE study_web_id=?4 AND flashcard_id=?5", params![input.x, input.y, if pinned { 1 } else { 0 }, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
     } else {
         connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1 WHERE study_web_id=?3 AND flashcard_id=?4", params![input.x, input.y, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
     }
-    connection.execute("UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.study_web_id]).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn toggle_study_web_relationship(database: State<'_, Database>, input: ToggleStudyWebRelationshipInput) -> CommandResult<Option<StudyWebRelationship>> {
-    if input.source_card_id == input.target_card_id { return Err("Choose two different cards to link.".into()); }
+pub fn toggle_study_web_relationship(
+    database: State<'_, Database>,
+    input: ToggleStudyWebRelationshipInput,
+) -> CommandResult<Option<StudyWebRelationship>> {
+    if input.source_card_id == input.target_card_id {
+        return Err("Choose two different cards to link.".into());
+    }
     let connection = database.open()?;
     let present: i64 = connection.query_row("SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1 AND flashcard_id IN (?2, ?3)", params![&input.study_web_id, &input.source_card_id, &input.target_card_id], |row| row.get(0)).map_err(|error| error.to_string())?;
-    if present != 2 { return Err("Both cards must belong to this Study Web.".into()); }
-    let (source, target) = if input.source_card_id < input.target_card_id { (input.source_card_id, input.target_card_id) } else { (input.target_card_id, input.source_card_id) };
+    if present != 2 {
+        return Err("Both cards must belong to this Study Web.".into());
+    }
+    let (source, target) = if input.source_card_id < input.target_card_id {
+        (input.source_card_id, input.target_card_id)
+    } else {
+        (input.target_card_id, input.source_card_id)
+    };
     let existing: Option<String> = connection.query_row("SELECT id FROM study_web_relationships WHERE study_web_id=?1 AND source_flashcard_id=?2 AND target_flashcard_id=?3", params![&input.study_web_id, &source, &target], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
     let result = if let Some(id) = existing {
-        connection.execute("DELETE FROM study_web_relationships WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+        connection
+            .execute("DELETE FROM study_web_relationships WHERE id=?1", [&id])
+            .map_err(|error| error.to_string())?;
         None
     } else {
         let id = Uuid::new_v4().to_string();
         connection.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,'manual_related',0.75)", params![&id, &input.study_web_id, &source, &target]).map_err(|error| error.to_string())?;
-        Some(StudyWebRelationship { id, source_card_id: source, target_card_id: target, relationship_type: "manual_related".into(), strength: 0.75 })
+        Some(StudyWebRelationship {
+            id,
+            source_card_id: source,
+            target_card_id: target,
+            relationship_type: "manual_related".into(),
+            strength: 0.75,
+        })
     };
-    connection.execute("UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.study_web_id]).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(result)
 }
 
 #[tauri::command]
-pub async fn generate_study_web(app: tauri::AppHandle, database: State<'_, Database>, set_ids: Vec<String>, model_path: String, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
+pub async fn generate_study_web(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    set_ids: Vec<String>,
+    model_path: String,
+    study_web_id: Option<String>,
+) -> CommandResult<StudyWebDetail> {
     let database = database.inner().clone();
     let (class_id, set_titles, cards) = study_web_sources(&database, &set_ids)?;
-    if cards.len() < 2 { return Err("Add a few more cards before creating a Study Web.".into()); }
+    if cards.len() < 2 {
+        return Err("Add a few more cards before creating a Study Web.".into());
+    }
     let app_for_ai = app.clone();
     let cards_for_ai = cards.clone();
-    let semantic = tauri::async_runtime::spawn_blocking(move || generate_study_web_semantics(app_for_ai, model_path, cards_for_ai)).await.map_err(|_| "SoFlo's Study Web task stopped unexpectedly.".to_string())??;
-    save_generated_study_web(&database, &class_id, &set_ids, &set_titles, &cards, semantic, study_web_id)
+    let semantic = tauri::async_runtime::spawn_blocking(move || {
+        generate_study_web_semantics(app_for_ai, model_path, cards_for_ai)
+    })
+    .await
+    .map_err(|_| "SoFlo's Study Web task stopped unexpectedly.".to_string())??;
+    save_generated_study_web(
+        &database,
+        &class_id,
+        &set_ids,
+        &set_titles,
+        &cards,
+        semantic,
+        study_web_id,
+    )
 }
 
-fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards: Vec<StudyWebSourceCard>) -> CommandResult<StudyWebSemanticPlan> {
+#[allow(unreachable_code)]
+fn generate_study_web_semantics(
+    app: tauri::AppHandle,
+    model_path: String,
+    cards: Vec<StudyWebSourceCard>,
+) -> CommandResult<StudyWebSemanticPlan> {
+    return generate_study_web_semantics_layered(app, model_path, cards);
+
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 8, "Starting your private local model");
-    let port = ensure_ai_server(&model_path, &app)?;
+    let port = ensure_study_web_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 24, "Reading each concept and definition");
-    let material = cards.iter().take(100).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(96).collect::<String>(), "definition": card.back.chars().take(240).collect::<String>() })).collect::<Vec<_>>();
+    // Short model-only IDs and compact source fields leave the local model enough
+    // context to return the complete web instead of a truncated JSON response.
+    let model_cards = cards
+        .iter()
+        .take(100)
+        .enumerate()
+        .map(|(index, card)| StudyWebSourceCard {
+            id: format!("c{}", index + 1),
+            front: card.front.chars().take(68).collect(),
+            back: card.back.chars().take(156).collect(),
+            updated_at: String::new(),
+        })
+        .collect::<Vec<_>>();
+    let material = model_cards.iter().map(|card| serde_json::json!({ "id": card.id, "term": card.front, "definition": card.back })).collect::<Vec<_>>();
     let prompt = format!("FLASHCARDS:\n{}\n\nRead every term and definition, then return the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
     let target_leaf_group_count = ((cards.len() + 3) / 4).clamp(2, 12);
-    let target_parent_group_count = ((target_leaf_group_count + 2) / 3).clamp(1, 4).min(target_leaf_group_count);
-    let system = format!("You are building the reasoning plan for an academic concept web. Return compact JSON only: {{\"groups\":[{{\"id\":\"parent-1\",\"label\":\"specific larger theme\",\"members\":[\"flashcard id\"],\"parent_id\":null}},{{\"id\":\"leaf-1\",\"label\":\"short specific subgroup\",\"members\":[\"flashcard id in a meaningful order\"],\"parent_id\":\"parent-1\"}}],\"relationships\":[{{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"direct_relation\",\"strength\":0.8}}]}}. Carefully read both sides of every supplied flashcard before deciding. Build a two-level semantic web, not a flat list: create roughly {target_leaf_group_count} compact leaf groups and {target_parent_group_count} broader parent groups. Every leaf group must have a parent_id pointing to one of the parent groups. A parent group's members must be the exact union of the card IDs in its child leaf groups. Each leaf should normally contain 2 to 6 closely related cards; do not make one group for every individual card unless it is genuinely isolated. Use short, descriptive labels for both levels: parent labels name a meaningful larger theme, while leaf labels name a narrower shared idea. Never use umbrella labels such as Core concepts, Key terms, Overview, or the whole subject name. Every supplied ID must appear in a leaf group and its parent group. A genuine bridge concept may appear in two closely related leaf groups only when it directly connects both; do not duplicate cards gratuitously. Add direct explanatory relationships within leaf groups, then add a few precise bridge relationships between cards in neighboring leaf groups when those groups belong together. A bridge must still be a real relationship between those exact cards, not merely a shared parent label. You may use reliable domain knowledge to interpret a term, but never connect cards merely because they share a broad category, discipline, system, location, vocabulary word, or analogous example. Before adding a relationship, ask whether you can state the exact direct relationship. Prefer no relationship over a speculative one. Valid links are direct part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or another well-established relationship. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.");
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(125)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let raw = local_chat_text(&client, port, &system, &prompt, 2800).unwrap_or_default();
-    let candidate = json_object_from_response(&raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or_else(|| fallback_study_web_plan(&cards));
+    let target_parent_group_count = ((target_leaf_group_count + 2) / 3)
+        .clamp(1, 4)
+        .min(target_leaf_group_count);
+    let max_relationship_count = target_leaf_group_count * 2 + 4;
+    let system = format!("You are building the reasoning plan for an academic concept web. Return compact JSON only: {{\"groups\":[{{\"id\":\"parent-1\",\"label\":\"specific larger theme\",\"members\":[],\"parent_id\":null}},{{\"id\":\"leaf-1\",\"label\":\"short specific subgroup\",\"members\":[\"flashcard id in a meaningful order\"],\"parent_id\":\"parent-1\"}}],\"relationships\":[{{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"direct_relation\",\"strength\":0.8}}]}}. Carefully read both sides of every supplied flashcard before deciding. Build a two-level semantic web, not a flat list: create roughly {target_leaf_group_count} compact leaf groups and {target_parent_group_count} broader parent groups. Every leaf group must have a parent_id pointing to one of the parent groups. Parent groups must use an empty members array: they inherit their cards from child leaf groups. Each leaf should normally contain 2 to 6 closely related cards; do not make one group for every individual card unless it is genuinely isolated. Use short, descriptive labels for both levels: parent labels name a meaningful larger theme, while leaf labels name a narrower shared idea. Never use umbrella labels such as Core concepts, Key terms, Overview, or the whole subject name. Every supplied ID must appear in a leaf group. A genuine bridge concept may appear in two closely related leaf groups only when it directly connects both; do not duplicate cards gratuitously. Add a small, meaningful set of direct explanatory relationships within leaf groups and precise bridge relationships between cards in neighboring leaf groups when those groups belong together. Return no more than {max_relationship_count} relationships total; do not chain every card just to fill space. A bridge must still be a real relationship between those exact cards, not merely a shared parent label. You may use reliable domain knowledge to interpret a term, but never connect cards merely because they share a broad category, discipline, system, location, vocabulary word, or analogous example. Before adding a relationship, ask whether you can state the exact direct relationship. Prefer no relationship over a speculative one. Valid links are direct part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or another well-established relationship. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(125))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let raw = local_chat_text(&client, port, &system, &prompt, 2600).unwrap_or_default();
+    let candidate = json_object_from_response(&raw)
+        .and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok())
+        .unwrap_or_else(|| fallback_study_web_plan(&model_cards));
     emit_ai_progress(&app, 66, "Checking relationships for real meaning");
-    let audit_prompt = format!("FLASHCARDS:\n{}\n\nCANDIDATE PLAN:\n{}\n\nReturn the corrected plan now.", serde_json::to_string(&material).unwrap_or_default(), serde_json::to_string(&candidate).unwrap_or_default());
-    let audit_system = "You are the quality gate for an academic concept web. Return the complete corrected JSON plan only, using exactly the schema from the candidate. Re-read the source definitions before approving any part of the candidate. The finished plan must be a two-level web: specific leaf groups with parent_id values, plus broader parent groups with parent_id null. Each parent must contain the union of its children so the hierarchy can be displayed. Reorganize flat or singleton-heavy plans into compact leaf clusters under meaningful larger themes. The goal is a connected semantic web with small clusters joined through a few justified bridge relationships, not a table of separate terms and not one undifferentiated cloud. Audit every relationship one by one: retain it only if there is a direct structural, functional, causal, sequential, contrasting, prerequisite, or other well-established relationship between those exact cards. Delete links based merely on the cards belonging to the same broad category, discipline, system, region, or familiar list. Use a bridge edge only when it precisely connects neighboring leaf groups. A sparse web with only trustworthy links is better than an impressive-looking but incorrect web. Every label must name the narrow shared idea or meaningful larger theme visible in its members, not a generic heading or whole-subject name. A bridge card may be in two close leaf groups only when it genuinely connects both. Keep every supplied card in a leaf and parent group, preserve only supplied IDs, and do not add commentary, markdown, or coordinates.";
-    let audited_raw = local_chat_text(&client, port, audit_system, &audit_prompt, 3000).unwrap_or_default();
-    let mut plan = json_object_from_response(&audited_raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or(candidate);
-    if !study_web_plan_has_hierarchy(&plan, &cards) {
+    let audit_prompt = format!(
+        "FLASHCARDS:\n{}\n\nCANDIDATE PLAN:\n{}\n\nReturn the corrected plan now.",
+        serde_json::to_string(&material).unwrap_or_default(),
+        serde_json::to_string(&candidate).unwrap_or_default()
+    );
+    let audit_system = "You are the quality gate for an academic concept web. Return the complete corrected JSON plan only, using exactly the schema from the candidate. Re-read the source definitions before approving any part of the candidate. The finished plan must be a two-level web: specific leaf groups with parent_id values, plus broader parent groups with parent_id null and empty members arrays. Parent groups inherit their cards from the child leaves. Reorganize flat or singleton-heavy plans into compact leaf clusters under meaningful larger themes. The goal is a connected semantic web with small clusters joined through a few justified bridge relationships, not a table of separate terms and not one undifferentiated cloud. Audit every relationship one by one: retain it only if there is a direct structural, functional, causal, sequential, contrasting, prerequisite, or other well-established relationship between those exact cards. Delete links based merely on the cards belonging to the same broad category, discipline, system, region, or familiar list. Use a bridge edge only when it precisely connects neighboring leaf groups. Keep the relationships deliberately sparse; do not create a long chain through every card. Every label must name the narrow shared idea or meaningful larger theme visible in its members, not a generic heading or whole-subject name. A bridge card may be in two close leaf groups only when it genuinely connects both. Keep every supplied card in a leaf group, preserve only supplied IDs, and do not add commentary, markdown, or coordinates.";
+    let audited_raw =
+        local_chat_text(&client, port, audit_system, &audit_prompt, 2600).unwrap_or_default();
+    let mut plan = json_object_from_response(&audited_raw)
+        .and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok())
+        .unwrap_or(candidate);
+    if !study_web_plan_has_hierarchy(&plan, &model_cards) {
         emit_ai_progress(&app, 84, "Building connected concept layers");
         let repair_prompt = format!("FLASHCARDS:\n{}\n\nPLAN TO REPAIR:\n{}\n\nReturn a corrected two-level Study Web plan now.", serde_json::to_string(&material).unwrap_or_default(), serde_json::to_string(&plan).unwrap_or_default());
-        let repair_system = "Return compact JSON only using the plan schema you were given. Repair this into a connected two-level semantic web. Create meaningful parent groups with parent_id null, then 2 to 6-card leaf groups that point to those parents. Parent members must contain the union of their child cards. Do not leave every card in its own group. Keep leaf labels narrow and parent labels broader but still descriptive. Add direct relationships inside leaf groups and a small number of well-established bridge relationships between related leaf groups so the visual result is a web. Never use a shared broad category alone as evidence for an edge. Use only supplied IDs and do not add commentary, markdown, or coordinates.";
-        if let Some(repaired) = json_object_from_response(&local_chat_text(&client, port, repair_system, &repair_prompt, 3200).unwrap_or_default()).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()) { plan = repaired; }
+        let repair_system = "Return compact JSON only using the plan schema you were given. Repair this into a connected two-level semantic web. Create meaningful parent groups with parent_id null and empty members arrays, then 2 to 6-card leaf groups that point to those parents. Do not leave every card in its own group. Keep leaf labels narrow and parent labels broader but still descriptive. Add only a small number of well-established direct and bridge relationships so the visual result is a web, never a chain through every card. Never use a shared broad category alone as evidence for an edge. Use only supplied IDs and do not add commentary, markdown, or coordinates.";
+        if let Some(repaired) = json_object_from_response(
+            &local_chat_text(&client, port, repair_system, &repair_prompt, 2800)
+                .unwrap_or_default(),
+        )
+        .and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok())
+        {
+            plan = repaired;
+        }
     }
     emit_ai_progress(&app, 90, "Validating concept relationships");
     touch_ai_server();
     emit_ai_progress(&app, 100, "Arranging your Study Web");
-    Ok(plan)
+    Ok(remap_study_web_plan_ids(plan, &model_cards, &cards))
+}
+
+fn generate_study_web_semantics_layered(
+    app: tauri::AppHandle,
+    model_path: String,
+    cards: Vec<StudyWebSourceCard>,
+) -> CommandResult<StudyWebSemanticPlan> {
+    let model_path = resolve_ai_model_path(&app, &model_path)?;
+    emit_ai_progress(&app, 8, "Starting your private local model");
+    let port = ensure_study_web_ai_server(&model_path, &app)?;
+    let model_cards = cards
+        .iter()
+        .take(100)
+        .enumerate()
+        .map(|(index, card)| StudyWebSourceCard {
+            id: format!("c{}", index + 1),
+            front: card.front.chars().take(68).collect(),
+            back: card.back.chars().take(156).collect(),
+            updated_at: String::new(),
+        })
+        .collect::<Vec<_>>();
+    let material = model_cards.iter().map(|card| serde_json::json!({ "id": card.id, "term": card.front, "definition": card.back })).collect::<Vec<_>>();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(125))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    emit_ai_progress(&app, 24, "Finding the larger themes");
+    let parent_system = "You classify study cards into meaningful themes. Return only valid JSON with one key, assignments. Its value is an array with exactly one object for each provided card. Each object has exactly three string keys: id, parent, leaf. id must be copied from a supplied card. parent is a concise broad semantic theme. leaf is a concise, narrower subgroup within that parent. Use 3 to 10 distinct parent labels. Assign every card exactly once. Do not include relationships, explanations, or any other keys.";
+    let parent_prompt = format!(
+        "FLASHCARDS:\n{}\n\nReturn the classification now.",
+        serde_json::to_string(&material).unwrap_or_default()
+    );
+    let parent_raw = local_chat_text(&client, port, parent_system, &parent_prompt, 2200)?;
+    let parent_classification = json_object_from_response(&parent_raw)
+        .and_then(|json| serde_json::from_str::<StudyWebParentClassification>(&json).ok())
+        .ok_or_else(|| {
+            "SoFlo could not read the Study Web's theme plan. Please try again.".to_string()
+        })?;
+    let parent_buckets =
+        study_web_parent_buckets(&parent_classification.assignments, &model_cards)?;
+    let mut groups = Vec::new();
+    let mut leaves = Vec::<(String, String, String, Vec<String>)>::new();
+    let parent_count = parent_buckets.len().max(1);
+    for (parent_index, (parent_label, card_ids)) in parent_buckets.iter().enumerate() {
+        let parent_id = format!("parent-{}", parent_index + 1);
+        groups.push(StudyWebSemanticGroup {
+            id: parent_id.clone(),
+            label: parent_label.clone(),
+            members: Vec::new(),
+            parent_id: None,
+        });
+        let progress = 42 + ((parent_index * 42) / parent_count) as u8;
+        emit_ai_progress(
+            &app,
+            progress,
+            &format!("Organizing {} into smaller groups", parent_label),
+        );
+        let next_leaves =
+            classify_study_web_leaves(&client, port, parent_label, card_ids, &model_cards)
+                .unwrap_or_else(|| vec![(parent_label.clone(), card_ids.clone())]);
+        for (label, members) in next_leaves {
+            let leaf_id = format!("leaf-{}", leaves.len() + 1);
+            groups.push(StudyWebSemanticGroup {
+                id: leaf_id.clone(),
+                label: label.clone(),
+                members: members.clone(),
+                parent_id: Some(parent_id.clone()),
+            });
+            leaves.push((leaf_id, parent_id.clone(), label, members));
+        }
+    }
+    let relationships = infer_study_web_relationships(&model_cards, &leaves);
+    let plan = StudyWebSemanticPlan {
+        groups,
+        relationships,
+    };
+    if !study_web_plan_has_hierarchy(&plan, &model_cards) {
+        return Err(
+            "SoFlo could not build a complete Study Web hierarchy. Please try again.".into(),
+        );
+    }
+    emit_ai_progress(&app, 92, "Connecting the strongest relationships");
+    touch_ai_server();
+    emit_ai_progress(&app, 100, "Arranging your Study Web");
+    Ok(remap_study_web_plan_ids(plan, &model_cards, &cards))
+}
+
+fn study_web_parent_buckets(
+    assignments: &[StudyWebParentAssignment],
+    cards: &[StudyWebSourceCard],
+) -> CommandResult<Vec<(String, Vec<String>)>> {
+    let known = cards
+        .iter()
+        .map(|card| card.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut assigned = HashSet::new();
+    let mut buckets = Vec::<(String, Vec<String>)>::new();
+    for assignment in assignments {
+        let label = assignment
+            .parent
+            .trim()
+            .chars()
+            .take(72)
+            .collect::<String>();
+        if !known.contains(assignment.id.as_str())
+            || label.is_empty()
+            || !assigned.insert(assignment.id.clone())
+        {
+            continue;
+        }
+        if let Some((existing_label, card_ids)) = buckets
+            .iter_mut()
+            .find(|(existing_label, _)| study_web_labels_match(existing_label, &label))
+        {
+            if label.chars().count() > existing_label.chars().count() {
+                *existing_label = label;
+            }
+            card_ids.push(assignment.id.clone());
+        } else {
+            buckets.push((label, vec![assignment.id.clone()]));
+        }
+    }
+    if assigned.len() != cards.len() {
+        return Err("SoFlo's local model did not classify every flashcard.".into());
+    }
+    Ok(buckets)
+}
+
+fn classify_study_web_leaves(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    parent_label: &str,
+    card_ids: &[String],
+    cards: &[StudyWebSourceCard],
+) -> Option<Vec<(String, Vec<String>)>> {
+    classify_study_web_leaves_inner(client, port, parent_label, card_ids, cards, 0)
+}
+
+fn classify_study_web_leaves_inner(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    parent_label: &str,
+    card_ids: &[String],
+    cards: &[StudyWebSourceCard],
+    depth: usize,
+) -> Option<Vec<(String, Vec<String>)>> {
+    if card_ids.len() <= 3 {
+        return Some(vec![(parent_label.to_string(), card_ids.to_vec())]);
+    }
+    let requested_cards = cards.iter().filter(|card| card_ids.contains(&card.id)).map(|card| serde_json::json!({ "id": card.id, "term": card.front, "definition": card.back })).collect::<Vec<_>>();
+    let system = "You group related study cards into a few useful subgroups. Return only valid JSON with one key, assignments. Its value is an array with exactly one object for every supplied card. Each object has exactly two string keys: id and leaf. id must be copied from a supplied card. leaf must be a concise subgroup label shared by multiple cards where possible. Use the card definitions to create smaller groups by role, location, process, relationship, or type. Never use the term itself as its own leaf label. Each leaf should contain 2 to 6 cards unless one is genuinely isolated. Do not include parent, relationships, explanations, or other keys.";
+    let prompt = format!(
+        "LARGER THEME: {parent_label}\nFLASHCARDS:\n{}\n\nReturn the subgroup classification now.",
+        serde_json::to_string(&requested_cards).ok()?
+    );
+    let raw = local_chat_text(client, port, system, &prompt, 1100).ok()?;
+    let classification = json_object_from_response(&raw)
+        .and_then(|json| serde_json::from_str::<StudyWebLeafClassification>(&json).ok())?;
+    let expected = card_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut buckets = Vec::<(String, Vec<String>)>::new();
+    for assignment in classification.assignments {
+        let label = assignment.leaf.trim().chars().take(72).collect::<String>();
+        if !expected.contains(assignment.id.as_str())
+            || label.is_empty()
+            || !seen.insert(assignment.id.clone())
+        {
+            continue;
+        }
+        if let Some((_, members)) = buckets
+            .iter_mut()
+            .find(|(existing_label, _)| existing_label.eq_ignore_ascii_case(&label))
+        {
+            members.push(assignment.id);
+        } else {
+            buckets.push((label, vec![assignment.id]));
+        }
+    }
+    if seen.len() != card_ids.len() {
+        return None;
+    }
+    if depth >= 1 {
+        return Some(buckets);
+    }
+    let mut refined = Vec::new();
+    for (label, members) in buckets {
+        if members.len() > 6 && members.len() < card_ids.len() {
+            if let Some(children) =
+                classify_study_web_leaves_inner(client, port, &label, &members, cards, depth + 1)
+            {
+                refined.extend(children);
+            } else {
+                refined.push((label, members));
+            }
+        } else {
+            refined.push((label, members));
+        }
+    }
+    Some(refined)
+}
+
+fn study_web_labels_match(left: &str, right: &str) -> bool {
+    if left.trim().eq_ignore_ascii_case(right.trim()) {
+        return true;
+    }
+    let left_words = study_web_label_words(left);
+    let right_words = study_web_label_words(right);
+    !left_words.is_empty()
+        && !right_words.is_empty()
+        && (left_words.is_subset(&right_words) || right_words.is_subset(&left_words))
+}
+
+fn study_web_label_words(value: &str) -> HashSet<String> {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| {
+            word.len() >= 3
+                && !matches!(
+                    *word,
+                    "system"
+                        | "anatomy"
+                        | "concept"
+                        | "concepts"
+                        | "terms"
+                        | "term"
+                        | "study"
+                        | "material"
+                        | "materials"
+                )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn infer_study_web_relationships(
+    cards: &[StudyWebSourceCard],
+    leaves: &[(String, String, String, Vec<String>)],
+) -> Vec<StudyWebSemanticRelationship> {
+    let raw_tokens = cards
+        .iter()
+        .map(|card| {
+            (
+                card.id.clone(),
+                study_web_relation_words(&format!("{} {}", card.front, card.back)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut frequency = HashMap::<String, usize>::new();
+    for tokens in raw_tokens.values() {
+        for token in tokens {
+            *frequency.entry(token.clone()).or_default() += 1;
+        }
+    }
+    let max_shared_frequency = (cards.len() / 10).max(3);
+    let tokens = raw_tokens
+        .into_iter()
+        .map(|(id, values)| {
+            (
+                id,
+                values
+                    .into_iter()
+                    .filter(|token| {
+                        frequency.get(token).copied().unwrap_or(0) <= max_shared_frequency
+                    })
+                    .collect::<HashSet<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    let mut add_edge = |source: &String, target: &String, kind: &str, score: f64| {
+        let (source, target) = if source < target {
+            (source.clone(), target.clone())
+        } else {
+            (target.clone(), source.clone())
+        };
+        if seen.insert((source.clone(), target.clone())) {
+            edges.push(StudyWebSemanticRelationship {
+                source,
+                target,
+                relationship_type: kind.into(),
+                strength: (0.42 + score / 7.0).clamp(0.42, 0.9),
+            });
+        }
+    };
+    for (_, _, _, members) in leaves {
+        let mut candidates = Vec::new();
+        for left in 0..members.len() {
+            for right in (left + 1)..members.len() {
+                let score = study_web_relationship_score(
+                    &members[left],
+                    &members[right],
+                    &tokens,
+                    &frequency,
+                    cards.len(),
+                    max_shared_frequency,
+                );
+                if score >= 2.2 {
+                    candidates.push((score, &members[left], &members[right]));
+                }
+            }
+        }
+        candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
+        for (score, source, target) in candidates
+            .into_iter()
+            .take(members.len().saturating_sub(1).min(3))
+        {
+            add_edge(source, target, "direct_relation", score);
+        }
+        // A leaf is already a semantic decision made from the cards' full
+        // definitions. Keep that cluster visually connected even when two
+        // related cards do not happen to repeat the same uncommon wording.
+        // These are explicitly stored as shared-subgroup links, not claimed
+        // as direct factual relationships.
+        if let Some(anchor) = members.iter().max_by(|left, right| {
+            let left_score = members
+                .iter()
+                .filter(|other| *other != *left)
+                .map(|other| {
+                    study_web_relationship_score(
+                        left,
+                        other,
+                        &tokens,
+                        &frequency,
+                        cards.len(),
+                        max_shared_frequency,
+                    )
+                })
+                .sum::<f64>();
+            let right_score = members
+                .iter()
+                .filter(|other| *other != *right)
+                .map(|other| {
+                    study_web_relationship_score(
+                        right,
+                        other,
+                        &tokens,
+                        &frequency,
+                        cards.len(),
+                        max_shared_frequency,
+                    )
+                })
+                .sum::<f64>();
+            left_score.total_cmp(&right_score)
+        }) {
+            for member in members {
+                if member != anchor {
+                    add_edge(anchor, member, "shared_subgroup", 0.5);
+                }
+            }
+        }
+    }
+    let mut bridge_candidates = Vec::new();
+    for left in 0..leaves.len() {
+        for right in (left + 1)..leaves.len() {
+            if leaves[left].1 != leaves[right].1 {
+                continue;
+            }
+            let mut best = None;
+            for source in &leaves[left].3 {
+                for target in &leaves[right].3 {
+                    let score = study_web_relationship_score(
+                        source,
+                        target,
+                        &tokens,
+                        &frequency,
+                        cards.len(),
+                        max_shared_frequency,
+                    );
+                    if score >= 3.0
+                        && best
+                            .as_ref()
+                            .map_or(true, |(best_score, _, _)| score > *best_score)
+                    {
+                        best = Some((score, source.clone(), target.clone()));
+                    }
+                }
+            }
+            if let Some(candidate) = best {
+                bridge_candidates.push(candidate);
+            }
+        }
+    }
+    bridge_candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
+    for (score, source, target) in bridge_candidates.into_iter().take(leaves.len().min(18)) {
+        add_edge(&source, &target, "cluster_bridge", score);
+    }
+    edges
+}
+
+fn study_web_relation_words(value: &str) -> HashSet<String> {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| {
+            word.len() >= 3
+                && !matches!(
+                    *word,
+                    "the"
+                        | "and"
+                        | "for"
+                        | "with"
+                        | "from"
+                        | "into"
+                        | "that"
+                        | "this"
+                        | "these"
+                        | "those"
+                        | "which"
+                        | "when"
+                        | "where"
+                        | "while"
+                        | "than"
+                        | "then"
+                        | "are"
+                        | "was"
+                        | "were"
+                        | "has"
+                        | "have"
+                        | "had"
+                        | "can"
+                        | "may"
+                        | "its"
+                        | "their"
+                        | "they"
+                        | "used"
+                        | "use"
+                        | "also"
+                        | "often"
+                        | "part"
+                        | "type"
+                        | "term"
+                        | "definition"
+                        | "concept"
+                )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn study_web_relationship_score(
+    source: &str,
+    target: &str,
+    tokens: &HashMap<String, HashSet<String>>,
+    frequency: &HashMap<String, usize>,
+    total_cards: usize,
+    max_shared_frequency: usize,
+) -> f64 {
+    let (Some(source_tokens), Some(target_tokens)) = (tokens.get(source), tokens.get(target))
+    else {
+        return 0.0;
+    };
+    source_tokens
+        .intersection(target_tokens)
+        .filter_map(|token| {
+            frequency
+                .get(token)
+                .copied()
+                .filter(|count| *count <= max_shared_frequency)
+        })
+        .map(|count| (total_cards as f64 / count as f64).ln_1p())
+        .sum()
+}
+
+fn remap_study_web_plan_ids(
+    mut plan: StudyWebSemanticPlan,
+    model_cards: &[StudyWebSourceCard],
+    cards: &[StudyWebSourceCard],
+) -> StudyWebSemanticPlan {
+    let card_ids = model_cards
+        .iter()
+        .zip(cards.iter())
+        .map(|(model_card, card)| (model_card.id.as_str(), card.id.clone()))
+        .collect::<HashMap<_, _>>();
+    for group in &mut plan.groups {
+        group.members = group
+            .members
+            .iter()
+            .filter_map(|id| card_ids.get(id.as_str()).cloned())
+            .collect();
+    }
+    plan.relationships = plan
+        .relationships
+        .into_iter()
+        .filter_map(|mut relationship| {
+            relationship.source = card_ids.get(relationship.source.as_str())?.clone();
+            relationship.target = card_ids.get(relationship.target.as_str())?.clone();
+            Some(relationship)
+        })
+        .collect();
+    plan
 }
 
 fn study_web_plan_has_hierarchy(plan: &StudyWebSemanticPlan, cards: &[StudyWebSourceCard]) -> bool {
-    let groups_by_id = plan.groups.iter().map(|group| (group.id.as_str(), group)).collect::<HashMap<_, _>>();
-    let leaves = plan.groups.iter().filter(|group| group.parent_id.as_ref().is_some_and(|parent_id| groups_by_id.contains_key(parent_id.as_str()))).collect::<Vec<_>>();
-    if cards.len() > 3 && leaves.len() < 2 { return false; }
-    if leaves.is_empty() { return false; }
-    let mut children_by_parent = HashMap::<&str, Vec<&StudyWebSemanticGroup>>::new();
-    for leaf in &leaves { children_by_parent.entry(leaf.parent_id.as_deref().unwrap_or_default()).or_default().push(*leaf); }
-    if children_by_parent.is_empty() || (leaves.len() > 1 && children_by_parent.values().all(|children| children.len() < 2)) { return false; }
-    if leaves.len() >= 4 && leaves.iter().filter(|group| group.members.len() <= 1).count() * 2 > leaves.len() { return false; }
-    let leaf_members = leaves.iter().flat_map(|group| group.members.iter().map(String::as_str)).collect::<HashSet<_>>();
-    if cards.iter().any(|card| !leaf_members.contains(card.id.as_str())) { return false; }
-    children_by_parent.into_iter().all(|(parent_id, children)| {
-        groups_by_id.get(parent_id).is_some_and(|parent| {
-            let parent_members = parent.members.iter().map(String::as_str).collect::<HashSet<_>>();
-            children.iter().flat_map(|child| child.members.iter().map(String::as_str)).all(|card_id| parent_members.contains(card_id))
+    let groups_by_id = plan
+        .groups
+        .iter()
+        .map(|group| (group.id.as_str(), group))
+        .collect::<HashMap<_, _>>();
+    let leaves = plan
+        .groups
+        .iter()
+        .filter(|group| {
+            group
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent_id| groups_by_id.contains_key(parent_id.as_str()))
         })
+        .collect::<Vec<_>>();
+    if cards.len() > 3 && leaves.len() < 2 {
+        return false;
+    }
+    if leaves.is_empty() {
+        return false;
+    }
+    let mut children_by_parent = HashMap::<&str, Vec<&StudyWebSemanticGroup>>::new();
+    for leaf in &leaves {
+        children_by_parent
+            .entry(leaf.parent_id.as_deref().unwrap_or_default())
+            .or_default()
+            .push(*leaf);
+    }
+    if children_by_parent.is_empty()
+        || (leaves.len() > 1
+            && children_by_parent
+                .values()
+                .all(|children| children.len() < 2))
+    {
+        return false;
+    }
+    if leaves.len() >= 4
+        && leaves
+            .iter()
+            .filter(|group| group.members.len() <= 1)
+            .count()
+            * 2
+            > leaves.len()
+    {
+        return false;
+    }
+    let leaf_members = leaves
+        .iter()
+        .flat_map(|group| group.members.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    if cards
+        .iter()
+        .any(|card| !leaf_members.contains(card.id.as_str()))
+    {
+        return false;
+    }
+    children_by_parent.into_keys().all(|parent_id| {
+        groups_by_id
+            .get(parent_id)
+            .is_some_and(|parent| parent.members.is_empty())
     })
 }
 
@@ -3295,118 +4187,367 @@ fn fallback_study_web_plan(cards: &[StudyWebSourceCard]) -> StudyWebSemanticPlan
     // The fallback intentionally makes no semantic claims. The normal two-pass
     // model path supplies descriptive clusters and edges; if it is unavailable,
     // preserving cards is safer than drawing a relationship from coincidence.
-    let groups = cards.chunks(4).enumerate().map(|(index, chunk)| {
-        let first_term = chunk.first().map(|card| card.front.trim().chars().take(42).collect::<String>()).unwrap_or_default();
-        StudyWebSemanticGroup {
-            id: format!("fallback-{index}"),
-            label: if first_term.is_empty() { "Study material".into() } else { format!("{first_term} and related") },
-            members: chunk.iter().map(|card| card.id.clone()).collect(),
-            parent_id: None,
-        }
-    }).collect();
-    return StudyWebSemanticPlan { groups, relationships: Vec::new() };
+    let groups = cards
+        .chunks(4)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let first_term = chunk
+                .first()
+                .map(|card| card.front.trim().chars().take(42).collect::<String>())
+                .unwrap_or_default();
+            StudyWebSemanticGroup {
+                id: format!("fallback-{index}"),
+                label: if first_term.is_empty() {
+                    "Study material".into()
+                } else {
+                    format!("{first_term} and related")
+                },
+                members: chunk.iter().map(|card| card.id.clone()).collect(),
+                parent_id: None,
+            }
+        })
+        .collect();
+    return StudyWebSemanticPlan {
+        groups,
+        relationships: Vec::new(),
+    };
 
     let mut buckets: HashMap<char, Vec<String>> = HashMap::new();
-    for card in cards { let key = card.front.chars().find(|character| character.is_alphanumeric()).map(|character| character.to_ascii_uppercase()).unwrap_or('#'); buckets.entry(key).or_default().push(card.id.clone()); }
-    let mut groups = buckets.into_iter().enumerate().map(|(index, (key, members))| StudyWebSemanticGroup { id: format!("fallback-{index}"), label: if key == '#' { "Core concepts".into() } else { format!("Concepts · {key}") }, members, parent_id: None }).collect::<Vec<_>>();
-    if groups.len() > 8 { groups = vec![StudyWebSemanticGroup { id: "fallback-core".into(), label: "Core concepts".into(), members: cards.iter().map(|card| card.id.clone()).collect(), parent_id: None }]; }
+    for card in cards {
+        let key = card
+            .front
+            .chars()
+            .find(|character| character.is_alphanumeric())
+            .map(|character| character.to_ascii_uppercase())
+            .unwrap_or('#');
+        buckets.entry(key).or_default().push(card.id.clone());
+    }
+    let mut groups = buckets
+        .into_iter()
+        .enumerate()
+        .map(|(index, (key, members))| StudyWebSemanticGroup {
+            id: format!("fallback-{index}"),
+            label: if key == '#' {
+                "Core concepts".into()
+            } else {
+                format!("Concepts · {key}")
+            },
+            members,
+            parent_id: None,
+        })
+        .collect::<Vec<_>>();
+    if groups.len() > 8 {
+        groups = vec![StudyWebSemanticGroup {
+            id: "fallback-core".into(),
+            label: "Core concepts".into(),
+            members: cards.iter().map(|card| card.id.clone()).collect(),
+            parent_id: None,
+        }];
+    }
     // Keep a useful, visible web even if the local model is unavailable or returns
     // incomplete JSON. These are deterministic keyword connections, never made-up
     // content, and the model's relationships still take precedence when present.
-    let words = cards.iter().map(|card| {
-        format!("{} {}", card.front, card.back).to_lowercase().split(|character: char| !character.is_alphanumeric()).filter(|word| word.len() >= 4 && !matches!(*word, "this" | "that" | "with" | "from" | "into" | "your" | "what" | "when" | "which" | "about" | "there" | "their" | "have" | "will" | "would" | "could" | "should" | "definition" | "concept")).map(str::to_string).collect::<HashSet<_>>()
-    }).collect::<Vec<_>>();
+    let words = cards
+        .iter()
+        .map(|card| {
+            format!("{} {}", card.front, card.back)
+                .to_lowercase()
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|word| {
+                    word.len() >= 4
+                        && !matches!(
+                            *word,
+                            "this"
+                                | "that"
+                                | "with"
+                                | "from"
+                                | "into"
+                                | "your"
+                                | "what"
+                                | "when"
+                                | "which"
+                                | "about"
+                                | "there"
+                                | "their"
+                                | "have"
+                                | "will"
+                                | "would"
+                                | "could"
+                                | "should"
+                                | "definition"
+                                | "concept"
+                        )
+                })
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
     let mut candidates = Vec::new();
-    for left in 0..cards.len() { for right in (left + 1)..cards.len() {
-        let shared = words[left].intersection(&words[right]).count();
-        if shared > 0 { candidates.push((shared as f64 / words[left].len().min(words[right].len()).max(1) as f64, left, right)); }
-    }}
+    for left in 0..cards.len() {
+        for right in (left + 1)..cards.len() {
+            let shared = words[left].intersection(&words[right]).count();
+            if shared > 0 {
+                candidates.push((
+                    shared as f64 / words[left].len().min(words[right].len()).max(1) as f64,
+                    left,
+                    right,
+                ));
+            }
+        }
+    }
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
     let mut degree = vec![0_usize; cards.len()];
     let mut linked = HashSet::new();
     let mut relationships = Vec::new();
     for (score, left, right) in candidates {
-        if degree[left] >= 2 || degree[right] >= 2 || !linked.insert((left, right)) { continue; }
-        degree[left] += 1; degree[right] += 1;
-        relationships.push(StudyWebSemanticRelationship { source: cards[left].id.clone(), target: cards[right].id.clone(), relationship_type: "related_to".into(), strength: (0.35 + score).clamp(0.35, 0.9) });
+        if degree[left] >= 2 || degree[right] >= 2 || !linked.insert((left, right)) {
+            continue;
+        }
+        degree[left] += 1;
+        degree[right] += 1;
+        relationships.push(StudyWebSemanticRelationship {
+            source: cards[left].id.clone(),
+            target: cards[right].id.clone(),
+            relationship_type: "related_to".into(),
+            strength: (0.35 + score).clamp(0.35, 0.9),
+        });
     }
     // A category should never render as isolated cards. Link adjacent members as a
     // calm visual fallback when their wording has little overlap.
-    for group in &groups { for pair in group.members.windows(2) {
-        let Some(left) = cards.iter().position(|card| card.id == pair[0]) else { continue; };
-        let Some(right) = cards.iter().position(|card| card.id == pair[1]) else { continue; };
-        let key = if left < right { (left, right) } else { (right, left) };
-        if linked.insert(key) { relationships.push(StudyWebSemanticRelationship { source: cards[left].id.clone(), target: cards[right].id.clone(), relationship_type: "related_to".into(), strength: 0.42 }); }
-    }}
-    StudyWebSemanticPlan { groups, relationships }
+    for group in &groups {
+        for pair in group.members.windows(2) {
+            let Some(left) = cards.iter().position(|card| card.id == pair[0]) else {
+                continue;
+            };
+            let Some(right) = cards.iter().position(|card| card.id == pair[1]) else {
+                continue;
+            };
+            let key = if left < right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            if linked.insert(key) {
+                relationships.push(StudyWebSemanticRelationship {
+                    source: cards[left].id.clone(),
+                    target: cards[right].id.clone(),
+                    relationship_type: "related_to".into(),
+                    strength: 0.42,
+                });
+            }
+        }
+    }
+    StudyWebSemanticPlan {
+        groups,
+        relationships,
+    }
 }
 
-fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[String], set_titles: &[String], cards: &[StudyWebSourceCard], plan: StudyWebSemanticPlan, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
-    let primary_set_id = set_ids.first().ok_or_else(|| "Choose at least one flashcard set for this Study Web.".to_string())?;
-    let known = cards.iter().map(|card| card.id.clone()).collect::<HashSet<_>>();
+fn save_generated_study_web(
+    database: &Database,
+    class_id: &str,
+    set_ids: &[String],
+    set_titles: &[String],
+    cards: &[StudyWebSourceCard],
+    plan: StudyWebSemanticPlan,
+    study_web_id: Option<String>,
+) -> CommandResult<StudyWebDetail> {
+    let primary_set_id = set_ids
+        .first()
+        .ok_or_else(|| "Choose at least one flashcard set for this Study Web.".to_string())?;
+    let known = cards
+        .iter()
+        .map(|card| card.id.clone())
+        .collect::<HashSet<_>>();
+    let parent_group_ids = plan
+        .groups
+        .iter()
+        .filter_map(|group| group.parent_id.clone())
+        .collect::<HashSet<_>>();
     let mut semantic_group_ids = HashSet::new();
-    let mut groups = plan.groups.into_iter().filter_map(|group| {
-        let id = group.id.trim().to_string();
-        let label = group.label.trim().chars().take(72).collect::<String>();
-        if id.is_empty() || label.is_empty() || !semantic_group_ids.insert(id.clone()) { return None; }
-        let mut member_ids = HashSet::new();
-        let members = group.members.into_iter().filter(|member| known.contains(member) && member_ids.insert(member.clone())).collect::<Vec<_>>();
-        if members.is_empty() { return None; }
-        Some((id, label, group.parent_id, members))
-    }).collect::<Vec<_>>();
-    let grouped = groups.iter().flat_map(|(_, _, _, members)| members.iter().cloned()).collect::<HashSet<_>>();
-    let missing = cards.iter().filter(|card| !grouped.contains(&card.id)).map(|card| card.id.clone()).collect::<Vec<_>>();
-    if !missing.is_empty() { groups.push(("unassigned".into(), "Unassigned study material".into(), None, missing)); }
-    if groups.is_empty() { groups.push(("unassigned".into(), "Unassigned study material".into(), None, cards.iter().map(|card| card.id.clone()).collect())); }
+    let mut groups = plan
+        .groups
+        .into_iter()
+        .filter_map(|group| {
+            let id = group.id.trim().to_string();
+            let label = group.label.trim().chars().take(72).collect::<String>();
+            if id.is_empty() || label.is_empty() || !semantic_group_ids.insert(id.clone()) {
+                return None;
+            }
+            let mut member_ids = HashSet::new();
+            let members = group
+                .members
+                .into_iter()
+                .filter(|member| known.contains(member) && member_ids.insert(member.clone()))
+                .collect::<Vec<_>>();
+            if members.is_empty() && !parent_group_ids.contains(&id) {
+                return None;
+            }
+            Some((id, label, group.parent_id, members))
+        })
+        .collect::<Vec<_>>();
+    let grouped = groups
+        .iter()
+        .flat_map(|(_, _, _, members)| members.iter().cloned())
+        .collect::<HashSet<_>>();
+    let missing = cards
+        .iter()
+        .filter(|card| !grouped.contains(&card.id))
+        .map(|card| card.id.clone())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        groups.push((
+            "unassigned".into(),
+            "Unassigned study material".into(),
+            None,
+            missing,
+        ));
+    }
+    if groups.is_empty() {
+        groups.push((
+            "unassigned".into(),
+            "Unassigned study material".into(),
+            None,
+            cards.iter().map(|card| card.id.clone()).collect(),
+        ));
+    }
     let mut seen_edges = HashSet::new();
     let mut edges = Vec::new();
     for relationship in plan.relationships {
-        if !known.contains(&relationship.source) || !known.contains(&relationship.target) || relationship.source == relationship.target { continue; }
-        let (source, target) = if relationship.source < relationship.target { (relationship.source, relationship.target) } else { (relationship.target, relationship.source) };
-        if !seen_edges.insert((source.clone(), target.clone())) { continue; }
-        let relationship_type = relationship.relationship_type.trim().chars().take(32).collect::<String>();
-        edges.push((source, target, if relationship_type.is_empty() { "related_to".into() } else { relationship_type }, relationship.strength.clamp(0.1, 1.0)));
+        if !known.contains(&relationship.source)
+            || !known.contains(&relationship.target)
+            || relationship.source == relationship.target
+        {
+            continue;
+        }
+        let (source, target) = if relationship.source < relationship.target {
+            (relationship.source, relationship.target)
+        } else {
+            (relationship.target, relationship.source)
+        };
+        if !seen_edges.insert((source.clone(), target.clone())) {
+            continue;
+        }
+        let relationship_type = relationship
+            .relationship_type
+            .trim()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        edges.push((
+            source,
+            target,
+            if relationship_type.is_empty() {
+                "related_to".into()
+            } else {
+                relationship_type
+            },
+            relationship.strength.clamp(0.1, 1.0),
+        ));
     }
     // Groups influence layout and their label only. A visible line must come
     // from the model's direct reasoning or a manual link, never card order.
     let positions = layout_study_web_nodes(cards, &groups, &edges);
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let web_id = study_web_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    if let Some(existing_set) = transaction.query_row("SELECT flashcard_set_id FROM study_webs WHERE id=?1", [&web_id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())? {
-        if existing_set != *primary_set_id { return Err("That Study Web belongs to a different flashcard set.".into()); }
-        transaction.execute("DELETE FROM study_webs WHERE id=?1", [&web_id]).map_err(|error| error.to_string())?;
+    if let Some(existing_set) = transaction
+        .query_row(
+            "SELECT flashcard_set_id FROM study_webs WHERE id=?1",
+            [&web_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    {
+        if existing_set != *primary_set_id {
+            return Err("That Study Web belongs to a different flashcard set.".into());
+        }
+        transaction
+            .execute("DELETE FROM study_webs WHERE id=?1", [&web_id])
+            .map_err(|error| error.to_string())?;
     }
-    let name = if set_titles.len() == 1 { format!("{} Study Web", set_titles[0].trim()) } else { format!("{} sets Study Web", set_titles.len()) };
+    let name = if set_titles.len() == 1 {
+        format!("{} Study Web", set_titles[0].trim())
+    } else {
+        format!("{} sets Study Web", set_titles.len())
+    };
     transaction.execute("INSERT INTO study_webs (id, class_id, flashcard_set_id, name, source_hash) VALUES (?1,?2,?3,?4,?5)", params![&web_id, class_id, primary_set_id, name, study_web_source_hash(cards)]).map_err(|error| error.to_string())?;
-    for (position, set_id) in set_ids.iter().enumerate() { transaction.execute("INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,?3)", params![&web_id, set_id, position as i32]).map_err(|error| error.to_string())?; }
+    for (position, set_id) in set_ids.iter().enumerate() {
+        transaction.execute("INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,?3)", params![&web_id, set_id, position as i32]).map_err(|error| error.to_string())?;
+    }
     let mut saved_group_ids = HashMap::new();
     for (semantic_id, label, _, members) in &groups {
         let group_id = Uuid::new_v4().to_string();
         saved_group_ids.insert(semantic_id.clone(), group_id.clone());
         transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, parent_group_id) VALUES (?1,?2,?3,NULL)", params![&group_id, &web_id, label]).map_err(|error| error.to_string())?;
-        for card_id in members { transaction.execute("INSERT INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, &group_id, card_id]).map_err(|error| error.to_string())?; }
+        for card_id in members {
+            transaction.execute("INSERT INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, &group_id, card_id]).map_err(|error| error.to_string())?;
+        }
     }
     for (semantic_id, _, parent_semantic_id, _) in &groups {
-        let Some(parent_semantic_id) = parent_semantic_id else { continue; };
-        let (Some(group_id), Some(parent_group_id)) = (saved_group_ids.get(semantic_id), saved_group_ids.get(parent_semantic_id)) else { continue; };
-        transaction.execute("UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2", params![parent_group_id, group_id]).map_err(|error| error.to_string())?;
+        let Some(parent_semantic_id) = parent_semantic_id else {
+            continue;
+        };
+        let (Some(group_id), Some(parent_group_id)) = (
+            saved_group_ids.get(semantic_id),
+            saved_group_ids.get(parent_semantic_id),
+        ) else {
+            continue;
+        };
+        transaction
+            .execute(
+                "UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2",
+                params![parent_group_id, group_id],
+            )
+            .map_err(|error| error.to_string())?;
     }
-    for card in cards { let (x, y) = positions.get(&card.id).copied().unwrap_or((0.0, 0.0)); transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y) VALUES (?1,?2,?3,?4)", params![&web_id, &card.id, x, y]).map_err(|error| error.to_string())?; }
-    for (source, target, relationship_type, strength) in edges { transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, source, target, relationship_type, strength]).map_err(|error| error.to_string())?; }
+    for card in cards {
+        let (x, y) = positions.get(&card.id).copied().unwrap_or((0.0, 0.0));
+        transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y) VALUES (?1,?2,?3,?4)", params![&web_id, &card.id, x, y]).map_err(|error| error.to_string())?;
+    }
+    for (source, target, relationship_type, strength) in edges {
+        transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, source, target, relationship_type, strength]).map_err(|error| error.to_string())?;
+    }
     transaction.commit().map_err(|error| error.to_string())?;
     read_study_web_detail(&database.open()?, &web_id)
 }
 
-fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, String, Option<String>, Vec<String>)], edges: &[(String, String, String, f64)]) -> HashMap<String, (f64, f64)> {
-    let parent_ids = groups.iter().filter_map(|(_, _, parent_id, _)| parent_id.clone()).collect::<HashSet<_>>();
-    let mut leaf_indices = groups.iter().enumerate().filter_map(|(index, (id, _, _, _))| (!parent_ids.contains(id)).then_some(index)).collect::<Vec<_>>();
-    if leaf_indices.is_empty() { leaf_indices = (0..groups.len()).collect(); }
-    let max_leaf_size = leaf_indices.iter().map(|index| groups[*index].3.len()).max().unwrap_or(1) as f64;
+fn layout_study_web_nodes(
+    cards: &[StudyWebSourceCard],
+    groups: &[(String, String, Option<String>, Vec<String>)],
+    edges: &[(String, String, String, f64)],
+) -> HashMap<String, (f64, f64)> {
+    let parent_ids = groups
+        .iter()
+        .filter_map(|(_, _, parent_id, _)| parent_id.clone())
+        .collect::<HashSet<_>>();
+    let mut leaf_indices = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (id, _, _, _))| (!parent_ids.contains(id)).then_some(index))
+        .collect::<Vec<_>>();
+    if leaf_indices.is_empty() {
+        leaf_indices = (0..groups.len()).collect();
+    }
+    let max_leaf_size = leaf_indices
+        .iter()
+        .map(|index| groups[*index].3.len())
+        .max()
+        .unwrap_or(1) as f64;
     let mut parent_clusters = Vec::<(String, Vec<usize>)>::new();
     for group_index in &leaf_indices {
-        let parent_key = groups[*group_index].2.clone().unwrap_or_else(|| format!("root-{group_index}"));
-        if let Some((_, children)) = parent_clusters.iter_mut().find(|(id, _)| id == &parent_key) { children.push(*group_index); } else { parent_clusters.push((parent_key, vec![*group_index])); }
+        let parent_key = groups[*group_index]
+            .2
+            .clone()
+            .unwrap_or_else(|| format!("root-{group_index}"));
+        if let Some((_, children)) = parent_clusters.iter_mut().find(|(id, _)| id == &parent_key) {
+            children.push(*group_index);
+        } else {
+            parent_clusters.push((parent_key, vec![*group_index]));
+        }
     }
     let parent_columns = (parent_clusters.len().max(1) as f64).sqrt().ceil() as usize;
     let parent_cell_width = (max_leaf_size.sqrt() * 340.0 + 1_680.0).max(1_900.0);
@@ -3417,40 +4558,130 @@ fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, Strin
         let parent_y = (parent_index / parent_columns) as f64 * parent_cell_height;
         for (child_index, group_index) in children.iter().enumerate() {
             let count = children.len();
-            let angle = if count <= 1 { 0.0 } else { child_index as f64 / count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
-            let radius = if count <= 1 { 0.0 } else if count <= 4 { 525.0 } else { 620.0 + ((child_index / 5) as f64 * 140.0) };
-            leaf_centers.insert(*group_index, (parent_x + angle.cos() * radius, parent_y + angle.sin() * radius));
+            let angle = if count <= 1 {
+                0.0
+            } else {
+                child_index as f64 / count as f64 * std::f64::consts::TAU
+                    - std::f64::consts::FRAC_PI_2
+            };
+            let radius = if count <= 1 {
+                0.0
+            } else if count <= 4 {
+                525.0
+            } else {
+                620.0 + ((child_index / 5) as f64 * 140.0)
+            };
+            leaf_centers.insert(
+                *group_index,
+                (
+                    parent_x + angle.cos() * radius,
+                    parent_y + angle.sin() * radius,
+                ),
+            );
         }
     }
     let mut group_members = HashMap::<String, Vec<(f64, f64, usize, usize)>>::new();
     for group_index in &leaf_indices {
         let members = &groups[*group_index].3;
         let (center_x, center_y) = leaf_centers.get(group_index).copied().unwrap_or_default();
-        for (member_index, card_id) in members.iter().enumerate() { group_members.entry(card_id.clone()).or_default().push((center_x, center_y, member_index, members.len())); }
+        for (member_index, card_id) in members.iter().enumerate() {
+            group_members.entry(card_id.clone()).or_default().push((
+                center_x,
+                center_y,
+                member_index,
+                members.len(),
+            ));
+        }
     }
     let mut positions = HashMap::new();
     for card in cards {
-        let memberships = group_members.get(&card.id).cloned().unwrap_or_else(|| vec![(0.0, 0.0, positions.len(), cards.len())]);
+        let memberships = group_members
+            .get(&card.id)
+            .cloned()
+            .unwrap_or_else(|| vec![(0.0, 0.0, positions.len(), cards.len())]);
         let (mut x, mut y) = (0.0, 0.0);
         for (center_x, center_y, member_index, member_count) in &memberships {
-            let angle = if *member_count <= 1 { 0.0 } else { *member_index as f64 / *member_count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
-            let local_radius = if *member_count <= 1 { 0.0 } else if *member_count <= 4 { 235.0 } else { 285.0 + ((*member_index / 6) as f64 * 125.0) };
+            let angle = if *member_count <= 1 {
+                0.0
+            } else {
+                *member_index as f64 / *member_count as f64 * std::f64::consts::TAU
+                    - std::f64::consts::FRAC_PI_2
+            };
+            let local_radius = if *member_count <= 1 {
+                0.0
+            } else if *member_count <= 4 {
+                235.0
+            } else {
+                285.0 + ((*member_index / 6) as f64 * 125.0)
+            };
             x += *center_x + angle.cos() * local_radius;
             y += *center_y + angle.sin() * local_radius;
         }
-        positions.insert(card.id.clone(), (x / memberships.len() as f64, y / memberships.len() as f64));
+        positions.insert(
+            card.id.clone(),
+            (x / memberships.len() as f64, y / memberships.len() as f64),
+        );
     }
     for _ in 0..180 {
-        let mut delta = cards.iter().map(|card| (card.id.clone(), (0.0_f64, 0.0_f64))).collect::<HashMap<_, _>>();
-        for left in 0..cards.len() { for right in left + 1..cards.len() {
-            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 70_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
-            if let Some(value) = delta.get_mut(&cards[left].id) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(&cards[right].id) { value.0 -= unit.0; value.1 -= unit.1; }
-        }}
-        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 425.0) * 0.018 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
-        for (id, movement) in delta { if let Some(position) = positions.get_mut(&id) { position.0 += movement.0.clamp(-18.0, 18.0); position.1 += movement.1.clamp(-18.0, 18.0); } }
+        let mut delta = cards
+            .iter()
+            .map(|card| (card.id.clone(), (0.0_f64, 0.0_f64)))
+            .collect::<HashMap<_, _>>();
+        for left in 0..cards.len() {
+            for right in left + 1..cards.len() {
+                let a = positions[&cards[left].id];
+                let b = positions[&cards[right].id];
+                let dx = a.0 - b.0;
+                let dy = a.1 - b.1;
+                let distance = (dx * dx + dy * dy).sqrt().max(1.0);
+                let force = 70_000.0 / (distance * distance);
+                let unit = (dx / distance * force, dy / distance * force);
+                if let Some(value) = delta.get_mut(&cards[left].id) {
+                    value.0 += unit.0;
+                    value.1 += unit.1;
+                }
+                if let Some(value) = delta.get_mut(&cards[right].id) {
+                    value.0 -= unit.0;
+                    value.1 -= unit.1;
+                }
+            }
+        }
+        for (source, target, _, strength) in edges {
+            if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) {
+                let dx = b.0 - a.0;
+                let dy = b.1 - a.1;
+                let distance = (dx * dx + dy * dy).sqrt().max(1.0);
+                let force = (distance - 425.0) * 0.018 * strength;
+                let unit = (dx / distance * force, dy / distance * force);
+                if let Some(value) = delta.get_mut(source) {
+                    value.0 += unit.0;
+                    value.1 += unit.1;
+                }
+                if let Some(value) = delta.get_mut(target) {
+                    value.0 -= unit.0;
+                    value.1 -= unit.1;
+                }
+            }
+        }
+        for (id, movement) in delta {
+            if let Some(position) = positions.get_mut(&id) {
+                position.0 += movement.0.clamp(-18.0, 18.0);
+                position.1 += movement.1.clamp(-18.0, 18.0);
+            }
+        }
     }
-    let min_x = positions.values().map(|position| position.0).fold(f64::INFINITY, f64::min); let min_y = positions.values().map(|position| position.1).fold(f64::INFINITY, f64::min);
-    for position in positions.values_mut() { position.0 = (position.0 - min_x + 240.0).round(); position.1 = (position.1 - min_y + 220.0).round(); }
+    let min_x = positions
+        .values()
+        .map(|position| position.0)
+        .fold(f64::INFINITY, f64::min);
+    let min_y = positions
+        .values()
+        .map(|position| position.1)
+        .fold(f64::INFINITY, f64::min);
+    for position in positions.values_mut() {
+        position.0 = (position.0 - min_x + 240.0).round();
+        position.1 = (position.1 - min_y + 220.0).round();
+    }
     positions
 }
 
@@ -3715,7 +4946,9 @@ pub fn empty_trash(database: State<'_, Database>) -> CommandResult<()> {
             [],
         )
         .map_err(|error| error.to_string())?;
-    connection.execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL", []).map_err(|error| error.to_string())?;
+    connection
+        .execute("DELETE FROM study_webs WHERE deleted_at IS NOT NULL", [])
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -3843,8 +5076,8 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
         json_array_from_response, json_object_from_response, semester_end_date,
-        study_web_plan_has_hierarchy, thesaurus_json_from_response,
-        StudyWebSemanticGroup, StudyWebSemanticPlan, StudyWebSourceCard,
+        study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
+        StudyWebSemanticPlan, StudyWebSourceCard,
     };
 
     #[test]
@@ -3896,30 +5129,96 @@ mod tests {
     #[test]
     fn study_web_fallback_never_invents_relationships() {
         let cards = vec![
-            StudyWebSourceCard { id: "one".into(), front: "First topic".into(), back: "A definition.".into(), updated_at: "now".into() },
-            StudyWebSourceCard { id: "two".into(), front: "Second topic".into(), back: "Another definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard {
+                id: "one".into(),
+                front: "First topic".into(),
+                back: "A definition.".into(),
+                updated_at: "now".into(),
+            },
+            StudyWebSourceCard {
+                id: "two".into(),
+                front: "Second topic".into(),
+                back: "Another definition.".into(),
+                updated_at: "now".into(),
+            },
         ];
         let plan = fallback_study_web_plan(&cards);
         assert!(plan.relationships.is_empty());
-        assert_eq!(plan.groups.iter().flat_map(|group| group.members.iter()).count(), 2);
+        assert_eq!(
+            plan.groups
+                .iter()
+                .flat_map(|group| group.members.iter())
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn study_web_hierarchy_requires_parent_and_leaf_layers() {
         let cards = vec![
-            StudyWebSourceCard { id: "one".into(), front: "One".into(), back: "Definition.".into(), updated_at: "now".into() },
-            StudyWebSourceCard { id: "two".into(), front: "Two".into(), back: "Definition.".into(), updated_at: "now".into() },
-            StudyWebSourceCard { id: "three".into(), front: "Three".into(), back: "Definition.".into(), updated_at: "now".into() },
-            StudyWebSourceCard { id: "four".into(), front: "Four".into(), back: "Definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard {
+                id: "one".into(),
+                front: "One".into(),
+                back: "Definition.".into(),
+                updated_at: "now".into(),
+            },
+            StudyWebSourceCard {
+                id: "two".into(),
+                front: "Two".into(),
+                back: "Definition.".into(),
+                updated_at: "now".into(),
+            },
+            StudyWebSourceCard {
+                id: "three".into(),
+                front: "Three".into(),
+                back: "Definition.".into(),
+                updated_at: "now".into(),
+            },
+            StudyWebSourceCard {
+                id: "four".into(),
+                front: "Four".into(),
+                back: "Definition.".into(),
+                updated_at: "now".into(),
+            },
         ];
-        let flat = StudyWebSemanticPlan { groups: cards.iter().enumerate().map(|(index, card)| StudyWebSemanticGroup { id: format!("g-{index}"), label: card.front.clone(), members: vec![card.id.clone()], parent_id: None }).collect(), relationships: Vec::new() };
+        let flat = StudyWebSemanticPlan {
+            groups: cards
+                .iter()
+                .enumerate()
+                .map(|(index, card)| StudyWebSemanticGroup {
+                    id: format!("g-{index}"),
+                    label: card.front.clone(),
+                    members: vec![card.id.clone()],
+                    parent_id: None,
+                })
+                .collect(),
+            relationships: Vec::new(),
+        };
         assert!(!study_web_plan_has_hierarchy(&flat, &cards));
 
-        let layered = StudyWebSemanticPlan { groups: vec![
-            StudyWebSemanticGroup { id: "parent".into(), label: "Larger theme".into(), members: cards.iter().map(|card| card.id.clone()).collect(), parent_id: None },
-            StudyWebSemanticGroup { id: "left".into(), label: "First subgroup".into(), members: vec!["one".into(), "two".into()], parent_id: Some("parent".into()) },
-            StudyWebSemanticGroup { id: "right".into(), label: "Second subgroup".into(), members: vec!["three".into(), "four".into()], parent_id: Some("parent".into()) },
-        ], relationships: Vec::new() };
+        let layered = StudyWebSemanticPlan {
+            groups: vec![
+                StudyWebSemanticGroup {
+                    id: "parent".into(),
+                    label: "Larger theme".into(),
+                    members: Vec::new(),
+                    parent_id: None,
+                },
+                StudyWebSemanticGroup {
+                    id: "left".into(),
+                    label: "First subgroup".into(),
+                    members: vec!["one".into(), "two".into()],
+                    parent_id: Some("parent".into()),
+                },
+                StudyWebSemanticGroup {
+                    id: "right".into(),
+                    label: "Second subgroup".into(),
+                    members: vec!["three".into(), "four".into()],
+                    parent_id: Some("parent".into()),
+                },
+            ],
+            relationships: Vec::new(),
+        };
         assert!(study_web_plan_has_hierarchy(&layered, &cards));
     }
 
