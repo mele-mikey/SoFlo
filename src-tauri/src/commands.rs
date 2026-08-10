@@ -3227,10 +3227,10 @@ fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards
     let port = ensure_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 30, "Finding meaningful concept relationships");
     let material = cards.iter().take(100).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(96).collect::<String>(), "definition": card.back.chars().take(240).collect::<String>() })).collect::<Vec<_>>();
-    let prompt = format!("FLASHCARDS:\n{}\n\nReturn the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
-    let system = "You organize supplied flashcards into a calm academic concept web. Return compact JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short category\",\"members\":[\"flashcard id\"]}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}]}. Use only supplied IDs. Make 3 to 8 groups and at most 2 strong relationships per card. Do not invent cards, coordinates, markdown, or commentary.";
+    let prompt = format!("FLASHCARDS:\n{}\n\nRead every term and definition, then return the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
+    let system = "You are building the reasoning plan for an academic concept web. Return compact JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short meaningful topic\",\"members\":[\"flashcard id in a meaningful order\"]}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}]}. Carefully read both sides of every supplied flashcard before deciding. Make mutually exclusive, coherent topic groups based on meaning, never alphabetical order or superficial shared words. Every supplied ID must appear exactly once in groups. Order a group's members so adjacent items are genuinely related. Add 1 to 3 direct explanatory relationships per card where possible; do not connect unrelated concepts just to fill space. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.";
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(105)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let raw = local_chat_text(&client, port, system, &prompt, 1800).unwrap_or_default();
+    let raw = local_chat_text(&client, port, system, &prompt, 2800).unwrap_or_default();
     emit_ai_progress(&app, 82, "Validating concept relationships");
     touch_ai_server();
     let plan = json_object_from_response(&raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or_else(|| fallback_study_web_plan(&cards));
@@ -3278,11 +3278,12 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
     let primary_set_id = set_ids.first().ok_or_else(|| "Choose at least one flashcard set for this Study Web.".to_string())?;
     let known = cards.iter().map(|card| card.id.clone()).collect::<HashSet<_>>();
     let mut semantic_group_ids = HashSet::new();
+    let mut assigned_cards = HashSet::new();
     let mut groups = plan.groups.into_iter().filter_map(|group| {
         let id = group.id.trim().to_string();
         let label = group.label.trim().chars().take(72).collect::<String>();
         if id.is_empty() || label.is_empty() || !semantic_group_ids.insert(id.clone()) { return None; }
-        let members = group.members.into_iter().filter(|member| known.contains(member)).collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
+        let members = group.members.into_iter().filter(|member| known.contains(member) && assigned_cards.insert(member.clone())).collect::<Vec<_>>();
         if members.is_empty() { return None; }
         Some((id, label, group.parent_id, members))
     }).collect::<Vec<_>>();
@@ -3298,6 +3299,19 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
         if !seen_edges.insert((source.clone(), target.clone())) { continue; }
         let relationship_type = relationship.relationship_type.trim().chars().take(32).collect::<String>();
         edges.push((source, target, if relationship_type.is_empty() { "related_to".into() } else { relationship_type }, relationship.strength.clamp(0.1, 1.0)));
+    }
+    // Semantic groups are created by the local model. Use each group's ordered
+    // membership only to make sure a concept has a visible neighboring path,
+    // never to invent a connection between unrelated topics.
+    let mut connected = edges.iter().flat_map(|(source, target, _, _)| [source.clone(), target.clone()]).collect::<HashSet<_>>();
+    for (_, _, _, members) in &groups {
+        for (index, member) in members.iter().enumerate() {
+            if connected.contains(member) || members.len() < 2 { continue; }
+            let neighbor = if index == 0 { &members[1] } else { &members[index - 1] };
+            let (source, target) = if member < neighbor { (member.clone(), neighbor.clone()) } else { (neighbor.clone(), member.clone()) };
+            if seen_edges.insert((source.clone(), target.clone())) { edges.push((source.clone(), target.clone(), "related_to".into(), 0.42)); }
+            connected.insert(member.clone()); connected.insert(neighbor.clone());
+        }
     }
     let positions = layout_study_web_nodes(cards, &groups, &edges);
     let mut connection = database.open()?;
@@ -3329,25 +3343,28 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
 }
 
 fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, String, Option<String>, Vec<String>)], edges: &[(String, String, String, f64)]) -> HashMap<String, (f64, f64)> {
-    let count = cards.len().max(1) as f64;
-    let radius = (count.sqrt() * 220.0).max(360.0);
-    let mut primary_group = HashMap::new();
-    for (index, (_, _, _, members)) in groups.iter().enumerate() { for card_id in members { primary_group.entry(card_id.clone()).or_insert(index); } }
+    let max_group_size = groups.iter().map(|(_, _, _, members)| members.len()).max().unwrap_or(1) as f64;
+    let columns = (groups.len().max(1) as f64).sqrt().ceil() as usize;
+    let cell_width = (max_group_size.sqrt() * 290.0 + 560.0).max(780.0);
+    let cell_height = (max_group_size.sqrt() * 250.0 + 500.0).max(700.0);
+    let mut group_members = HashMap::new();
+    for (index, (_, _, _, members)) in groups.iter().enumerate() { for (member_index, card_id) in members.iter().enumerate() { group_members.insert(card_id.clone(), (index, member_index, members.len())); } }
     let mut positions = HashMap::new();
-    for (index, card) in cards.iter().enumerate() {
-        let group_index = *primary_group.get(&card.id).unwrap_or(&0);
-        let group_angle = (group_index as f64 / groups.len().max(1) as f64) * std::f64::consts::TAU;
-        let local_angle = (index as f64 * 2.399_963_229_728_653) + group_angle;
-        let group_radius = if groups.len() <= 1 { 0.0 } else { radius };
-        positions.insert(card.id.clone(), (group_angle.cos() * group_radius + local_angle.cos() * 160.0, group_angle.sin() * group_radius + local_angle.sin() * 160.0));
+    for card in cards {
+        let (group_index, member_index, member_count) = group_members.get(&card.id).copied().unwrap_or((0, positions.len(), cards.len()));
+        let center_x = (group_index % columns) as f64 * cell_width;
+        let center_y = (group_index / columns) as f64 * cell_height;
+        let angle = if member_count <= 1 { 0.0 } else { member_index as f64 / member_count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
+        let local_radius = if member_count <= 1 { 0.0 } else if member_count <= 4 { 235.0 } else { 285.0 + ((member_index / 6) as f64 * 125.0) };
+        positions.insert(card.id.clone(), (center_x + angle.cos() * local_radius, center_y + angle.sin() * local_radius));
     }
     for _ in 0..180 {
         let mut delta = cards.iter().map(|card| (card.id.clone(), (0.0_f64, 0.0_f64))).collect::<HashMap<_, _>>();
         for left in 0..cards.len() { for right in left + 1..cards.len() {
-            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 48_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
+            let a = positions[&cards[left].id]; let b = positions[&cards[right].id]; let dx = a.0 - b.0; let dy = a.1 - b.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = 70_000.0 / (distance * distance); let unit = (dx / distance * force, dy / distance * force);
             if let Some(value) = delta.get_mut(&cards[left].id) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(&cards[right].id) { value.0 -= unit.0; value.1 -= unit.1; }
         }}
-        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 360.0) * 0.021 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
+        for (source, target, _, strength) in edges { if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) { let dx = b.0 - a.0; let dy = b.1 - a.1; let distance = (dx * dx + dy * dy).sqrt().max(1.0); let force = (distance - 425.0) * 0.018 * strength; let unit = (dx / distance * force, dy / distance * force); if let Some(value) = delta.get_mut(source) { value.0 += unit.0; value.1 += unit.1; } if let Some(value) = delta.get_mut(target) { value.0 -= unit.0; value.1 -= unit.1; } } }
         for (id, movement) in delta { if let Some(position) = positions.get_mut(&id) { position.0 += movement.0.clamp(-18.0, 18.0); position.1 += movement.1.clamp(-18.0, 18.0); } }
     }
     let min_x = positions.values().map(|position| position.0).fold(f64::INFINITY, f64::min); let min_y = positions.values().map(|position| position.1).fold(f64::INFINITY, f64::min);
