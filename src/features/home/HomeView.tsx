@@ -1,4 +1,5 @@
 import { ArrowRight, BookOpen, FilePlus2, FolderPlus, GraduationCap, Layers3, Plus } from 'lucide-react'
+import { useState } from 'react'
 import type { CourseClass, DocumentSummary, Semester } from '../../lib/types'
 import { classLabel, formatDate } from '../../lib/format'
 
@@ -14,14 +15,15 @@ interface HomeViewProps {
 }
 
 export function HomeView({ semesters, classes, recentDocuments, userName, onNewSemester, onNewClass, onOpenClass, onOpenDocument }: HomeViewProps) {
+  const [showAllRecents, setShowAllRecents] = useState(false)
   if (!semesters.length) return <EmptyLibrary onNewSemester={onNewSemester} />
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
   return <main className="home-view content-view">
     <header className="view-intro"><p className="eyebrow">SOFLO</p><h1>{userName ? `${greeting}, ${userName}.` : `${greeting}.`}</h1><p>Pick up where you left off, or start something new.</p></header>
     <section className="home-section">
-      <div className="section-heading"><div><h2>Recent</h2><p>Your latest papers, always close at hand.</p></div><button className="text-button" onClick={onNewClass}>New class <ArrowRight size={15} /></button></div>
-      {recentDocuments.length ? <div className="recent-list">{recentDocuments.map((document) => {
+      <div className="section-heading"><div><h2>Recent</h2><p>Your latest papers, always close at hand.</p></div><button className="text-button" onClick={() => setShowAllRecents((current) => !current)}>{showAllRecents ? 'Fewer recents' : 'More recents'} <ArrowRight size={15} /></button></div>
+      {recentDocuments.length ? <div className="recent-list">{(showAllRecents ? recentDocuments : recentDocuments.slice(0, 4)).map((document) => {
         const course = classes.find((item) => item.id === document.classId)
         return <button className="recent-item" key={document.id} onClick={() => onOpenDocument(document)}><span className="recent-icon"><FilePlus2 size={19} /></span><span className="recent-copy"><strong>{document.title}</strong><small>{course ? classLabel(course) : 'Class paper'} · {formatDate(document.updatedAt)}</small></span><ArrowRight size={17} /></button>
       })}</div> : <div className="quiet-empty"><FilePlus2 size={22} /><p>Papers you create will appear here.</p></div>}

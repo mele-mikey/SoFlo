@@ -3248,20 +3248,46 @@ fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards
     emit_ai_progress(&app, 24, "Reading each concept and definition");
     let material = cards.iter().take(100).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(96).collect::<String>(), "definition": card.back.chars().take(240).collect::<String>() })).collect::<Vec<_>>();
     let prompt = format!("FLASHCARDS:\n{}\n\nRead every term and definition, then return the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
-    let target_group_count = ((cards.len() + 3) / 4).clamp(2, 12);
-    let system = format!("You are building the reasoning plan for an academic concept web. Return compact JSON only: {{\"groups\":[{{\"id\":\"g1\",\"label\":\"short specific topic\",\"members\":[\"flashcard id in a meaningful order\"]}}],\"relationships\":[{{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}}]}}. Carefully read both sides of every supplied flashcard before deciding. Create roughly {target_group_count} compact, visually useful clusters based on meaning, never alphabetical order, superficial shared words, or the whole subject area. A cluster should normally contain 2 to 6 closely related cards. Use short specific labels that describe the narrow shared idea, never umbrella labels such as Core concepts, Key terms, Overview, or the name of the whole subject. Every supplied ID must appear in at least one group. A genuine bridge concept may appear in two closely related groups only when it directly connects both; do not duplicate cards gratuitously. Order a group's members so adjacent items are genuinely related. Add a sparse set of direct explanatory relationships only where the supplied definitions support one. Before adding a relationship, ask whether you can explain why those two exact cards relate using only the supplied text. A shared broad category, discipline, body system, location, vocabulary word, or analogous example is never enough. Prefer no relationship over a speculative one. Valid links are direct part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or another explicitly supported relationship. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.");
+    let target_leaf_group_count = ((cards.len() + 3) / 4).clamp(2, 12);
+    let target_parent_group_count = ((target_leaf_group_count + 2) / 3).clamp(1, 4).min(target_leaf_group_count);
+    let system = format!("You are building the reasoning plan for an academic concept web. Return compact JSON only: {{\"groups\":[{{\"id\":\"parent-1\",\"label\":\"specific larger theme\",\"members\":[\"flashcard id\"],\"parent_id\":null}},{{\"id\":\"leaf-1\",\"label\":\"short specific subgroup\",\"members\":[\"flashcard id in a meaningful order\"],\"parent_id\":\"parent-1\"}}],\"relationships\":[{{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"direct_relation\",\"strength\":0.8}}]}}. Carefully read both sides of every supplied flashcard before deciding. Build a two-level semantic web, not a flat list: create roughly {target_leaf_group_count} compact leaf groups and {target_parent_group_count} broader parent groups. Every leaf group must have a parent_id pointing to one of the parent groups. A parent group's members must be the exact union of the card IDs in its child leaf groups. Each leaf should normally contain 2 to 6 closely related cards; do not make one group for every individual card unless it is genuinely isolated. Use short, descriptive labels for both levels: parent labels name a meaningful larger theme, while leaf labels name a narrower shared idea. Never use umbrella labels such as Core concepts, Key terms, Overview, or the whole subject name. Every supplied ID must appear in a leaf group and its parent group. A genuine bridge concept may appear in two closely related leaf groups only when it directly connects both; do not duplicate cards gratuitously. Add direct explanatory relationships within leaf groups, then add a few precise bridge relationships between cards in neighboring leaf groups when those groups belong together. A bridge must still be a real relationship between those exact cards, not merely a shared parent label. You may use reliable domain knowledge to interpret a term, but never connect cards merely because they share a broad category, discipline, system, location, vocabulary word, or analogous example. Before adding a relationship, ask whether you can state the exact direct relationship. Prefer no relationship over a speculative one. Valid links are direct part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or another well-established relationship. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.");
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(125)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let raw = local_chat_text(&client, port, &system, &prompt, 2800).unwrap_or_default();
     let candidate = json_object_from_response(&raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or_else(|| fallback_study_web_plan(&cards));
     emit_ai_progress(&app, 66, "Checking relationships for real meaning");
     let audit_prompt = format!("FLASHCARDS:\n{}\n\nCANDIDATE PLAN:\n{}\n\nReturn the corrected plan now.", serde_json::to_string(&material).unwrap_or_default(), serde_json::to_string(&candidate).unwrap_or_default());
-    let audit_system = "You are the quality gate for an academic concept web. Return the complete corrected JSON plan only, using exactly the schema from the candidate. Re-read the source definitions before approving any part of the candidate. Audit every relationship one by one: retain it only if the source definitions themselves establish a direct structural, functional, causal, sequential, contrasting, or prerequisite relationship between those exact two cards. Delete all links based merely on the cards belonging to the same broad category, discipline, system, region, or familiar list. A sparse web with only trustworthy links is better than an impressive-looking but incorrect web. Then audit the groups: split umbrella clusters into compact, specific subgroups, normally 2 to 6 cards each. Every label must name the narrow shared idea visible in its member definitions, not a generic heading or whole-subject name. A bridge card may be in two close groups only when it genuinely connects both. Keep every supplied card in at least one group and preserve only supplied IDs. Do not add commentary, markdown, or coordinates.";
+    let audit_system = "You are the quality gate for an academic concept web. Return the complete corrected JSON plan only, using exactly the schema from the candidate. Re-read the source definitions before approving any part of the candidate. The finished plan must be a two-level web: specific leaf groups with parent_id values, plus broader parent groups with parent_id null. Each parent must contain the union of its children so the hierarchy can be displayed. Reorganize flat or singleton-heavy plans into compact leaf clusters under meaningful larger themes. The goal is a connected semantic web with small clusters joined through a few justified bridge relationships, not a table of separate terms and not one undifferentiated cloud. Audit every relationship one by one: retain it only if there is a direct structural, functional, causal, sequential, contrasting, prerequisite, or other well-established relationship between those exact cards. Delete links based merely on the cards belonging to the same broad category, discipline, system, region, or familiar list. Use a bridge edge only when it precisely connects neighboring leaf groups. A sparse web with only trustworthy links is better than an impressive-looking but incorrect web. Every label must name the narrow shared idea or meaningful larger theme visible in its members, not a generic heading or whole-subject name. A bridge card may be in two close leaf groups only when it genuinely connects both. Keep every supplied card in a leaf and parent group, preserve only supplied IDs, and do not add commentary, markdown, or coordinates.";
     let audited_raw = local_chat_text(&client, port, audit_system, &audit_prompt, 3000).unwrap_or_default();
+    let mut plan = json_object_from_response(&audited_raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or(candidate);
+    if !study_web_plan_has_hierarchy(&plan, &cards) {
+        emit_ai_progress(&app, 84, "Building connected concept layers");
+        let repair_prompt = format!("FLASHCARDS:\n{}\n\nPLAN TO REPAIR:\n{}\n\nReturn a corrected two-level Study Web plan now.", serde_json::to_string(&material).unwrap_or_default(), serde_json::to_string(&plan).unwrap_or_default());
+        let repair_system = "Return compact JSON only using the plan schema you were given. Repair this into a connected two-level semantic web. Create meaningful parent groups with parent_id null, then 2 to 6-card leaf groups that point to those parents. Parent members must contain the union of their child cards. Do not leave every card in its own group. Keep leaf labels narrow and parent labels broader but still descriptive. Add direct relationships inside leaf groups and a small number of well-established bridge relationships between related leaf groups so the visual result is a web. Never use a shared broad category alone as evidence for an edge. Use only supplied IDs and do not add commentary, markdown, or coordinates.";
+        if let Some(repaired) = json_object_from_response(&local_chat_text(&client, port, repair_system, &repair_prompt, 3200).unwrap_or_default()).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()) { plan = repaired; }
+    }
     emit_ai_progress(&app, 90, "Validating concept relationships");
     touch_ai_server();
-    let plan = json_object_from_response(&audited_raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or(candidate);
     emit_ai_progress(&app, 100, "Arranging your Study Web");
     Ok(plan)
+}
+
+fn study_web_plan_has_hierarchy(plan: &StudyWebSemanticPlan, cards: &[StudyWebSourceCard]) -> bool {
+    let groups_by_id = plan.groups.iter().map(|group| (group.id.as_str(), group)).collect::<HashMap<_, _>>();
+    let leaves = plan.groups.iter().filter(|group| group.parent_id.as_ref().is_some_and(|parent_id| groups_by_id.contains_key(parent_id.as_str()))).collect::<Vec<_>>();
+    if cards.len() > 3 && leaves.len() < 2 { return false; }
+    if leaves.is_empty() { return false; }
+    let mut children_by_parent = HashMap::<&str, Vec<&StudyWebSemanticGroup>>::new();
+    for leaf in &leaves { children_by_parent.entry(leaf.parent_id.as_deref().unwrap_or_default()).or_default().push(*leaf); }
+    if children_by_parent.is_empty() || (leaves.len() > 1 && children_by_parent.values().all(|children| children.len() < 2)) { return false; }
+    if leaves.len() >= 4 && leaves.iter().filter(|group| group.members.len() <= 1).count() * 2 > leaves.len() { return false; }
+    let leaf_members = leaves.iter().flat_map(|group| group.members.iter().map(String::as_str)).collect::<HashSet<_>>();
+    if cards.iter().any(|card| !leaf_members.contains(card.id.as_str())) { return false; }
+    children_by_parent.into_iter().all(|(parent_id, children)| {
+        groups_by_id.get(parent_id).is_some_and(|parent| {
+            let parent_members = parent.members.iter().map(String::as_str).collect::<HashSet<_>>();
+            children.iter().flat_map(|child| child.members.iter().map(String::as_str)).all(|card_id| parent_members.contains(card_id))
+        })
+    })
 }
 
 #[allow(unreachable_code)]
@@ -3373,23 +3399,44 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
 }
 
 fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, String, Option<String>, Vec<String>)], edges: &[(String, String, String, f64)]) -> HashMap<String, (f64, f64)> {
-    let max_group_size = groups.iter().map(|(_, _, _, members)| members.len()).max().unwrap_or(1) as f64;
-    let columns = (groups.len().max(1) as f64).sqrt().ceil() as usize;
-    let cell_width = (max_group_size.sqrt() * 290.0 + 560.0).max(780.0);
-    let cell_height = (max_group_size.sqrt() * 250.0 + 500.0).max(700.0);
-    let mut group_members = HashMap::<String, Vec<(usize, usize, usize)>>::new();
-    for (index, (_, _, _, members)) in groups.iter().enumerate() { for (member_index, card_id) in members.iter().enumerate() { group_members.entry(card_id.clone()).or_default().push((index, member_index, members.len())); } }
+    let parent_ids = groups.iter().filter_map(|(_, _, parent_id, _)| parent_id.clone()).collect::<HashSet<_>>();
+    let mut leaf_indices = groups.iter().enumerate().filter_map(|(index, (id, _, _, _))| (!parent_ids.contains(id)).then_some(index)).collect::<Vec<_>>();
+    if leaf_indices.is_empty() { leaf_indices = (0..groups.len()).collect(); }
+    let max_leaf_size = leaf_indices.iter().map(|index| groups[*index].3.len()).max().unwrap_or(1) as f64;
+    let mut parent_clusters = Vec::<(String, Vec<usize>)>::new();
+    for group_index in &leaf_indices {
+        let parent_key = groups[*group_index].2.clone().unwrap_or_else(|| format!("root-{group_index}"));
+        if let Some((_, children)) = parent_clusters.iter_mut().find(|(id, _)| id == &parent_key) { children.push(*group_index); } else { parent_clusters.push((parent_key, vec![*group_index])); }
+    }
+    let parent_columns = (parent_clusters.len().max(1) as f64).sqrt().ceil() as usize;
+    let parent_cell_width = (max_leaf_size.sqrt() * 340.0 + 1_680.0).max(1_900.0);
+    let parent_cell_height = (max_leaf_size.sqrt() * 300.0 + 1_420.0).max(1_650.0);
+    let mut leaf_centers = HashMap::<usize, (f64, f64)>::new();
+    for (parent_index, (_, children)) in parent_clusters.iter().enumerate() {
+        let parent_x = (parent_index % parent_columns) as f64 * parent_cell_width;
+        let parent_y = (parent_index / parent_columns) as f64 * parent_cell_height;
+        for (child_index, group_index) in children.iter().enumerate() {
+            let count = children.len();
+            let angle = if count <= 1 { 0.0 } else { child_index as f64 / count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
+            let radius = if count <= 1 { 0.0 } else if count <= 4 { 525.0 } else { 620.0 + ((child_index / 5) as f64 * 140.0) };
+            leaf_centers.insert(*group_index, (parent_x + angle.cos() * radius, parent_y + angle.sin() * radius));
+        }
+    }
+    let mut group_members = HashMap::<String, Vec<(f64, f64, usize, usize)>>::new();
+    for group_index in &leaf_indices {
+        let members = &groups[*group_index].3;
+        let (center_x, center_y) = leaf_centers.get(group_index).copied().unwrap_or_default();
+        for (member_index, card_id) in members.iter().enumerate() { group_members.entry(card_id.clone()).or_default().push((center_x, center_y, member_index, members.len())); }
+    }
     let mut positions = HashMap::new();
     for card in cards {
-        let memberships = group_members.get(&card.id).cloned().unwrap_or_else(|| vec![(0, positions.len(), cards.len())]);
+        let memberships = group_members.get(&card.id).cloned().unwrap_or_else(|| vec![(0.0, 0.0, positions.len(), cards.len())]);
         let (mut x, mut y) = (0.0, 0.0);
-        for (group_index, member_index, member_count) in &memberships {
-            let center_x = (*group_index % columns) as f64 * cell_width;
-            let center_y = (*group_index / columns) as f64 * cell_height;
+        for (center_x, center_y, member_index, member_count) in &memberships {
             let angle = if *member_count <= 1 { 0.0 } else { *member_index as f64 / *member_count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
             let local_radius = if *member_count <= 1 { 0.0 } else if *member_count <= 4 { 235.0 } else { 285.0 + ((*member_index / 6) as f64 * 125.0) };
-            x += center_x + angle.cos() * local_radius;
-            y += center_y + angle.sin() * local_radius;
+            x += *center_x + angle.cos() * local_radius;
+            y += *center_y + angle.sin() * local_radius;
         }
         positions.insert(card.id.clone(), (x / memberships.len() as f64, y / memberships.len() as f64));
     }
@@ -3796,7 +3843,8 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
         json_array_from_response, json_object_from_response, semester_end_date,
-        thesaurus_json_from_response, StudyWebSourceCard,
+        study_web_plan_has_hierarchy, thesaurus_json_from_response,
+        StudyWebSemanticGroup, StudyWebSemanticPlan, StudyWebSourceCard,
     };
 
     #[test]
@@ -3854,6 +3902,25 @@ mod tests {
         let plan = fallback_study_web_plan(&cards);
         assert!(plan.relationships.is_empty());
         assert_eq!(plan.groups.iter().flat_map(|group| group.members.iter()).count(), 2);
+    }
+
+    #[test]
+    fn study_web_hierarchy_requires_parent_and_leaf_layers() {
+        let cards = vec![
+            StudyWebSourceCard { id: "one".into(), front: "One".into(), back: "Definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard { id: "two".into(), front: "Two".into(), back: "Definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard { id: "three".into(), front: "Three".into(), back: "Definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard { id: "four".into(), front: "Four".into(), back: "Definition.".into(), updated_at: "now".into() },
+        ];
+        let flat = StudyWebSemanticPlan { groups: cards.iter().enumerate().map(|(index, card)| StudyWebSemanticGroup { id: format!("g-{index}"), label: card.front.clone(), members: vec![card.id.clone()], parent_id: None }).collect(), relationships: Vec::new() };
+        assert!(!study_web_plan_has_hierarchy(&flat, &cards));
+
+        let layered = StudyWebSemanticPlan { groups: vec![
+            StudyWebSemanticGroup { id: "parent".into(), label: "Larger theme".into(), members: cards.iter().map(|card| card.id.clone()).collect(), parent_id: None },
+            StudyWebSemanticGroup { id: "left".into(), label: "First subgroup".into(), members: vec!["one".into(), "two".into()], parent_id: Some("parent".into()) },
+            StudyWebSemanticGroup { id: "right".into(), label: "Second subgroup".into(), members: vec!["three".into(), "four".into()], parent_id: Some("parent".into()) },
+        ], relationships: Vec::new() };
+        assert!(study_web_plan_has_hierarchy(&layered, &cards));
     }
 
     #[test]

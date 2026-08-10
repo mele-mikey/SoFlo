@@ -1,7 +1,7 @@
 import { ChevronLeft, Maximize2, Minus, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
-import type { FlashcardSetDetail, StudyWebDetail, StudyWebNode } from '../../lib/types'
+import type { FlashcardSetDetail, StudyWebDetail, StudyWebGroup, StudyWebNode } from '../../lib/types'
 
 type Viewport = { x: number; y: number; scale: number }
 
@@ -33,6 +33,27 @@ function resolveNodeOverlap(nodes: StudyWebNode[], expanded: string | null, card
   return placed
 }
 
+function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number }>) {
+  const childrenByParent = new Map<string, StudyWebGroup[]>()
+  for (const group of groups) if (group.parentGroupId) childrenByParent.set(group.parentGroupId, [...(childrenByParent.get(group.parentGroupId) ?? []), group])
+  const collectCardIds = (group: StudyWebGroup, visited = new Set<string>()): string[] => {
+    if (visited.has(group.id)) return []
+    visited.add(group.id)
+    const cardIds = new Set(group.cardIds)
+    for (const child of childrenByParent.get(group.id) ?? []) for (const cardId of collectCardIds(child, visited)) cardIds.add(cardId)
+    return [...cardIds]
+  }
+  return groups.flatMap((group) => {
+    const groupNodes = collectCardIds(group).map((id) => nodes.get(id)).filter((node): node is { x: number; y: number } => Boolean(node))
+    if (!groupNodes.length) return []
+    const parent = childrenByParent.has(group.id)
+    const minX = Math.min(...groupNodes.map((node) => node.x))
+    const maxX = Math.max(...groupNodes.map((node) => node.x + nodeWidth))
+    const minY = Math.min(...groupNodes.map((node) => node.y))
+    return [{ id: group.id, label: group.label, parent, x: parent ? (minX + maxX) / 2 : minX, y: minY - (parent ? 68 : 31) }]
+  })
+}
+
 export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStudyCard }: StudyWebViewProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState<Viewport>({ x: 80, y: 80, scale: 0.8 })
@@ -50,9 +71,10 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
   const cards = useMemo(() => new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card])), [sets])
   const sourceLabel = sets.length === 1 ? sets[0]?.title : `${sets.length} flashcard sets`
   const related = useMemo(() => selected ? new Set(relationships.flatMap((edge) => edge.sourceCardId === selected ? [edge.targetCardId] : edge.targetCardId === selected ? [edge.sourceCardId] : [])) : new Set<string>(), [relationships, selected])
-  const visualRelationships = useMemo(() => relationships.length ? relationships : web.groups.flatMap((group) => group.cardIds.slice(1).map((cardId, index) => ({ id: `group-${group.id}-${index}`, sourceCardId: group.cardIds[index], targetCardId: cardId, relationshipType: 'related_to', strength: .42 }))), [relationships, web.groups])
+  const visualRelationships = relationships
   const laidOutNodes = useMemo(() => resolveNodeOverlap([...nodes.values()], expanded, cards), [cards, nodes, expanded])
   const displayNodes = useMemo(() => new Map(laidOutNodes.map((item) => [item.node.cardId, item])), [laidOutNodes])
+  const groupLabels = useMemo(() => groupLabelPlacements(web.groups, displayNodes), [displayNodes, web.groups])
   const allPinned = nodes.size > 0 && [...nodes.values()].every((node) => node.pinned)
   const bounds = useMemo(() => {
     if (!laidOutNodes.length) return { minX: 0, minY: 0, width: 1000, height: 760 }
@@ -154,7 +176,7 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
       <div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button></div>
       <div className="study-web-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0' }}>
         <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = displayNodes.get(edge.sourceCardId); const to = displayNodes.get(edge.targetCardId); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x + nodeWidth / 2 - bounds.minX} y1={from.y + collapsedHeight / 2 - bounds.minY} x2={to.x + nodeWidth / 2 - bounds.minX} y2={to.y + collapsedHeight / 2 - bounds.minY} className={active ? 'active' : selected ? 'muted' : ''} /> })}</svg>
-        {web.groups.map((group) => { const groupNodes = group.cardIds.map((id) => displayNodes.get(id)).filter(Boolean); if (!groupNodes.length) return null; const x = Math.min(...groupNodes.map((node) => node!.x)) - bounds.minX; const y = Math.min(...groupNodes.map((node) => node!.y)) - bounds.minY - 34; return <span className="study-web-group-label" style={{ left: x, top: y }} key={group.id}>{group.label}</span> })}
+        {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY }} key={group.id}>{group.label}</span>)}
         {laidOutNodes.map(({ node, x, y }) => { const card = cards.get(node.cardId); if (!card) return null; const isExpanded = node.pinned || expanded === card.id; const muted = !editingLinks && selected && selected !== card.id && !related.has(card.id); return <button key={card.id} className={`study-web-node${isExpanded ? ' expanded' : ''}${node.pinned ? ' pinned' : ''}${linkSource === card.id ? ' link-source' : ''}${selected === card.id ? ' selected' : ''}${muted ? ' muted' : ''}`} style={{ left: x - bounds.minX, top: y - bounds.minY }} onPointerDown={(event) => startNodeDrag(event, card.id)} onClick={(event) => { event.stopPropagation(); clickNode(card.id, node.pinned) }}><span className="study-web-card-pin" role="button" tabIndex={0} title={node.pinned ? 'Unpin card' : 'Keep card open'} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setPinned(card.id, !node.pinned) }}>{node.pinned ? <PinOff size={13} /> : <Pin size={13} />}</span><strong>{card.front || 'Untitled card'}</strong>{isExpanded && <span className="study-web-definition">{card.back || 'No definition yet.'}<em onClick={(event) => { event.stopPropagation(); onStudyCard(card.id) }}>Study this concept</em></span>}</button> })}
       </div>
     </section>
