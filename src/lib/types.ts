@@ -260,7 +260,7 @@ export interface TestAttemptSummary {
 export type AppView =
   | { kind: 'home' }
   | { kind: 'calendar' }
-  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'lectures' | 'syllabus' | 'flashcards' | 'trash' }
+  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'lectures' | 'syllabus' | 'flashcards' | 'studyWeb' | 'trash' }
   | { kind: 'document'; classId: string; documentId: string }
   | { kind: 'lecture'; classId: string; lectureId: string }
   | { kind: 'flashcardSet'; classId: string; setId: string }
