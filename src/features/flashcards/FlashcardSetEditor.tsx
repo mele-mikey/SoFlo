@@ -1,7 +1,7 @@
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { BookOpen, ChevronLeft, Download, GripVertical, MoreHorizontal, Plus, Sparkles, Star, Trash2 } from 'lucide-react'
+import { BookOpen, ChevronLeft, Copy, Download, GripVertical, MoreHorizontal, Plus, Sparkles, Star, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import type { Flashcard, FlashcardSetDetail } from '../../lib/types'
@@ -12,20 +12,23 @@ interface FlashcardSetEditorProps {
   onBack: () => void
   onStudy: (mode: 'flashcards' | 'learn' | 'test' | 'match' | 'teachItBack') => void
   onCreateStudyWeb: () => void
+  onDuplicate: (title: string) => void
   onUpdated: (set: FlashcardSetDetail) => void
   onDelete: () => void
   onToast: (message: string, kind?: 'success' | 'error') => void
 }
 
-export function FlashcardSetEditor({ set, aiEnabled, onBack, onStudy, onCreateStudyWeb, onUpdated, onDelete, onToast }: FlashcardSetEditorProps) {
+export function FlashcardSetEditor({ set, aiEnabled, onBack, onStudy, onCreateStudyWeb, onDuplicate, onUpdated, onDelete, onToast }: FlashcardSetEditorProps) {
   const [title, setTitle] = useState(set.title)
   const [description, setDescription] = useState(set.description ?? '')
   const [cards, setCards] = useState(set.cards)
   const [saving, setSaving] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
+  const [duplicateOpen, setDuplicateOpen] = useState(false)
+  const [duplicateTitle, setDuplicateTitle] = useState(`${set.title} copy`)
   const [focusCardId, setFocusCardId] = useState<string | null>(null)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
-  useEffect(() => { setTitle(set.title); setDescription(set.description ?? ''); setCards(set.cards) }, [set])
+  useEffect(() => { setTitle(set.title); setDescription(set.description ?? ''); setCards(set.cards); setDuplicateTitle(`${set.title} copy`) }, [set])
 
   const persistSet = async () => {
     setSaving(true)
@@ -64,11 +67,12 @@ export function FlashcardSetEditor({ set, aiEnabled, onBack, onStudy, onCreateSt
     <header className="set-editor-header"><button className="back-button" onClick={onBack}><ChevronLeft size={18} /> Flashcards</button><div className="set-status">{saving ? 'Saving…' : 'Saved locally'}</div></header>
     <section className="set-editor-main"><div className="set-heading"><span className="set-heading-icon"><BookOpen size={23} /></span><div><label className="set-title-field"><span>Set name</span><input value={title} onChange={(event) => setTitle(event.target.value)} onBlur={() => void persistSet()} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} placeholder="Untitled flashcard set" aria-label="Flashcard set title" /></label><textarea value={description} onChange={(event) => setDescription(event.target.value)} onBlur={() => void persistSet()} placeholder="Add an optional description" aria-label="Flashcard set description" rows={1} /></div></div>
       <div className="set-mastery-summary"><strong>{cards.length} {cards.length === 1 ? 'Card' : 'Cards'}</strong><span>{mastery.mastered ?? 0} Mastered</span><span>{mastery.familiar ?? 0} Familiar</span><span>{mastery.learning ?? 0} Learning</span><span>{mastery.needsWork ?? 0} Need work</span></div>
-      <div className="study-launcher"><span>Everything saves locally as you work.</span><div><button className="button button-primary button-small" onClick={() => onStudy('learn')} disabled={!cards.length}><Sparkles size={15} /> Study</button><span className="set-more"><button className="icon-button tiny" onClick={() => setMoreOpen((open) => !open)} aria-label="Flashcard set settings"><MoreHorizontal size={17} /></button>{moreOpen && <span className="paper-action-menu"><button onClick={() => void exportCards()}><Download size={14} /> Export</button><button className="danger" onClick={() => { setMoreOpen(false); onDelete() }}><Trash2 size={14} /> Move to trash</button>{aiEnabled && <button className="ai-menu-action" onClick={() => { setMoreOpen(false); onCreateStudyWeb() }} disabled={!cards.length}><Sparkles size={14} /> AI Convert to Study Web</button>}</span>}</span></div></div>
+      <div className="study-launcher"><span>Everything saves locally as you work.</span><div><button className="button button-primary button-small" onClick={() => onStudy('learn')} disabled={!cards.length}><Sparkles size={15} /> Study</button><span className="set-more"><button className="icon-button tiny" onClick={() => setMoreOpen((open) => !open)} aria-label="Flashcard set settings"><MoreHorizontal size={17} /></button>{moreOpen && <span className="paper-action-menu"><button onClick={() => { setMoreOpen(false); setDuplicateOpen(true) }}><Copy size={14} /> Duplicate</button><button onClick={() => void exportCards()}><Download size={14} /> Export</button><button className="danger" onClick={() => { setMoreOpen(false); onDelete() }}><Trash2 size={14} /> Move to trash</button>{aiEnabled && <button className="ai-menu-action" onClick={() => { setMoreOpen(false); onCreateStudyWeb() }} disabled={!cards.length}><Sparkles size={14} /> AI Convert to Study Web</button>}</span>}</span></div></div>
       <div className="set-editor-actions"><button className="button button-primary button-small" onClick={() => void addCard()}><Plus size={15} /> Add card</button></div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={reorder}><SortableContext items={cards.map((card) => card.id)} strategy={verticalListSortingStrategy}><div className="card-editor-list">{cards.map((card, index) => <EditableCard key={card.id} card={card} index={index} autoFocus={focusCardId === card.id} onChange={updateCard} onPersist={persistCard} onCreateNext={() => void addCard(true)} onRemove={removeCard} />)}</div></SortableContext></DndContext>
       {!cards.length && <div className="set-empty"><BookOpen size={25} /><h2>Start with your first card.</h2><p>Use a term on the front and the explanation on the back.</p><button className="button button-primary" onClick={() => void addCard()}><Plus size={16} /> Add a card</button></div>}
     </section>
+    {duplicateOpen && <div className="paper-dialog-backdrop"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Duplicate flashcard set"><header><h2>Duplicate flashcard set</h2><button className="icon-button" onClick={() => setDuplicateOpen(false)} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (duplicateTitle.trim()) { onDuplicate(duplicateTitle.trim()); setDuplicateOpen(false) } }}><div className="paper-dialog-content"><label>New set name<input autoFocus value={duplicateTitle} onChange={(event) => setDuplicateTitle(event.target.value)} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => setDuplicateOpen(false)}>Cancel</button><button className="button button-primary" disabled={!duplicateTitle.trim()}>Duplicate</button></footer></form></section></div>}
   </main>
 }
 

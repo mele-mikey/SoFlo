@@ -33,6 +33,21 @@ function resolveNodeOverlap(nodes: StudyWebNode[], expanded: string | null, card
   return placed
 }
 
+function compactAutomaticNodes(nodes: StudyWebNode[]) {
+  if (nodes.length < 2 || nodes.some((node) => node.manuallyPositioned)) return nodes
+  const minX = Math.min(...nodes.map((node) => node.x))
+  const minY = Math.min(...nodes.map((node) => node.y))
+  const maxX = Math.max(...nodes.map((node) => node.x))
+  const maxY = Math.max(...nodes.map((node) => node.y))
+  const width = Math.max(1, maxX - minX)
+  const height = Math.max(1, maxY - minY)
+  const targetWidth = Math.max(880, Math.sqrt(nodes.length) * 390)
+  const targetHeight = Math.max(680, Math.sqrt(nodes.length) * 315)
+  const scale = Math.min(1, targetWidth / width, targetHeight / height)
+  if (scale > .94) return nodes
+  return nodes.map((node) => ({ ...node, x: minX + (node.x - minX) * scale, y: minY + (node.y - minY) * scale }))
+}
+
 function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number }>) {
   const childrenByParent = new Map<string, StudyWebGroup[]>()
   for (const group of groups) if (group.parentGroupId) childrenByParent.set(group.parentGroupId, [...(childrenByParent.get(group.parentGroupId) ?? []), group])
@@ -49,74 +64,56 @@ function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: n
   })
 }
 
-function studyWebGroupGeometry(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number }>) {
-  const groupByCard = new Map<string, string>()
-  const children = new Map<string, string[]>()
-  const groupById = new Map(groups.map((group) => [group.id, group]))
-  for (const group of groups) {
-    if (group.parentGroupId) children.set(group.parentGroupId, [...(children.get(group.parentGroupId) ?? []), group.id])
-    for (const cardId of group.cardIds) groupByCard.set(cardId, group.id)
-  }
-  const centers = new Map<string, { x: number; y: number }>()
-  const resolve = (id: string): { x: number; y: number } | null => {
-    const existing = centers.get(id)
-    if (existing) return existing
-    const group = groupById.get(id)
-    if (!group) return null
-    const own = group.cardIds.map((cardId) => nodes.get(cardId)).filter((node): node is { x: number; y: number } => Boolean(node))
-    const childCenters = (children.get(id) ?? []).map(resolve).filter((center): center is { x: number; y: number } => Boolean(center))
-    const points = [...own, ...childCenters]
-    if (!points.length) return null
-    const center = { x: points.reduce((total, point) => total + point.x, 0) / points.length + nodeWidth / 2, y: points.reduce((total, point) => total + point.y, 0) / points.length + collapsedHeight / 2 }
-    centers.set(id, center)
-    return center
-  }
-  for (const group of groups) resolve(group.id)
-  return { groupByCard, centers, groupById, children }
-}
+type StudyWebCanvasEdge = { id: string; sourceCardId: string; targetCardId: string; structural: boolean }
 
-function studyWebStructureEdges(groups: StudyWebGroup[], geometry: ReturnType<typeof studyWebGroupGeometry>) {
-  const lines: Array<{ id: string; from: { x: number; y: number }; to: { x: number; y: number } }> = []
-  const parents = groups.filter((group) => geometry.children.has(group.id)).sort((left, right) => left.id.localeCompare(right.id))
-  for (const parent of parents) {
-    const parentCenter = geometry.centers.get(parent.id)
-    const childIds = geometry.children.get(parent.id) ?? []
-    if (!parentCenter || childIds.length < 2) continue
-    for (const childId of childIds) {
-      const childCenter = geometry.centers.get(childId)
-      if (childCenter) lines.push({ id: `child:${parent.id}:${childId}`, from: childCenter, to: parentCenter })
-    }
+// The AI supplies a hierarchy, not invisible connector coordinates. Turn that
+// hierarchy into a light card-to-card tree so every visible line starts and
+// ends on an actual concept card.
+function studyWebHierarchyEdges(groups: StudyWebGroup[]): StudyWebCanvasEdge[] {
+  const byId = new Map(groups.map((group) => [group.id, group]))
+  const children = new Map<string, string[]>()
+  const roots: string[] = []
+  for (const group of groups) {
+    if (group.parentGroupId && byId.has(group.parentGroupId)) children.set(group.parentGroupId, [...(children.get(group.parentGroupId) ?? []), group.id])
+    else roots.push(group.id)
   }
-  if (parents.length < 2) return lines
-  const connected = [parents[0]]
-  const remaining = parents.slice(1)
-  while (remaining.length) {
-    let candidateIndex = 0
-    let closest = connected[0]
-    let bestDistance = Number.POSITIVE_INFINITY
-    for (let index = 0; index < remaining.length; index += 1) {
-      const candidate = geometry.centers.get(remaining[index].id)
-      if (!candidate) continue
-      for (const linked of connected) {
-        const linkedCenter = geometry.centers.get(linked.id)
-        if (!linkedCenter) continue
-        const distance = (candidate.x - linkedCenter.x) ** 2 + (candidate.y - linkedCenter.y) ** 2
-        if (distance < bestDistance) { bestDistance = distance; candidateIndex = index; closest = linked }
-      }
-    }
-    const [next] = remaining.splice(candidateIndex, 1)
-    const from = geometry.centers.get(next.id)
-    const to = geometry.centers.get(closest.id)
-    if (from && to) lines.push({ id: `theme:${next.id}:${closest.id}`, from, to })
-    connected.push(next)
+  const edges: StudyWebCanvasEdge[] = []
+  const seen = new Set<string>()
+  const add = (sourceCardId: string | null, targetCardId: string | null, id: string) => {
+    if (!sourceCardId || !targetCardId || sourceCardId === targetCardId) return
+    const key = [sourceCardId, targetCardId].sort().join(':')
+    if (seen.has(key)) return
+    seen.add(key)
+    edges.push({ id, sourceCardId, targetCardId, structural: true })
   }
-  return lines
+  const anchor = (groupId: string): string | null => {
+    const group = byId.get(groupId)
+    if (!group) return null
+    if (group.cardIds.length) return group.cardIds[0]
+    for (const childId of children.get(groupId) ?? []) {
+      const childAnchor = anchor(childId)
+      if (childAnchor) return childAnchor
+    }
+    return null
+  }
+  for (const group of groups) {
+    const ownAnchor = group.cardIds[0] ?? null
+    for (const cardId of group.cardIds.slice(1)) add(ownAnchor, cardId, `group:${group.id}:${cardId}`)
+    const childAnchors = (children.get(group.id) ?? []).map(anchor).filter((cardId): cardId is string => Boolean(cardId))
+    const groupAnchor = ownAnchor ?? childAnchors[0] ?? null
+    for (const childAnchor of childAnchors) add(groupAnchor, childAnchor, `child:${group.id}:${childAnchor}`)
+  }
+  // Root themes are intentionally connected as a tree so the canvas remains
+  // one navigable web even when two high-level themes do not share a card.
+  const rootAnchors = roots.map(anchor).filter((cardId): cardId is string => Boolean(cardId))
+  for (let index = 1; index < rootAnchors.length; index += 1) add(rootAnchors[index - 1], rootAnchors[index], `root:${index}`)
+  return edges
 }
 
 export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, onBack, onRegenerate, onStudyCard }: StudyWebViewProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState<Viewport>({ x: 80, y: 80, scale: 0.8 })
-  const [nodes, setNodes] = useState(() => new Map(web.nodes.map((node) => [node.cardId, node])))
+  const [nodes, setNodes] = useState(() => new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])))
   const nodesRef = useRef(nodes)
   const [relationships, setRelationships] = useState(web.relationships)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -130,14 +127,27 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   const dragRef = useRef<{ kind: 'canvas' | 'node'; cardId?: string; x: number; y: number; viewport: Viewport; node?: { x: number; y: number }; moved: boolean } | null>(null)
   const consumeNodeClick = useRef<string | null>(null)
   const [cards, setCards] = useState(() => new Map<string, Flashcard>(sets.flatMap((set) => set.cards).map((card) => [card.id, card])))
-  const sourceLabel = web.isManual ? 'Manual Study Web' : sets.length === 1 ? sets[0]?.title : `${sets.length} flashcard sets`
-  const related = useMemo(() => selected ? new Set(relationships.flatMap((edge) => edge.sourceCardId === selected ? [edge.targetCardId] : edge.targetCardId === selected ? [edge.sourceCardId] : [])) : new Set<string>(), [relationships, selected])
-  const visualRelationships = relationships.filter((edge) => edge.relationshipType !== 'parent_backbone' && edge.relationshipType !== 'theme_backbone')
+  const hierarchyEdges = useMemo(() => studyWebHierarchyEdges(web.groups), [web.groups])
+  const visualRelationships = useMemo<StudyWebCanvasEdge[]>(() => {
+    const seen = new Set<string>()
+    const combined: StudyWebCanvasEdge[] = []
+    const add = (edge: StudyWebCanvasEdge) => {
+      const key = [edge.sourceCardId, edge.targetCardId].sort().join(':')
+      if (!seen.has(key)) { seen.add(key); combined.push(edge) }
+    }
+    for (const edge of relationships) {
+      // Generated connections from earlier builds were used as hidden layout
+      // anchors. Keep only the links a person explicitly made on the canvas.
+      if (edge.relationshipType !== 'manual_related') continue
+      add({ id: edge.id, sourceCardId: edge.sourceCardId, targetCardId: edge.targetCardId, structural: false })
+    }
+    for (const edge of hierarchyEdges) add(edge)
+    return combined
+  }, [hierarchyEdges, relationships])
+  const related = useMemo(() => selected ? new Set(visualRelationships.flatMap((edge) => edge.sourceCardId === selected ? [edge.targetCardId] : edge.targetCardId === selected ? [edge.sourceCardId] : [])) : new Set<string>(), [selected, visualRelationships])
   const laidOutNodes = useMemo(() => resolveNodeOverlap([...nodes.values()], expanded, cards), [cards, nodes, expanded])
   const displayNodes = useMemo(() => new Map(laidOutNodes.map((item) => [item.node.cardId, item])), [laidOutNodes])
-  const groupGeometry = useMemo(() => studyWebGroupGeometry(web.groups, displayNodes), [displayNodes, web.groups])
   const groupLabels = useMemo(() => groupLabelPlacements(web.groups, displayNodes), [displayNodes, web.groups])
-  const structuralEdges = useMemo(() => studyWebStructureEdges(web.groups, groupGeometry), [groupGeometry, web.groups])
   const allPinned = nodes.size > 0 && [...nodes.values()].every((node) => node.pinned)
   const bounds = useMemo(() => {
     if (!laidOutNodes.length) return { minX: 0, minY: 0, width: 1000, height: 760 }
@@ -156,7 +166,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   }
   useEffect(() => { const frame = requestAnimationFrame(fit); return () => cancelAnimationFrame(frame) }, [web.id])
   useEffect(() => setCards(new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card]))), [sets])
-  useEffect(() => { const next = new Map(web.nodes.map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setExpanded(null); setSelected(null); setLinkSource(null); setEditingLinks(startInEditMode) }, [startInEditMode, web.nodes, web.relationships])
+  useEffect(() => { const next = new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setExpanded(null); setSelected(null); setLinkSource(null); setEditingLinks(startInEditMode) }, [startInEditMode, web.nodes, web.relationships])
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -251,25 +261,19 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   const focusCard = (cardId: string) => { const node = displayNodes.get(cardId); const canvas = canvasRef.current; if (!node || !canvas) return; const rect = canvas.getBoundingClientRect(); const scale = Math.max(viewport.scale, .8); setSelected(cardId); setExpanded(cardId); setViewport({ scale, x: rect.width / 2 - (node.x + nodeWidth / 2) * scale, y: rect.height / 2 - (node.y + collapsedHeight / 2) * scale }) }
   const searchMatch = search.trim().toLocaleLowerCase()
   const matches = searchMatch ? [...cards.values()].filter((card) => `${card.front} ${card.back}`.toLocaleLowerCase().includes(searchMatch)).slice(0, 6) : []
-  const edgePoint = (cardId: string, relationshipType: string) => {
+  const edgePoint = (cardId: string) => {
     const node = displayNodes.get(cardId)
     if (!node) return null
-    const groupId = groupGeometry.groupByCard.get(cardId)
-    if (groupId && relationshipType === 'parent_backbone') return groupGeometry.centers.get(groupId) ?? { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
-    if (groupId && (relationshipType === 'theme_backbone' || relationshipType === 'theme_bridge')) {
-      const parentId = groupGeometry.groupById.get(groupId)?.parentGroupId
-      if (parentId) return groupGeometry.centers.get(parentId) ?? { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
-    }
     return { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
   }
   return <main className="study-web-view">
-    <header className="study-web-header"><button className="back-button" onClick={onBack}><ChevronLeft size={18} /> Study Web</button><div><p className="eyebrow">{sourceLabel}</p><h1>{web.name}</h1></div>{web.outOfDate && <span className="study-web-stale">Study Web out of date</span>}<div className="study-web-header-actions"><button className={`button button-quiet button-small${editingLinks ? ' active' : ''}`} onClick={() => { setEditingLinks((current) => !current); setLinkSource(null); setSelected(null) }}><Pencil size={15} /> {editingLinks ? 'Done editing' : 'Edit links'}</button><button className={`button button-quiet button-small${allPinned ? ' active' : ''}`} onClick={() => setAllPinned(!allPinned)} title={allPinned ? 'Unpin all cards' : 'Pin all cards'}>{allPinned ? <PinOff size={15} /> : <Pin size={15} />}{allPinned ? ' Unpin all' : ' Pin all'}</button>{aiEnabled && <button className="button button-quiet button-small ai-action" onClick={() => setConfirmRegenerate(true)}><Sparkles size={15} /> Regenerate Web</button>}</div></header>
+    <header className="study-web-header"><button className="back-button" onClick={onBack}><ChevronLeft size={18} /> Back to Study Web</button>{web.outOfDate && <span className="study-web-stale">Study Web out of date</span>}<div className="study-web-header-actions"><button className={`button button-quiet button-small${editingLinks ? ' active' : ''}`} onClick={() => { setEditingLinks((current) => !current); setLinkSource(null); setSelected(null) }}><Pencil size={15} /> {editingLinks ? 'Done editing' : 'Edit links'}</button><button className={`button button-quiet button-small${allPinned ? ' active' : ''}`} onClick={() => setAllPinned(!allPinned)} title={allPinned ? 'Unpin all cards' : 'Pin all cards'}>{allPinned ? <PinOff size={15} /> : <Pin size={15} />}{allPinned ? ' Unpin all' : ' Pin all'}</button>{aiEnabled && <button className="button button-quiet button-small ai-action" onClick={() => setConfirmRegenerate(true)}><Sparkles size={15} /> Regenerate Web</button>}</div></header>
     <section className={`study-web-canvas${editingLinks ? ' editing-links' : ''}`} ref={canvasRef} onPointerDown={startCanvasDrag}>
       {editingLinks && <div className="study-web-edit-hint">{linkSource ? 'Click another card to add or remove its link.' : 'Select a card, then choose another to link or unlink.'}</div>}
       <div className="study-web-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a concept" />{search && <button onClick={() => setSearch('')} aria-label="Clear search"><X size={14} /></button>}{matches.length > 0 && <div>{matches.map((card) => <button key={card.id} onClick={() => { focusCard(card.id); setSearch('') }}><strong>{card.front}</strong><span>{card.back}</span></button>)}</div>}</div>
       {editingLinks && <div className="study-web-add-control"><button className="study-web-add-button" onClick={() => setCreateMenuOpen((value) => !value)} aria-label="Add to Study Web"><Plus size={21} /></button>{createMenuOpen && <div className="study-web-add-menu"><button onClick={() => void createCard()}><Plus size={14} /> Create flashcard</button></div>}</div>}<div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button></div>
       <div className="study-web-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0' }}>
-        <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{structuralEdges.map((edge) => <line key={edge.id} className="structure" x1={edge.from.x - bounds.minX} y1={edge.from.y - bounds.minY} x2={edge.to.x - bounds.minX} y2={edge.to.y - bounds.minY} />)}{visualRelationships.map((edge) => { const from = edgePoint(edge.sourceCardId, edge.relationshipType); const to = edgePoint(edge.targetCardId, edge.relationshipType); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x - bounds.minX} y1={from.y - bounds.minY} x2={to.x - bounds.minX} y2={to.y - bounds.minY} className={active ? 'active' : selected ? 'muted' : ''} /> })}</svg>
+        <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = edgePoint(edge.sourceCardId); const to = edgePoint(edge.targetCardId); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x - bounds.minX} y1={from.y - bounds.minY} x2={to.x - bounds.minX} y2={to.y - bounds.minY} className={`${edge.structural ? 'structure ' : ''}${active ? 'active' : selected ? 'muted' : ''}`} /> })}</svg>
         {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY }} key={group.id}>{group.label}</span>)}
         {laidOutNodes.map(({ node, x, y }) => {
           const card = cards.get(node.cardId)

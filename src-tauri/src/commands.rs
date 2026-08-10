@@ -3200,12 +3200,14 @@ struct StudyWebLeafAssignment {
     leaf: String,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct StudyWebThemeBridgePlan {
     #[serde(default)]
     connections: Vec<StudyWebThemeBridge>,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct StudyWebThemeBridge {
     source_parent: String,
@@ -3216,12 +3218,14 @@ struct StudyWebThemeBridge {
     reason: String,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct StudyWebRelationshipPlan {
     #[serde(default)]
     connections: Vec<StudyWebRelationshipCandidate>,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct StudyWebRelationshipCandidate {
     source: String,
@@ -3926,29 +3930,11 @@ fn generate_study_web_semantics_layered(
             leaves.push((leaf_id, parent_id.clone(), label, members));
         }
     }
-    // Group structure is rendered directly from the hierarchy, never stored as
-    // fake card-to-card links. Every stored line below is an exact relationship
-    // the local model has to justify from the supplied material.
-    let mut relationships = Vec::<StudyWebSemanticRelationship>::new();
-    emit_ai_progress(&app, 80, "Verifying the exact concept connections");
-    relationships.extend(infer_study_web_leaf_relationships(
-        &client,
-        port,
-        &leaves,
-        &model_cards,
-    ));
-    let parent_themes = parent_buckets
-        .iter()
-        .enumerate()
-        .map(|(index, (label, members))| (format!("parent-{}", index + 1), label.clone(), members.clone()))
-        .collect::<Vec<_>>();
-    emit_ai_progress(&app, 86, "Finding the strongest bridges between themes");
-    relationships.extend(infer_study_web_theme_bridges(
-        &client,
-        port,
-        &parent_themes,
-        &model_cards,
-    ));
+    // The model's job is the hierarchy and its groups. The canvas derives its
+    // card-to-card tree directly from that hierarchy, which keeps every line
+    // attached to real cards without inventing a factual relationship.
+    emit_ai_progress(&app, 82, "Checking the concept hierarchy");
+    let relationships = Vec::<StudyWebSemanticRelationship>::new();
     let plan = StudyWebSemanticPlan {
         groups,
         relationships,
@@ -4112,6 +4098,7 @@ fn study_web_label_words(value: &str) -> HashSet<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn infer_study_web_leaf_relationships(
     client: &reqwest::blocking::Client,
     port: u16,
@@ -4190,6 +4177,7 @@ fn infer_study_web_leaf_relationships(
         .collect()
 }
 
+#[allow(dead_code)]
 fn infer_study_web_theme_bridges(
     client: &reqwest::blocking::Client,
     port: u16,
@@ -5024,11 +5012,98 @@ fn save_generated_study_web(
     read_study_web_detail(&database.open()?, &web_id)
 }
 
+fn study_web_hierarchy_layout_edges(
+    groups: &[(String, String, Option<String>, Vec<String>)],
+) -> Vec<(String, String, String, f64)> {
+    let members = groups
+        .iter()
+        .map(|(id, _, _, cards)| (id.clone(), cards.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut children = HashMap::<String, Vec<String>>::new();
+    let mut roots = Vec::new();
+    for (id, _, parent_id, _) in groups {
+        if let Some(parent_id) = parent_id
+            .as_ref()
+            .filter(|parent| members.contains_key(*parent))
+        {
+            children.entry(parent_id.clone()).or_default().push(id.clone());
+        } else {
+            roots.push(id.clone());
+        }
+    }
+    fn anchor(
+        group_id: &str,
+        members: &HashMap<String, Vec<String>>,
+        children: &HashMap<String, Vec<String>>,
+        visiting: &mut HashSet<String>,
+    ) -> Option<String> {
+        if !visiting.insert(group_id.to_string()) {
+            return None;
+        }
+        let result = members
+            .get(group_id)
+            .and_then(|cards| cards.first().cloned())
+            .or_else(|| {
+                children.get(group_id).and_then(|child_ids| {
+                    child_ids
+                        .iter()
+                        .find_map(|child_id| anchor(child_id, members, children, visiting))
+                })
+            });
+        visiting.remove(group_id);
+        result
+    }
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    let mut add = |source: Option<String>, target: Option<String>, name: String| {
+        let (Some(source), Some(target)) = (source, target) else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        let key = if source < target {
+            (source.clone(), target.clone())
+        } else {
+            (target.clone(), source.clone())
+        };
+        if seen.insert(key.clone()) {
+            edges.push((key.0, key.1, name, 0.9));
+        }
+    };
+    for (group_id, _, _, cards) in groups {
+        let own_anchor = cards.first().cloned();
+        for card_id in cards.iter().skip(1) {
+            add(own_anchor.clone(), Some(card_id.clone()), "hierarchy_leaf".into());
+        }
+        let child_anchors = children
+            .get(group_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|child_id| anchor(child_id, &members, &children, &mut HashSet::new()))
+            .collect::<Vec<_>>();
+        let group_anchor = own_anchor.or_else(|| child_anchors.first().cloned());
+        for child_anchor in child_anchors {
+            add(group_anchor.clone(), Some(child_anchor), "hierarchy_group".into());
+        }
+    }
+    let root_anchors = roots
+        .iter()
+        .filter_map(|root_id| anchor(root_id, &members, &children, &mut HashSet::new()))
+        .collect::<Vec<_>>();
+    for pair in root_anchors.windows(2) {
+        add(Some(pair[0].clone()), Some(pair[1].clone()), "hierarchy_root".into());
+    }
+    edges
+}
+
 fn layout_study_web_nodes(
     cards: &[StudyWebSourceCard],
     groups: &[(String, String, Option<String>, Vec<String>)],
     edges: &[(String, String, String, f64)],
 ) -> HashMap<String, (f64, f64)> {
+    let mut layout_edges = study_web_hierarchy_layout_edges(groups);
+    layout_edges.extend(edges.iter().cloned());
     let parent_ids = groups
         .iter()
         .filter_map(|(_, _, parent_id, _)| parent_id.clone())
@@ -5041,11 +5116,6 @@ fn layout_study_web_nodes(
     if leaf_indices.is_empty() {
         leaf_indices = (0..groups.len()).collect();
     }
-    let max_leaf_size = leaf_indices
-        .iter()
-        .map(|index| groups[*index].3.len())
-        .max()
-        .unwrap_or(1) as f64;
     let mut parent_clusters = Vec::<(String, Vec<usize>)>::new();
     for group_index in &leaf_indices {
         let parent_key = groups[*group_index]
@@ -5058,16 +5128,24 @@ fn layout_study_web_nodes(
             parent_clusters.push((parent_key, vec![*group_index]));
         }
     }
-    let parent_columns = (parent_clusters.len().max(1) as f64).sqrt().ceil() as usize;
-    // Start the force layout compactly. Meaningful theme bridges then pull
-    // neighboring systems into one web, while collision forces preserve room
-    // for every card instead of scattering entire themes into distant cells.
-    let parent_cell_width = (max_leaf_size.sqrt() * 210.0 + 900.0).max(1_040.0);
-    let parent_cell_height = (max_leaf_size.sqrt() * 190.0 + 820.0).max(960.0);
+    // Give broad themes a compact ring rather than distant grid cells. The
+    // subgroup tree and its card links then keep the whole web coherent.
+    let parent_count = parent_clusters.len().max(1);
+    let parent_radius = if parent_count <= 1 {
+        0.0
+    } else {
+        360.0 + (parent_count.saturating_sub(2) as f64 * 62.0)
+    };
     let mut leaf_centers = HashMap::<usize, (f64, f64)>::new();
     for (parent_index, (_, children)) in parent_clusters.iter().enumerate() {
-        let parent_x = (parent_index % parent_columns) as f64 * parent_cell_width;
-        let parent_y = (parent_index / parent_columns) as f64 * parent_cell_height;
+        let parent_angle = if parent_count <= 1 {
+            0.0
+        } else {
+            parent_index as f64 / parent_count as f64 * std::f64::consts::TAU
+                - std::f64::consts::FRAC_PI_2
+        };
+        let parent_x = parent_angle.cos() * parent_radius;
+        let parent_y = parent_angle.sin() * parent_radius * 0.74;
         for (child_index, group_index) in children.iter().enumerate() {
             let count = children.len();
             let angle = if count <= 1 {
@@ -5079,9 +5157,9 @@ fn layout_study_web_nodes(
             let radius = if count <= 1 {
                 0.0
             } else if count <= 4 {
-                330.0
+                210.0
             } else {
-                390.0 + ((child_index / 5) as f64 * 95.0)
+                255.0 + ((child_index / 5) as f64 * 58.0)
             };
             leaf_centers.insert(
                 *group_index,
@@ -5122,9 +5200,9 @@ fn layout_study_web_nodes(
             let local_radius = if *member_count <= 1 {
                 0.0
             } else if *member_count <= 4 {
-                158.0
+                112.0
             } else {
-                190.0 + ((*member_index / 6) as f64 * 82.0)
+                136.0 + ((*member_index / 6) as f64 * 42.0)
             };
             x += *center_x + angle.cos() * local_radius;
             y += *center_y + angle.sin() * local_radius;
@@ -5134,7 +5212,7 @@ fn layout_study_web_nodes(
             (x / memberships.len() as f64, y / memberships.len() as f64),
         );
     }
-    for _ in 0..240 {
+    for _ in 0..180 {
         let mut delta = cards
             .iter()
             .map(|card| (card.id.clone(), (0.0_f64, 0.0_f64)))
@@ -5146,8 +5224,8 @@ fn layout_study_web_nodes(
                 let dx = a.0 - b.0;
                 let dy = a.1 - b.1;
                 let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-                let force = 38_000.0 / (distance * distance)
-                    + (330.0 - distance).max(0.0) * 0.24;
+                let force = 24_000.0 / (distance * distance)
+                    + (278.0 - distance).max(0.0) * 0.17;
                 let unit = (dx / distance * force, dy / distance * force);
                 if let Some(value) = delta.get_mut(&cards[left].id) {
                     value.0 += unit.0;
@@ -5159,12 +5237,12 @@ fn layout_study_web_nodes(
                 }
             }
         }
-        for (source, target, _, strength) in edges {
+        for (source, target, _, strength) in &layout_edges {
             if let (Some(a), Some(b)) = (positions.get(source), positions.get(target)) {
                 let dx = b.0 - a.0;
                 let dy = b.1 - a.1;
                 let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-                let force = (distance - 335.0) * 0.032 * strength;
+                let force = (distance - 260.0) * 0.052 * strength;
                 let unit = (dx / distance * force, dy / distance * force);
                 if let Some(value) = delta.get_mut(source) {
                     value.0 += unit.0;
@@ -5593,6 +5671,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
         json_array_from_response, json_object_from_response, semester_end_date,
+        study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
         StudyWebSemanticPlan, StudyWebSourceCard,
     };
@@ -5668,6 +5747,33 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn hierarchy_layout_edges_connect_every_grouped_card() {
+        let groups = vec![
+            ("root-a".into(), "First theme".into(), None, vec![]),
+            (
+                "leaf-a".into(),
+                "First subgroup".into(),
+                Some("root-a".into()),
+                vec!["a".into(), "b".into()],
+            ),
+            ("root-b".into(), "Second theme".into(), None, vec![]),
+            (
+                "leaf-b".into(),
+                "Second subgroup".into(),
+                Some("root-b".into()),
+                vec!["c".into(), "d".into()],
+            ),
+        ];
+        let edges = study_web_hierarchy_layout_edges(&groups);
+        let connected = edges
+            .iter()
+            .flat_map(|(source, target, _, _)| [source.as_str(), target.as_str()])
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(connected, ["a", "b", "c", "d"].into_iter().collect());
+        assert_eq!(edges.len(), 3);
     }
 
     #[test]

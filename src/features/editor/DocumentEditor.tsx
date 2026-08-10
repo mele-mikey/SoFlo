@@ -699,6 +699,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const footerRef = useRef<HTMLDivElement>(null)
   const activeRunningElementRef = useRef<HTMLElement | null>(null)
   const grammarRequestRef = useRef(false)
+  const grammarActiveRequestsRef = useRef(0)
+  const manualGrammarRequestRef = useRef(false)
+  const grammarReviewGenerationRef = useRef(0)
   const wordReferenceRequestRef = useRef(0)
   const selectedWordReferenceRef = useRef('')
   const selectedWordRangeRef = useRef<WordSelection | null>(null)
@@ -1199,8 +1202,15 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return text.slice(start, end)
   }
   const reviewGrammar = async (quick = false) => {
-    if (!aiEnabled || !aiGrammarEnabled || !aiModelReady || grammarRequestRef.current) return false
+    if (!aiEnabled || !aiGrammarEnabled || !aiModelReady) return false
+    // A quiet check may already be using the local model. A full review is
+    // intentional, so let it take priority and ignore the older quiet result.
+    if (quick && grammarRequestRef.current) return false
+    if (!quick && manualGrammarRequestRef.current) return false
+    const generation = ++grammarReviewGenerationRef.current
+    grammarActiveRequestsRef.current += 1
     grammarRequestRef.current = true
+    if (!quick) manualGrammarRequestRef.current = true
     if (quick) setPassiveGrammarReviewing(true)
     else {
       setGrammarReviewing(true)
@@ -1210,6 +1220,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     try {
       const source = quick ? nextPassiveGrammarExcerpt() : editor.getText()
       const issues = extractGrammarIssues(await onGrammarReview(source, quick, paperContext), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+      // A manual review started after a passive pass should replace that pass,
+      // never be overwritten by an older background response.
+      if (generation !== grammarReviewGenerationRef.current) return false
       if (quick) {
         const combined = grammarIssues.filter((issue) => {
           if (ignoredGrammarKeysRef.current.has(grammarIssueKey(issue))) return false
@@ -1221,14 +1234,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
         setGrammarIssues(combined)
         setGrammarDecorations(combined)
       } else if (issues.length) {
-        // A deeper review adds formal-writing guidance without throwing away the
-        // quiet spelling checks that were already visible in the document.
-        const combined = [...grammarIssues.filter((issue) => issue.kind === 'mechanic')]
-        for (const issue of issues) {
-          if (!combined.some((current) => current.from === issue.from && current.to === issue.to && current.kind === issue.kind)) combined.push(issue)
-        }
-        setGrammarIssues(combined)
-        setGrammarDecorations(combined)
+        // A manual AI Review is the authoritative, deeper pass. It replaces the
+        // small automatic pass that may already be visible.
+        setGrammarIssues(issues)
+        setGrammarDecorations(issues)
       } else {
         setGrammarMessage('AI Review could not shape its suggestions this time. Your paper has not been changed.')
       }
@@ -1248,7 +1257,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
         editor.view.dom.classList.remove('ai-grammar-scanning')
         setGrammarReviewing(false)
       }
-      grammarRequestRef.current = false
+      grammarActiveRequestsRef.current = Math.max(0, grammarActiveRequestsRef.current - 1)
+      grammarRequestRef.current = grammarActiveRequestsRef.current > 0
+      if (!quick) manualGrammarRequestRef.current = false
     }
   }
   grammarReviewRef.current = reviewGrammar
@@ -1496,7 +1507,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>}
     {!versionHistoryOpen && <div className="editor-toolbar-wrap">
-    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing || passiveGrammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onPaperContext={openPaperContext} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onPaperContext={openPaperContext} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>}
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
