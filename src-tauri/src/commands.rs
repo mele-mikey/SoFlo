@@ -3211,6 +3211,26 @@ pub fn save_study_web_node_position(database: State<'_, Database>, input: SaveSt
 }
 
 #[tauri::command]
+pub fn toggle_study_web_relationship(database: State<'_, Database>, input: ToggleStudyWebRelationshipInput) -> CommandResult<Option<StudyWebRelationship>> {
+    if input.source_card_id == input.target_card_id { return Err("Choose two different cards to link.".into()); }
+    let connection = database.open()?;
+    let present: i64 = connection.query_row("SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1 AND flashcard_id IN (?2, ?3)", params![&input.study_web_id, &input.source_card_id, &input.target_card_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if present != 2 { return Err("Both cards must belong to this Study Web.".into()); }
+    let (source, target) = if input.source_card_id < input.target_card_id { (input.source_card_id, input.target_card_id) } else { (input.target_card_id, input.source_card_id) };
+    let existing: Option<String> = connection.query_row("SELECT id FROM study_web_relationships WHERE study_web_id=?1 AND source_flashcard_id=?2 AND target_flashcard_id=?3", params![&input.study_web_id, &source, &target], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+    let result = if let Some(id) = existing {
+        connection.execute("DELETE FROM study_web_relationships WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+        None
+    } else {
+        let id = Uuid::new_v4().to_string();
+        connection.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,'manual_related',0.75)", params![&id, &input.study_web_id, &source, &target]).map_err(|error| error.to_string())?;
+        Some(StudyWebRelationship { id, source_card_id: source, target_card_id: target, relationship_type: "manual_related".into(), strength: 0.75 })
+    };
+    connection.execute("UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&input.study_web_id]).map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn generate_study_web(app: tauri::AppHandle, database: State<'_, Database>, set_ids: Vec<String>, model_path: String, study_web_id: Option<String>) -> CommandResult<StudyWebDetail> {
     let database = database.inner().clone();
     let (class_id, set_titles, cards) = study_web_sources(&database, &set_ids)?;
@@ -3228,7 +3248,7 @@ fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards
     emit_ai_progress(&app, 30, "Finding meaningful concept relationships");
     let material = cards.iter().take(100).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(96).collect::<String>(), "definition": card.back.chars().take(240).collect::<String>() })).collect::<Vec<_>>();
     let prompt = format!("FLASHCARDS:\n{}\n\nRead every term and definition, then return the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
-    let system = "You are building the reasoning plan for an academic concept web. Return compact JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short meaningful topic\",\"members\":[\"flashcard id in a meaningful order\"]}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}]}. Carefully read both sides of every supplied flashcard before deciding. Make mutually exclusive, coherent topic groups based on meaning, never alphabetical order or superficial shared words. Every supplied ID must appear exactly once in groups. Order a group's members so adjacent items are genuinely related. Add 1 to 3 direct explanatory relationships per card where possible; do not connect unrelated concepts just to fill space. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.";
+    let system = "You are building the reasoning plan for an academic concept web. Return compact JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short specific topic\",\"members\":[\"flashcard id in a meaningful order\"]}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}]}. Carefully read both sides of every supplied flashcard before deciding. Make 4 to 9 visually useful, coherent topic groups based on meaning, never alphabetical order or superficial shared words. Use short specific labels that describe the actual shared idea, never generic labels such as Core concepts. Every supplied ID must appear in at least one group. A genuine bridge concept may appear in two closely-related groups when that makes the web clearer; do not duplicate cards gratuitously. Order a group's members so adjacent items are genuinely related. Add 1 to 3 direct explanatory relationships per card where possible, including meaningful cross-group links; do not connect unrelated concepts just to fill space. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.";
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(105)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let raw = local_chat_text(&client, port, system, &prompt, 2800).unwrap_or_default();
     emit_ai_progress(&app, 82, "Validating concept relationships");
@@ -3278,12 +3298,12 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
     let primary_set_id = set_ids.first().ok_or_else(|| "Choose at least one flashcard set for this Study Web.".to_string())?;
     let known = cards.iter().map(|card| card.id.clone()).collect::<HashSet<_>>();
     let mut semantic_group_ids = HashSet::new();
-    let mut assigned_cards = HashSet::new();
     let mut groups = plan.groups.into_iter().filter_map(|group| {
         let id = group.id.trim().to_string();
         let label = group.label.trim().chars().take(72).collect::<String>();
         if id.is_empty() || label.is_empty() || !semantic_group_ids.insert(id.clone()) { return None; }
-        let members = group.members.into_iter().filter(|member| known.contains(member) && assigned_cards.insert(member.clone())).collect::<Vec<_>>();
+        let mut member_ids = HashSet::new();
+        let members = group.members.into_iter().filter(|member| known.contains(member) && member_ids.insert(member.clone())).collect::<Vec<_>>();
         if members.is_empty() { return None; }
         Some((id, label, group.parent_id, members))
     }).collect::<Vec<_>>();
@@ -3347,16 +3367,21 @@ fn layout_study_web_nodes(cards: &[StudyWebSourceCard], groups: &[(String, Strin
     let columns = (groups.len().max(1) as f64).sqrt().ceil() as usize;
     let cell_width = (max_group_size.sqrt() * 290.0 + 560.0).max(780.0);
     let cell_height = (max_group_size.sqrt() * 250.0 + 500.0).max(700.0);
-    let mut group_members = HashMap::new();
-    for (index, (_, _, _, members)) in groups.iter().enumerate() { for (member_index, card_id) in members.iter().enumerate() { group_members.insert(card_id.clone(), (index, member_index, members.len())); } }
+    let mut group_members = HashMap::<String, Vec<(usize, usize, usize)>>::new();
+    for (index, (_, _, _, members)) in groups.iter().enumerate() { for (member_index, card_id) in members.iter().enumerate() { group_members.entry(card_id.clone()).or_default().push((index, member_index, members.len())); } }
     let mut positions = HashMap::new();
     for card in cards {
-        let (group_index, member_index, member_count) = group_members.get(&card.id).copied().unwrap_or((0, positions.len(), cards.len()));
-        let center_x = (group_index % columns) as f64 * cell_width;
-        let center_y = (group_index / columns) as f64 * cell_height;
-        let angle = if member_count <= 1 { 0.0 } else { member_index as f64 / member_count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
-        let local_radius = if member_count <= 1 { 0.0 } else if member_count <= 4 { 235.0 } else { 285.0 + ((member_index / 6) as f64 * 125.0) };
-        positions.insert(card.id.clone(), (center_x + angle.cos() * local_radius, center_y + angle.sin() * local_radius));
+        let memberships = group_members.get(&card.id).cloned().unwrap_or_else(|| vec![(0, positions.len(), cards.len())]);
+        let (mut x, mut y) = (0.0, 0.0);
+        for (group_index, member_index, member_count) in &memberships {
+            let center_x = (*group_index % columns) as f64 * cell_width;
+            let center_y = (*group_index / columns) as f64 * cell_height;
+            let angle = if *member_count <= 1 { 0.0 } else { *member_index as f64 / *member_count as f64 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2 };
+            let local_radius = if *member_count <= 1 { 0.0 } else if *member_count <= 4 { 235.0 } else { 285.0 + ((*member_index / 6) as f64 * 125.0) };
+            x += center_x + angle.cos() * local_radius;
+            y += center_y + angle.sin() * local_radius;
+        }
+        positions.insert(card.id.clone(), (x / memberships.len() as f64, y / memberships.len() as f64));
     }
     for _ in 0..180 {
         let mut delta = cards.iter().map(|card| (card.id.clone(), (0.0_f64, 0.0_f64))).collect::<HashMap<_, _>>();

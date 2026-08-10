@@ -111,6 +111,7 @@ pub fn run() {
             commands::set_study_web_deleted,
             commands::generate_study_web,
             commands::save_study_web_node_position,
+            commands::toggle_study_web_relationship,
             commands::record_card_response,
             commands::start_study_session,
             commands::complete_study_session,
