@@ -3074,7 +3074,7 @@ struct StudyWebSourceCard {
     updated_at: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct StudyWebSemanticPlan {
     #[serde(default)]
     groups: Vec<StudyWebSemanticGroup>,
@@ -3082,7 +3082,7 @@ struct StudyWebSemanticPlan {
     relationships: Vec<StudyWebSemanticRelationship>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct StudyWebSemanticGroup {
     id: String,
     label: String,
@@ -3092,7 +3092,7 @@ struct StudyWebSemanticGroup {
     parent_id: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct StudyWebSemanticRelationship {
     source: String,
     target: String,
@@ -3245,20 +3245,41 @@ fn generate_study_web_semantics(app: tauri::AppHandle, model_path: String, cards
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 8, "Starting your private local model");
     let port = ensure_ai_server(&model_path, &app)?;
-    emit_ai_progress(&app, 30, "Finding meaningful concept relationships");
+    emit_ai_progress(&app, 24, "Reading each concept and definition");
     let material = cards.iter().take(100).map(|card| serde_json::json!({ "id": card.id, "term": card.front.chars().take(96).collect::<String>(), "definition": card.back.chars().take(240).collect::<String>() })).collect::<Vec<_>>();
     let prompt = format!("FLASHCARDS:\n{}\n\nRead every term and definition, then return the semantic organization now.", serde_json::to_string(&material).unwrap_or_default());
-    let system = "You are building the reasoning plan for an academic concept web. Return compact JSON only: {\"groups\":[{\"id\":\"g1\",\"label\":\"short specific topic\",\"members\":[\"flashcard id in a meaningful order\"]}],\"relationships\":[{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}]}. Carefully read both sides of every supplied flashcard before deciding. Make 4 to 9 visually useful, coherent topic groups based on meaning, never alphabetical order or superficial shared words. Use short specific labels that describe the actual shared idea, never generic labels such as Core concepts. Every supplied ID must appear in at least one group. A genuine bridge concept may appear in two closely-related groups when that makes the web clearer; do not duplicate cards gratuitously. Order a group's members so adjacent items are genuinely related. Add 1 to 3 direct explanatory relationships per card where possible, including meaningful cross-group links; do not connect unrelated concepts just to fill space. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.";
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(105)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let raw = local_chat_text(&client, port, system, &prompt, 2800).unwrap_or_default();
-    emit_ai_progress(&app, 82, "Validating concept relationships");
+    let target_group_count = ((cards.len() + 3) / 4).clamp(2, 12);
+    let system = format!("You are building the reasoning plan for an academic concept web. Return compact JSON only: {{\"groups\":[{{\"id\":\"g1\",\"label\":\"short specific topic\",\"members\":[\"flashcard id in a meaningful order\"]}}],\"relationships\":[{{\"source\":\"flashcard id\",\"target\":\"flashcard id\",\"relationship_type\":\"related_to\",\"strength\":0.8}}]}}. Carefully read both sides of every supplied flashcard before deciding. Create roughly {target_group_count} compact, visually useful clusters based on meaning, never alphabetical order, superficial shared words, or the whole subject area. A cluster should normally contain 2 to 6 closely related cards. Use short specific labels that describe the narrow shared idea, never umbrella labels such as Core concepts, Key terms, Overview, or the name of the whole subject. Every supplied ID must appear in at least one group. A genuine bridge concept may appear in two closely related groups only when it directly connects both; do not duplicate cards gratuitously. Order a group's members so adjacent items are genuinely related. Add a sparse set of direct explanatory relationships only where the supplied definitions support one. Before adding a relationship, ask whether you can explain why those two exact cards relate using only the supplied text. A shared broad category, discipline, body system, location, vocabulary word, or analogous example is never enough. Prefer no relationship over a speculative one. Valid links are direct part-whole, direct interaction, sequence, cause-effect, contrast, prerequisite, or another explicitly supported relationship. Use only supplied IDs. Do not invent cards, coordinates, markdown, or commentary.");
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(125)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let raw = local_chat_text(&client, port, &system, &prompt, 2800).unwrap_or_default();
+    let candidate = json_object_from_response(&raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or_else(|| fallback_study_web_plan(&cards));
+    emit_ai_progress(&app, 66, "Checking relationships for real meaning");
+    let audit_prompt = format!("FLASHCARDS:\n{}\n\nCANDIDATE PLAN:\n{}\n\nReturn the corrected plan now.", serde_json::to_string(&material).unwrap_or_default(), serde_json::to_string(&candidate).unwrap_or_default());
+    let audit_system = "You are the quality gate for an academic concept web. Return the complete corrected JSON plan only, using exactly the schema from the candidate. Re-read the source definitions before approving any part of the candidate. Audit every relationship one by one: retain it only if the source definitions themselves establish a direct structural, functional, causal, sequential, contrasting, or prerequisite relationship between those exact two cards. Delete all links based merely on the cards belonging to the same broad category, discipline, system, region, or familiar list. A sparse web with only trustworthy links is better than an impressive-looking but incorrect web. Then audit the groups: split umbrella clusters into compact, specific subgroups, normally 2 to 6 cards each. Every label must name the narrow shared idea visible in its member definitions, not a generic heading or whole-subject name. A bridge card may be in two close groups only when it genuinely connects both. Keep every supplied card in at least one group and preserve only supplied IDs. Do not add commentary, markdown, or coordinates.";
+    let audited_raw = local_chat_text(&client, port, audit_system, &audit_prompt, 3000).unwrap_or_default();
+    emit_ai_progress(&app, 90, "Validating concept relationships");
     touch_ai_server();
-    let plan = json_object_from_response(&raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or_else(|| fallback_study_web_plan(&cards));
+    let plan = json_object_from_response(&audited_raw).and_then(|json| serde_json::from_str::<StudyWebSemanticPlan>(&json).ok()).unwrap_or(candidate);
     emit_ai_progress(&app, 100, "Arranging your Study Web");
     Ok(plan)
 }
 
+#[allow(unreachable_code)]
 fn fallback_study_web_plan(cards: &[StudyWebSourceCard]) -> StudyWebSemanticPlan {
+    // The fallback intentionally makes no semantic claims. The normal two-pass
+    // model path supplies descriptive clusters and edges; if it is unavailable,
+    // preserving cards is safer than drawing a relationship from coincidence.
+    let groups = cards.chunks(4).enumerate().map(|(index, chunk)| {
+        let first_term = chunk.first().map(|card| card.front.trim().chars().take(42).collect::<String>()).unwrap_or_default();
+        StudyWebSemanticGroup {
+            id: format!("fallback-{index}"),
+            label: if first_term.is_empty() { "Study material".into() } else { format!("{first_term} and related") },
+            members: chunk.iter().map(|card| card.id.clone()).collect(),
+            parent_id: None,
+        }
+    }).collect();
+    return StudyWebSemanticPlan { groups, relationships: Vec::new() };
+
     let mut buckets: HashMap<char, Vec<String>> = HashMap::new();
     for card in cards { let key = card.front.chars().find(|character| character.is_alphanumeric()).map(|character| character.to_ascii_uppercase()).unwrap_or('#'); buckets.entry(key).or_default().push(card.id.clone()); }
     let mut groups = buckets.into_iter().enumerate().map(|(index, (key, members))| StudyWebSemanticGroup { id: format!("fallback-{index}"), label: if key == '#' { "Core concepts".into() } else { format!("Concepts · {key}") }, members, parent_id: None }).collect::<Vec<_>>();
@@ -3309,8 +3330,8 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
     }).collect::<Vec<_>>();
     let grouped = groups.iter().flat_map(|(_, _, _, members)| members.iter().cloned()).collect::<HashSet<_>>();
     let missing = cards.iter().filter(|card| !grouped.contains(&card.id)).map(|card| card.id.clone()).collect::<Vec<_>>();
-    if !missing.is_empty() { groups.push(("additional".into(), "Additional concepts".into(), None, missing)); }
-    if groups.is_empty() { groups.push(("core".into(), "Core concepts".into(), None, cards.iter().map(|card| card.id.clone()).collect())); }
+    if !missing.is_empty() { groups.push(("unassigned".into(), "Unassigned study material".into(), None, missing)); }
+    if groups.is_empty() { groups.push(("unassigned".into(), "Unassigned study material".into(), None, cards.iter().map(|card| card.id.clone()).collect())); }
     let mut seen_edges = HashSet::new();
     let mut edges = Vec::new();
     for relationship in plan.relationships {
@@ -3320,19 +3341,8 @@ fn save_generated_study_web(database: &Database, class_id: &str, set_ids: &[Stri
         let relationship_type = relationship.relationship_type.trim().chars().take(32).collect::<String>();
         edges.push((source, target, if relationship_type.is_empty() { "related_to".into() } else { relationship_type }, relationship.strength.clamp(0.1, 1.0)));
     }
-    // Semantic groups are created by the local model. Use each group's ordered
-    // membership only to make sure a concept has a visible neighboring path,
-    // never to invent a connection between unrelated topics.
-    let mut connected = edges.iter().flat_map(|(source, target, _, _)| [source.clone(), target.clone()]).collect::<HashSet<_>>();
-    for (_, _, _, members) in &groups {
-        for (index, member) in members.iter().enumerate() {
-            if connected.contains(member) || members.len() < 2 { continue; }
-            let neighbor = if index == 0 { &members[1] } else { &members[index - 1] };
-            let (source, target) = if member < neighbor { (member.clone(), neighbor.clone()) } else { (neighbor.clone(), member.clone()) };
-            if seen_edges.insert((source.clone(), target.clone())) { edges.push((source.clone(), target.clone(), "related_to".into(), 0.42)); }
-            connected.insert(member.clone()); connected.insert(neighbor.clone());
-        }
-    }
+    // Groups influence layout and their label only. A visible line must come
+    // from the model's direct reasoning or a manual link, never card order.
     let positions = layout_study_web_nodes(cards, &groups, &edges);
     let mut connection = database.open()?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
@@ -3784,8 +3794,9 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        available_loopback_port, is_visual_line_echo, json_array_from_response,
-        json_object_from_response, semester_end_date, thesaurus_json_from_response,
+        available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
+        json_array_from_response, json_object_from_response, semester_end_date,
+        thesaurus_json_from_response, StudyWebSourceCard,
     };
 
     #[test]
@@ -3832,6 +3843,17 @@ mod tests {
             "2026-12-12"
         );
         assert!(semester_end_date("Summer", 2027).is_none());
+    }
+
+    #[test]
+    fn study_web_fallback_never_invents_relationships() {
+        let cards = vec![
+            StudyWebSourceCard { id: "one".into(), front: "First topic".into(), back: "A definition.".into(), updated_at: "now".into() },
+            StudyWebSourceCard { id: "two".into(), front: "Second topic".into(), back: "Another definition.".into(), updated_at: "now".into() },
+        ];
+        let plan = fallback_study_web_plan(&cards);
+        assert!(plan.relationships.is_empty());
+        assert_eq!(plan.groups.iter().flat_map(|group| group.members.iter()).count(), 2);
     }
 
     #[test]
