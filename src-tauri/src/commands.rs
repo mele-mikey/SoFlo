@@ -1783,6 +1783,27 @@ pub async fn download_default_ai_model(
     result
 }
 
+#[tauri::command]
+pub fn delete_local_ai_models(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<()> {
+    stop_model_server(&AI_SERVER);
+    stop_model_server(&WORD_AI_SERVER);
+    let models = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");
+    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME] {
+        let path = models.join(name);
+        if path.is_file() { fs::remove_file(path).map_err(|error| error.to_string())?; }
+    }
+    let connection = database.open()?;
+    let mut settings = get_settings(&connection, None)?;
+    settings.ai_model_path.clear();
+    settings.ai_grammar = false;
+    let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+    connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn word_xml_to_text(xml: &str) -> String {
     let with_breaks = xml
         .replace("</w:p>", "\n")
@@ -3192,6 +3213,62 @@ struct StudyWebThemeBridge {
     target: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStudyWeb {
+    format: String,
+    version: u8,
+    name: String,
+    #[serde(default)]
+    cards: Vec<PortableStudyWebCard>,
+    #[serde(default)]
+    nodes: Vec<PortableStudyWebNode>,
+    #[serde(default)]
+    groups: Vec<PortableStudyWebGroup>,
+    #[serde(default)]
+    relationships: Vec<PortableStudyWebRelationship>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStudyWebCard {
+    id: String,
+    front: String,
+    back: String,
+    notes: Option<String>,
+    image_path: Option<String>,
+    position: i32,
+    is_starred: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStudyWebNode {
+    card_id: String,
+    x: f64,
+    y: f64,
+    manually_positioned: bool,
+    pinned: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStudyWebGroup {
+    id: String,
+    label: String,
+    parent_group_id: Option<String>,
+    card_ids: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStudyWebRelationship {
+    source_card_id: String,
+    target_card_id: String,
+    relationship_type: String,
+    strength: f64,
+}
+
 fn default_study_web_relationship_type() -> String {
     "related_to".into()
 }
@@ -3342,7 +3419,7 @@ fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<Stu
         name,
         generated_at,
         updated_at,
-        out_of_date: source_hash != study_web_source_hash(&cards),
+        out_of_date: source_hash != "manual" && source_hash != study_web_source_hash(&cards),
         nodes,
         groups,
         relationships,
@@ -3429,7 +3506,7 @@ fn list_study_webs_by_deleted(
             generated_at,
             updated_at,
             deleted_at,
-            out_of_date: source_hash != study_web_source_hash(&cards),
+            out_of_date: source_hash != "manual" && source_hash != study_web_source_hash(&cards),
         });
     }
     Ok(webs)
@@ -3471,6 +3548,125 @@ pub fn get_study_web(database: State<'_, Database>, id: String) -> CommandResult
 }
 
 #[tauri::command]
+pub fn create_empty_study_web(
+    database: State<'_, Database>,
+    class_id: String,
+    name: String,
+) -> CommandResult<StudyWebDetail> {
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let title = name.trim().chars().take(96).collect::<String>();
+    let title = if title.is_empty() { "Study Web".to_string() } else { title };
+    let set_id = Uuid::new_v4().to_string();
+    let web_id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1,?2,?3,?4)",
+        params![&set_id, &class_id, format!("{} cards", title), "Cards created inside this Study Web."],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO study_webs (id, class_id, flashcard_set_id, name, source_hash) VALUES (?1,?2,?3,?4,'manual')",
+        params![&web_id, &class_id, &set_id, &title],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,0)",
+        params![&web_id, &set_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    read_study_web_detail(&database.open()?, &web_id)
+}
+
+fn study_web_export_filename(name: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') { character } else { '_' })
+        .collect::<String>();
+    let safe = safe.trim_matches([' ', '-', '_']);
+    if safe.is_empty() { "SoFlo Study Web".to_string() } else { format!("SoFlo Study Web - {}", safe) }
+}
+
+#[tauri::command]
+pub fn export_study_web_json(database: State<'_, Database>, id: String) -> CommandResult<String> {
+    let connection = database.open()?;
+    let detail = read_study_web_detail(&connection, &id)?;
+    let mut statement = connection.prepare("SELECT f.id, f.front, f.back, f.notes, f.image_path, f.position, f.is_starred FROM flashcards f INNER JOIN study_web_nodes n ON n.flashcard_id=f.id WHERE n.study_web_id=?1 ORDER BY f.position, f.created_at").map_err(|error| error.to_string())?;
+    let cards = statement.query_map([&id], |row| Ok(PortableStudyWebCard { id: row.get(0)?, front: row.get(1)?, back: row.get(2)?, notes: row.get(3)?, image_path: row.get(4)?, position: row.get(5)?, is_starred: row.get::<_, i32>(6)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let export = PortableStudyWeb {
+        format: "soflo-study-web".into(), version: 1, name: detail.name,
+        cards,
+        nodes: detail.nodes.into_iter().map(|node| PortableStudyWebNode { card_id: node.card_id, x: node.x, y: node.y, manually_positioned: node.manually_positioned, pinned: node.pinned }).collect(),
+        groups: detail.groups.into_iter().map(|group| PortableStudyWebGroup { id: group.id, label: group.label, parent_group_id: group.parent_group_id, card_ids: group.card_ids }).collect(),
+        relationships: detail.relationships.into_iter().map(|edge| PortableStudyWebRelationship { source_card_id: edge.source_card_id, target_card_id: edge.target_card_id, relationship_type: edge.relationship_type, strength: edge.strength }).collect(),
+    };
+    let downloads = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?).join("Downloads");
+    fs::create_dir_all(&downloads).map_err(|error| error.to_string())?;
+    let destination = downloads.join(format!("{}.json", study_web_export_filename(&export.name)));
+    fs::write(&destination, serde_json::to_vec_pretty(&export).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    Ok(destination.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn import_study_web_json(
+    database: State<'_, Database>,
+    class_id: String,
+    source: String,
+) -> CommandResult<StudyWebDetail> {
+    let path = PathBuf::from(source);
+    if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+        return Err("Choose a SoFlo Study Web .json file.".into());
+    }
+    let portable = serde_json::from_slice::<PortableStudyWeb>(&fs::read(&path).map_err(|_| "SoFlo could not read that Study Web file.".to_string())?).map_err(|_| "That file is not a valid SoFlo Study Web export.".to_string())?;
+    if portable.format != "soflo-study-web" || portable.version != 1 || portable.cards.len() > 600 {
+        return Err("That file is not a compatible SoFlo Study Web export.".into());
+    }
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let title = portable.name.trim().chars().take(96).collect::<String>();
+    let title = if title.is_empty() { "Imported Study Web".to_string() } else { title };
+    let set_id = Uuid::new_v4().to_string();
+    let web_id = Uuid::new_v4().to_string();
+    transaction.execute("INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1,?2,?3,?4)", params![&set_id, &class_id, format!("{} cards", title), "Cards imported with this Study Web."]).map_err(|error| error.to_string())?;
+    transaction.execute("INSERT INTO study_webs (id, class_id, flashcard_set_id, name, source_hash) VALUES (?1,?2,?3,?4,'manual')", params![&web_id, &class_id, &set_id, &title]).map_err(|error| error.to_string())?;
+    transaction.execute("INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,0)", params![&web_id, &set_id]).map_err(|error| error.to_string())?;
+    let mut card_ids = HashMap::new();
+    for (index, card) in portable.cards.iter().enumerate() {
+        if card.id.trim().is_empty() || card_ids.contains_key(&card.id) { continue; }
+        let new_id = Uuid::new_v4().to_string();
+        transaction.execute("INSERT INTO flashcards (id, set_id, front, back, notes, image_path, position, is_starred) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![&new_id, &set_id, card.front.trim(), card.back.trim(), card.notes, card.image_path, card.position.max(index as i32), card.is_starred as i32]).map_err(|error| error.to_string())?;
+        card_ids.insert(card.id.clone(), new_id);
+    }
+    let mut node_cards = HashSet::new();
+    for node in portable.nodes {
+        let Some(card_id) = card_ids.get(&node.card_id) else { continue; };
+        if !node.x.is_finite() || !node.y.is_finite() || !node_cards.insert(card_id.clone()) { continue; }
+        transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,?5,?6)", params![&web_id, card_id, node.x, node.y, node.manually_positioned as i32, node.pinned as i32]).map_err(|error| error.to_string())?;
+    }
+    for (index, card_id) in card_ids.values().enumerate() {
+        if node_cards.insert(card_id.clone()) { transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,1,0)", params![&web_id, card_id, 280.0 + (index % 4) as f64 * 290.0, 240.0 + (index / 4) as f64 * 130.0]).map_err(|error| error.to_string())?; }
+    }
+    let mut group_ids = HashMap::new();
+    for group in &portable.groups {
+        if group.id.trim().is_empty() || group.label.trim().is_empty() || group_ids.contains_key(&group.id) { continue; }
+        let new_id = Uuid::new_v4().to_string();
+        transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, parent_group_id) VALUES (?1,?2,?3,NULL)", params![&new_id, &web_id, group.label.trim().chars().take(72).collect::<String>()]).map_err(|error| error.to_string())?;
+        group_ids.insert(group.id.clone(), new_id);
+    }
+    for group in &portable.groups {
+        let Some(group_id) = group_ids.get(&group.id) else { continue; };
+        if let Some(parent) = group.parent_group_id.as_ref().and_then(|parent| group_ids.get(parent)) { transaction.execute("UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2", params![parent, group_id]).map_err(|error| error.to_string())?; }
+        for card_id in &group.card_ids { if let Some(card_id) = card_ids.get(card_id) { transaction.execute("INSERT OR IGNORE INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, group_id, card_id]).map_err(|error| error.to_string())?; } }
+    }
+    let mut seen_edges = HashSet::new();
+    for edge in portable.relationships {
+        let (Some(source), Some(target)) = (card_ids.get(&edge.source_card_id), card_ids.get(&edge.target_card_id)) else { continue; };
+        if source == target { continue; }
+        let key = if source < target { (source.clone(), target.clone()) } else { (target.clone(), source.clone()) };
+        if seen_edges.insert(key.clone()) { transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, key.0, key.1, edge.relationship_type.trim().chars().take(32).collect::<String>(), edge.strength.clamp(0.1, 1.0)]).map_err(|error| error.to_string())?; }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    read_study_web_detail(&database.open()?, &web_id)
+}
+
+#[tauri::command]
 pub fn save_study_web_node_position(
     database: State<'_, Database>,
     input: SaveStudyWebNodePositionInput,
@@ -3480,9 +3676,9 @@ pub fn save_study_web_node_position(
     }
     let connection = database.open()?;
     if let Some(pinned) = input.pinned {
-        connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1, pinned=?3 WHERE study_web_id=?4 AND flashcard_id=?5", params![input.x, input.y, if pinned { 1 } else { 0 }, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+        connection.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,1,?5) ON CONFLICT(study_web_id, flashcard_id) DO UPDATE SET x=excluded.x, y=excluded.y, manually_positioned=1, pinned=excluded.pinned", params![input.study_web_id, input.card_id, input.x, input.y, if pinned { 1 } else { 0 }]).map_err(|error| error.to_string())?;
     } else {
-        connection.execute("UPDATE study_web_nodes SET x=?1, y=?2, manually_positioned=1 WHERE study_web_id=?3 AND flashcard_id=?4", params![input.x, input.y, input.study_web_id, input.card_id]).map_err(|error| error.to_string())?;
+        connection.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,1,0) ON CONFLICT(study_web_id, flashcard_id) DO UPDATE SET x=excluded.x, y=excluded.y, manually_positioned=1", params![input.study_web_id, input.card_id, input.x, input.y]).map_err(|error| error.to_string())?;
     }
     connection
         .execute(
@@ -4022,7 +4218,11 @@ fn infer_study_web_relationships(
                     cards.len(),
                     max_shared_frequency,
                 );
-                if score >= 2.2 {
+                // A direct card-to-card line should have more than a passing
+                // vocabulary overlap. Broader map structure is represented
+                // separately by group backbones, so weak matches do not need
+                // to pretend to be factual relationships.
+                if score >= 2.8 {
                     candidates.push((score, &members[left], &members[right]));
                 }
             }
@@ -5125,8 +5325,9 @@ pub fn get_settings_command(database: State<'_, Database>) -> CommandResult<AppS
 #[tauri::command]
 pub fn update_settings(
     database: State<'_, Database>,
-    input: UpdateSettingsInput,
+    mut input: UpdateSettingsInput,
 ) -> CommandResult<AppSettings> {
+    if !input.settings.ai_enabled { input.settings.ai_grammar = false; }
     let connection = database.open()?;
     let serialized = serde_json::to_string(&input.settings).map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;

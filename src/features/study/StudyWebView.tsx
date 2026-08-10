@@ -1,7 +1,7 @@
 import { ChevronLeft, Maximize2, Minus, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
-import type { FlashcardSetDetail, StudyWebDetail, StudyWebGroup, StudyWebNode } from '../../lib/types'
+import type { Flashcard, FlashcardSetDetail, StudyWebDetail, StudyWebGroup, StudyWebNode } from '../../lib/types'
 
 type Viewport = { x: number; y: number; scale: number }
 
@@ -49,6 +49,32 @@ function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: n
   })
 }
 
+function studyWebGroupGeometry(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number }>) {
+  const groupByCard = new Map<string, string>()
+  const children = new Map<string, string[]>()
+  const groupById = new Map(groups.map((group) => [group.id, group]))
+  for (const group of groups) {
+    if (group.parentGroupId) children.set(group.parentGroupId, [...(children.get(group.parentGroupId) ?? []), group.id])
+    for (const cardId of group.cardIds) groupByCard.set(cardId, group.id)
+  }
+  const centers = new Map<string, { x: number; y: number }>()
+  const resolve = (id: string): { x: number; y: number } | null => {
+    const existing = centers.get(id)
+    if (existing) return existing
+    const group = groupById.get(id)
+    if (!group) return null
+    const own = group.cardIds.map((cardId) => nodes.get(cardId)).filter((node): node is { x: number; y: number } => Boolean(node))
+    const childCenters = (children.get(id) ?? []).map(resolve).filter((center): center is { x: number; y: number } => Boolean(center))
+    const points = [...own, ...childCenters]
+    if (!points.length) return null
+    const center = { x: points.reduce((total, point) => total + point.x, 0) / points.length + nodeWidth / 2, y: points.reduce((total, point) => total + point.y, 0) / points.length + collapsedHeight / 2 }
+    centers.set(id, center)
+    return center
+  }
+  for (const group of groups) resolve(group.id)
+  return { groupByCard, centers, groupById }
+}
+
 export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStudyCard }: StudyWebViewProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState<Viewport>({ x: 80, y: 80, scale: 0.8 })
@@ -59,16 +85,19 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
   const [selected, setSelected] = useState<string | null>(null)
   const [editingLinks, setEditingLinks] = useState(false)
   const [linkSource, setLinkSource] = useState<string | null>(null)
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  const [editingCardId, setEditingCardId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   const dragRef = useRef<{ kind: 'canvas' | 'node'; cardId?: string; x: number; y: number; viewport: Viewport; node?: { x: number; y: number }; moved: boolean } | null>(null)
   const consumeNodeClick = useRef<string | null>(null)
-  const cards = useMemo(() => new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card])), [sets])
+  const [cards, setCards] = useState(() => new Map<string, Flashcard>(sets.flatMap((set) => set.cards).map((card) => [card.id, card])))
   const sourceLabel = sets.length === 1 ? sets[0]?.title : `${sets.length} flashcard sets`
   const related = useMemo(() => selected ? new Set(relationships.flatMap((edge) => edge.sourceCardId === selected ? [edge.targetCardId] : edge.targetCardId === selected ? [edge.sourceCardId] : [])) : new Set<string>(), [relationships, selected])
   const visualRelationships = relationships
   const laidOutNodes = useMemo(() => resolveNodeOverlap([...nodes.values()], expanded, cards), [cards, nodes, expanded])
   const displayNodes = useMemo(() => new Map(laidOutNodes.map((item) => [item.node.cardId, item])), [laidOutNodes])
+  const groupGeometry = useMemo(() => studyWebGroupGeometry(web.groups, displayNodes), [displayNodes, web.groups])
   const groupLabels = useMemo(() => groupLabelPlacements(web.groups, displayNodes), [displayNodes, web.groups])
   const allPinned = nodes.size > 0 && [...nodes.values()].every((node) => node.pinned)
   const bounds = useMemo(() => {
@@ -87,6 +116,7 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
     setViewport({ scale, x: (rect.width - bounds.width * scale) / 2 - bounds.minX * scale, y: (rect.height - bounds.height * scale) / 2 - bounds.minY * scale })
   }
   useEffect(() => { const frame = requestAnimationFrame(fit); return () => cancelAnimationFrame(frame) }, [web.id])
+  useEffect(() => setCards(new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card]))), [sets])
   useEffect(() => { const next = new Map(web.nodes.map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setExpanded(null); setSelected(null); setLinkSource(null) }, [web.nodes, web.relationships])
   useEffect(() => {
     const canvas = canvasRef.current
@@ -142,6 +172,25 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
     const next = new Map([...nodesRef.current].map(([id, node]) => [id, { ...node, pinned }])); nodesRef.current = next; setNodes(next)
     void Promise.all([...next.values()].map((node) => api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: node.cardId, x: node.x, y: node.y, pinned })))
   }
+  const createCard = async () => {
+    const setId = web.flashcardSetIds[0]
+    if (!setId) return
+    const canvas = canvasRef.current?.getBoundingClientRect()
+    const x = canvas ? (canvas.width / 2 - viewport.x) / viewport.scale - nodeWidth / 2 : 240
+    const y = canvas ? (canvas.height / 2 - viewport.y) / viewport.scale - collapsedHeight / 2 : 220
+    try {
+      const card = await api.saveCard({ setId, front: 'Untitled concept', back: 'Add a definition for this concept.', position: cards.size, isStarred: false })
+      await api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: card.id, x, y })
+      setCards((current) => new Map(current).set(card.id, card))
+      setNodes((current) => { const next = new Map(current); next.set(card.id, { cardId: card.id, x, y, manuallyPositioned: true, pinned: false }); nodesRef.current = next; return next })
+      setEditingCardId(card.id)
+    } finally { setCreateMenuOpen(false) }
+  }
+  const saveCard = async (card: Flashcard) => {
+    const saved = await api.saveCard({ id: card.id, setId: card.setId, front: card.front.trim() || 'Untitled concept', back: card.back.trim() || 'No definition yet.', notes: card.notes, imagePath: card.imagePath, position: card.position, isStarred: card.isStarred })
+    setCards((current) => new Map(current).set(saved.id, saved))
+    setEditingCardId(null)
+  }
   const toggleLink = async (sourceCardId: string, targetCardId: string) => {
     try {
       const result = await api.toggleStudyWebRelationship({ studyWebId: web.id, sourceCardId, targetCardId })
@@ -163,18 +212,52 @@ export function StudyWebView({ web, sets, aiEnabled, onBack, onRegenerate, onStu
   const focusCard = (cardId: string) => { const node = displayNodes.get(cardId); const canvas = canvasRef.current; if (!node || !canvas) return; const rect = canvas.getBoundingClientRect(); const scale = Math.max(viewport.scale, .8); setSelected(cardId); setExpanded(cardId); setViewport({ scale, x: rect.width / 2 - (node.x + nodeWidth / 2) * scale, y: rect.height / 2 - (node.y + collapsedHeight / 2) * scale }) }
   const searchMatch = search.trim().toLocaleLowerCase()
   const matches = searchMatch ? [...cards.values()].filter((card) => `${card.front} ${card.back}`.toLocaleLowerCase().includes(searchMatch)).slice(0, 6) : []
+  const edgePoint = (cardId: string, relationshipType: string) => {
+    const node = displayNodes.get(cardId)
+    if (!node) return null
+    const groupId = groupGeometry.groupByCard.get(cardId)
+    if (groupId && relationshipType === 'parent_backbone') return groupGeometry.centers.get(groupId) ?? { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
+    if (groupId && relationshipType === 'theme_backbone') {
+      const parentId = groupGeometry.groupById.get(groupId)?.parentGroupId
+      if (parentId) return groupGeometry.centers.get(parentId) ?? { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
+    }
+    return { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
+  }
   return <main className="study-web-view">
     <header className="study-web-header"><button className="back-button" onClick={onBack}><ChevronLeft size={18} /> Study Web</button><div><p className="eyebrow">{sourceLabel}</p><h1>{web.name}</h1></div>{web.outOfDate && <span className="study-web-stale">Study Web out of date</span>}<div className="study-web-header-actions"><button className={`button button-quiet button-small${editingLinks ? ' active' : ''}`} onClick={() => { setEditingLinks((current) => !current); setLinkSource(null); setSelected(null) }}><Pencil size={15} /> {editingLinks ? 'Done editing' : 'Edit links'}</button><button className={`button button-quiet button-small${allPinned ? ' active' : ''}`} onClick={() => setAllPinned(!allPinned)} title={allPinned ? 'Unpin all cards' : 'Pin all cards'}>{allPinned ? <PinOff size={15} /> : <Pin size={15} />}{allPinned ? ' Unpin all' : ' Pin all'}</button>{aiEnabled && <button className="button button-quiet button-small ai-action" onClick={() => setConfirmRegenerate(true)}><Sparkles size={15} /> Regenerate Web</button>}</div></header>
     <section className={`study-web-canvas${editingLinks ? ' editing-links' : ''}`} ref={canvasRef} onPointerDown={startCanvasDrag}>
       {editingLinks && <div className="study-web-edit-hint">{linkSource ? 'Click another card to add or remove its link.' : 'Select a card, then choose another to link or unlink.'}</div>}
       <div className="study-web-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a concept" />{search && <button onClick={() => setSearch('')} aria-label="Clear search"><X size={14} /></button>}{matches.length > 0 && <div>{matches.map((card) => <button key={card.id} onClick={() => { focusCard(card.id); setSearch('') }}><strong>{card.front}</strong><span>{card.back}</span></button>)}</div>}</div>
-      <div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button></div>
+      <div className="study-web-controls">{editingLinks && <div className="study-web-add-control"><button className="study-web-control" onClick={() => setCreateMenuOpen((value) => !value)} aria-label="Add to Study Web"><Plus size={16} /></button>{createMenuOpen && <div className="study-web-add-menu"><button onClick={() => void createCard()}><Plus size={14} /> Create flashcard</button></div>}</div>}<button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button></div>
       <div className="study-web-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0' }}>
-        <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = displayNodes.get(edge.sourceCardId); const to = displayNodes.get(edge.targetCardId); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x + nodeWidth / 2 - bounds.minX} y1={from.y + collapsedHeight / 2 - bounds.minY} x2={to.x + nodeWidth / 2 - bounds.minX} y2={to.y + collapsedHeight / 2 - bounds.minY} className={active ? 'active' : selected ? 'muted' : ''} /> })}</svg>
+        <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = edgePoint(edge.sourceCardId, edge.relationshipType); const to = edgePoint(edge.targetCardId, edge.relationshipType); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x - bounds.minX} y1={from.y - bounds.minY} x2={to.x - bounds.minX} y2={to.y - bounds.minY} className={active ? 'active' : selected ? 'muted' : ''} /> })}</svg>
         {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY }} key={group.id}>{group.label}</span>)}
-        {laidOutNodes.map(({ node, x, y }) => { const card = cards.get(node.cardId); if (!card) return null; const isExpanded = node.pinned || expanded === card.id; const muted = !editingLinks && selected && selected !== card.id && !related.has(card.id); return <button key={card.id} className={`study-web-node${isExpanded ? ' expanded' : ''}${node.pinned ? ' pinned' : ''}${linkSource === card.id ? ' link-source' : ''}${selected === card.id ? ' selected' : ''}${muted ? ' muted' : ''}`} style={{ left: x - bounds.minX, top: y - bounds.minY }} onPointerDown={(event) => startNodeDrag(event, card.id)} onClick={(event) => { event.stopPropagation(); clickNode(card.id, node.pinned) }}><span className="study-web-card-pin" role="button" tabIndex={0} title={node.pinned ? 'Unpin card' : 'Keep card open'} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setPinned(card.id, !node.pinned) }}>{node.pinned ? <PinOff size={13} /> : <Pin size={13} />}</span><strong>{card.front || 'Untitled card'}</strong>{isExpanded && <span className="study-web-definition">{card.back || 'No definition yet.'}<em onClick={(event) => { event.stopPropagation(); onStudyCard(card.id) }}>Study this concept</em></span>}</button> })}
+        {laidOutNodes.map(({ node, x, y }) => {
+          const card = cards.get(node.cardId)
+          if (!card) return null
+          const isExpanded = node.pinned || expanded === card.id
+          const muted = !editingLinks && selected && selected !== card.id && !related.has(card.id)
+          return <button key={card.id} className={`study-web-node${isExpanded ? ' expanded' : ''}${node.pinned ? ' pinned' : ''}${linkSource === card.id ? ' link-source' : ''}${selected === card.id ? ' selected' : ''}${muted ? ' muted' : ''}`} style={{ left: x - bounds.minX, top: y - bounds.minY }} onPointerDown={(event) => startNodeDrag(event, card.id)} onClick={(event) => { event.stopPropagation(); clickNode(card.id, node.pinned) }}>
+            {editingLinks && <span className="study-web-card-edit" role="button" tabIndex={0} title="Edit flashcard" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setEditingCardId(card.id) }}><Pencil size={13} /></span>}
+            <span className="study-web-card-pin" role="button" tabIndex={0} title={node.pinned ? 'Unpin card' : 'Keep card open'} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setPinned(card.id, !node.pinned) }}>{node.pinned ? <PinOff size={13} /> : <Pin size={13} />}</span>
+            <strong>{card.front || 'Untitled card'}</strong>{isExpanded && <span className="study-web-definition">{card.back || 'No definition yet.'}<em onClick={(event) => { event.stopPropagation(); onStudyCard(card.id) }}>Study this concept</em></span>}
+          </button>
+        })}
       </div>
     </section>
+    {editingCardId && cards.get(editingCardId) && <StudyWebCardEditor card={cards.get(editingCardId)!} onClose={() => setEditingCardId(null)} onSave={saveCard} />}
     {confirmRegenerate && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-confirm"><header><h2>Regenerate Study Web?</h2><button className="icon-button" onClick={() => setConfirmRegenerate(false)}><X size={17} /></button></header><div className="paper-dialog-content"><p>SoFlo will re-analyze this set and replace the current organization and node positions.</p></div><footer><button className="button button-quiet" onClick={() => setConfirmRegenerate(false)}>Cancel</button><button className="button button-primary ai-action" onClick={() => { setConfirmRegenerate(false); onRegenerate() }}>Regenerate</button></footer></section></div>}
   </main>
+}
+
+function StudyWebCardEditor({ card, onClose, onSave }: { card: Flashcard; onClose: () => void; onSave: (card: Flashcard) => Promise<void> }) {
+  const [front, setFront] = useState(card.front)
+  const [back, setBack] = useState(card.back)
+  const [saving, setSaving] = useState(false)
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setSaving(true)
+    try { await onSave({ ...card, front, back }) } finally { setSaving(false) }
+  }
+  return <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-card-editor" role="dialog" aria-modal="true" aria-label="Edit flashcard"><header><div><p className="eyebrow">STUDY WEB</p><h2>Edit flashcard</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => void submit(event)}><div className="paper-dialog-content"><label>Term<input autoFocus value={front} onChange={(event) => setFront(event.target.value)} /></label><label>Definition<textarea value={back} onChange={(event) => setBack(event.target.value)} /></label></div><footer><button className="button button-quiet" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!front.trim() || !back.trim() || saving}>{saving ? 'Saving...' : 'Save flashcard'}</button></footer></form></section></div>
 }

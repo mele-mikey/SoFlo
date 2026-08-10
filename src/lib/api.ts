@@ -4,7 +4,7 @@ import type {
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, StudyWebDetail, StudyWebRelationship, StudyWebSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'create_empty_study_web', 'import_study_web_json', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'delete_local_ai_models', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -65,6 +65,9 @@ export const api = {
   listTrashedStudyWebs: (classId: string) => call<StudyWebSummary[]>('list_trashed_study_webs', { classId }),
   getStudyWeb: (id: string) => call<StudyWebDetail>('get_study_web', { id }),
   setStudyWebDeleted: (id: string, deleted: boolean) => call<void>('set_study_web_deleted', { id, deleted }),
+  createEmptyStudyWeb: (classId: string, name = 'Study Web') => call<StudyWebDetail>('create_empty_study_web', { classId, name }),
+  exportStudyWebJson: (id: string) => call<string>('export_study_web_json', { id }),
+  importStudyWebJson: (classId: string, source: string) => call<StudyWebDetail>('import_study_web_json', { classId, source }),
   generateStudyWeb: (input: { setIds: string[]; modelPath: string; studyWebId?: string }) => call<StudyWebDetail>('generate_study_web', { setIds: input.setIds, modelPath: input.modelPath, studyWebId: input.studyWebId ?? null }),
   saveStudyWebNodePosition: (input: { studyWebId: string; cardId: string; x: number; y: number; pinned?: boolean }) => call<void>('save_study_web_node_position', { input }),
   toggleStudyWebRelationship: (input: { studyWebId: string; sourceCardId: string; targetCardId: string }) => call<StudyWebRelationship | null>('toggle_study_web_relationship', { input }),
@@ -104,4 +107,5 @@ export const api = {
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
   stopAiServer: () => call<void>('stop_ai_server'),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
+  deleteLocalAiModels: () => call<void>('delete_local_ai_models'),
 }

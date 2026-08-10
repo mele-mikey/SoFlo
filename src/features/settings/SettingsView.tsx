@@ -27,15 +27,17 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
   const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
+  const [deleteModelsOpen, setDeleteModelsOpen] = useState(false)
   const [downloadingModel, setDownloadingModel] = useState(false)
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
   const [aiInfoOpen, setAiInfoOpen] = useState(false)
   const modelUpgradeNeeded = needsModelUpgrade(settings.aiModelPath)
   const modelPackageUpdateNeeded = Boolean(settings.aiModelPath) && !wordAiModelReady
   const modelUpdateNeeded = modelUpgradeNeeded || modelPackageUpdateNeeded
+  const localModelsInstalled = Boolean(settings.aiModelPath) || wordAiModelReady
 
   const update = async (partial: Partial<AppSettings>) => {
-    const next = { ...settings, ...partial }
+    const next = { ...settings, ...partial, ...(partial.aiEnabled === false ? { aiGrammar: false } : {}) }
     onSettingsChange(next)
     try {
       await api.updateSettings(next)
@@ -102,6 +104,16 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     }
   }
 
+  const deleteAiModels = async () => {
+    try {
+      await api.deleteLocalAiModels()
+      onSettingsChange({ ...settings, aiModelPath: '', aiGrammar: false })
+      onModelsUpdated()
+      setDeleteModelsOpen(false)
+      onToast('SoFlo local AI models were removed from this PC.')
+    } catch (error) { onToast(error instanceof Error ? error.message : 'SoFlo could not remove its local AI models.', 'error') }
+  }
+
   return <main className="settings-view content-view">
     <header className="view-intro"><p className="eyebrow">PREFERENCES</p><h1>Settings</h1><p>Thoughtful defaults, with just enough room to make SoFlo yours.</p></header>
 
@@ -141,13 +153,13 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     <section className="settings-section ai-section">
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
-      <SettingRow title="AI spelling & grammar" detail="Passively check basics with SoFlo's upgraded writing model, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiGrammar} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
-      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's general and writing-model package." : modelPackageUpdateNeeded ? "An AI model update is available: install SoFlo's stronger 1.7B writing model." : settings.aiModelPath || "Download SoFlo's 4B general model and 1.7B writing model now, or let the first AI action download them."}><button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpdateNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : settings.aiModelPath ? 'Change model' : 'Download models'}</button></SettingRow>
+      <SettingRow title="AI spelling & grammar" detail="Passively check basics with SoFlo's upgraded writing model, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiEnabled && settings.aiGrammar} disabled={!settings.aiEnabled} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
+      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's general and writing-model package." : modelPackageUpdateNeeded ? "An AI model update is available: install SoFlo's stronger 1.7B writing model." : settings.aiModelPath || "Download SoFlo's 4B general model and 1.7B writing model now, or let the first AI action download them."}>{!settings.aiEnabled && localModelsInstalled ? <button className="button button-danger button-small" onClick={() => setDeleteModelsOpen(true)}>Delete models</button> : <button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!settings.aiModelPath || modelUpdateNeeded ? downloadAiModel() : chooseAiModel())}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : settings.aiModelPath ? 'Change model' : 'Download models'}</button>}</SettingRow>
       {settings.aiEnabled && (!settings.aiModelPath || modelUpdateNeeded) && <p className="ai-model-note">{modelPackageUpdateNeeded && !modelUpgradeNeeded ? 'A stronger local writing model is ready to add to your current AI setup.' : 'The general model and stronger writing model are not on this PC yet. Download them here, or wait until the first AI action.'}</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.2" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.3" />
       <SettingRow title="Credits" detail="Created by Mikey M." />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>
@@ -161,6 +173,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
 
     {clearTrashOpen && <ConfirmDialog title="Clear the entire trash?" copy="This permanently deletes every paper and flashcard set in Recently deleted. This cannot be undone." confirmLabel="Clear trash" onClose={() => setClearTrashOpen(false)} onConfirm={() => void api.emptyTrash().then(() => { setClearTrashOpen(false); onToast('Trash cleared.') }).catch(() => onToast('Trash could not be cleared.', 'error'))} />}
     {wipeConfirmOpen && <ConfirmDialog eyebrow="IRREVERSIBLE ACTION" title="Wipe all local data?" copy="This permanently removes every class, paper, lecture, flashcard, schedule, setting, and saved credential on this computer. Export a .soflo file first if you may need anything later." confirmLabel="Wipe everything" busy={busy === 'wipe'} onClose={() => setWipeConfirmOpen(false)} onConfirm={() => void wipeData()} />}
+    {deleteModelsOpen && <ConfirmDialog eyebrow="LOCAL AI" title="Delete local AI models?" copy="This removes SoFlo's downloaded local models from this PC. AI actions stay disabled until you turn AI back on and download models again." confirmLabel="Delete models" onClose={() => setDeleteModelsOpen(false)} onConfirm={() => void deleteAiModels()} />}
     {securityDialog && <SecurityDialog security={security} type={securityDialog.type} remove={securityDialog.remove} onClose={() => setSecurityDialog(null)} onUpdated={(next) => { onSecurityChange(next); setSecurityDialog(null); onToast(next.configured ? 'Library security updated.' : 'Library encryption removed.') }} />}
     {aiInfoOpen && <AiInfoDialog modelPath={settings.aiModelPath} onClose={() => setAiInfoOpen(false)} />}
   </main>
@@ -168,7 +181,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
 
 function SectionHeading({ icon, title, detail, action }: { icon: ReactNode; title: string; detail: string; action?: ReactNode }) { return <div className="settings-section-heading">{icon}<div><h2>{title}</h2><p>{detail}</p></div>{action}</div> }
 function SettingRow({ title, detail, children }: { title: string; detail: string; children?: ReactNode }) { return <div className="setting-row"><div><h3>{title}</h3><p title={detail}>{detail}</p></div>{children}</div> }
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) { return <button role="switch" aria-checked={checked} className={checked ? 'toggle checked' : 'toggle'} onClick={() => onChange(!checked)}><span /></button> }
+function Toggle({ checked, disabled = false, onChange }: { checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) { return <button role="switch" disabled={disabled} aria-checked={checked} className={checked ? 'toggle checked' : 'toggle'} onClick={() => onChange(!checked)}><span /></button> }
 
 function ThemePicker({ value, onChange }: { value: AppSettings['themeColor']; onChange: (value: AppSettings['themeColor']) => void }) {
   return <div className="theme-control"><div className="theme-picker" role="radiogroup" aria-label="Accent color">{(['purple', 'red', 'blue', 'yellow'] as const).map((color) => <button key={color} type="button" role="radio" aria-checked={value === color} className={value === color ? `theme-chip selected ${color}` : `theme-chip ${color}`} onClick={() => onChange(color)}><i /><span>{color}</span>{value === color && <Check size={13} />}</button>)}</div><div className={`theme-live-preview ${value}`} aria-label={`${value} accent preview`}><i /><span /><span /><b /></div></div>
