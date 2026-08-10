@@ -4112,7 +4112,102 @@ fn infer_study_web_relationships(
     for (score, source, target) in bridge_candidates.into_iter().take(leaves.len().min(18)) {
         add_edge(&source, &target, "cluster_bridge", score);
     }
+
+    // The AI's two-level grouping is also meaningful map structure. Build a
+    // lightweight backbone through those groups so every leaf has a path to
+    // every other leaf, even when neighboring concepts use different words.
+    // These links deliberately describe hierarchy, never a made-up factual
+    // relationship between the two cards.
+    let mut leaves_by_parent = Vec::<(String, Vec<&(String, String, String, Vec<String>)>)>::new();
+    for leaf in leaves {
+        if let Some((_, children)) = leaves_by_parent
+            .iter_mut()
+            .find(|(parent_id, _)| parent_id == &leaf.1)
+        {
+            children.push(leaf);
+        } else {
+            leaves_by_parent.push((leaf.1.clone(), vec![leaf]));
+        }
+    }
+    let mut parent_roots = Vec::<(String, String, usize)>::new();
+    for (parent_id, children) in leaves_by_parent {
+        let Some(root_leaf) = children.iter().max_by(|left, right| {
+            left.3
+                .len()
+                .cmp(&right.3.len())
+                .then_with(|| left.0.cmp(&right.0))
+        }) else {
+            continue;
+        };
+        let Some(root_card) = study_web_group_anchor(
+            &root_leaf.3,
+            &tokens,
+            &frequency,
+            cards.len(),
+            max_shared_frequency,
+        ) else {
+            continue;
+        };
+        let total_members = children.iter().map(|leaf| leaf.3.len()).sum();
+        for leaf in &children {
+            if leaf.0 == root_leaf.0 {
+                continue;
+            }
+            if let Some(child_card) = study_web_group_anchor(
+                &leaf.3,
+                &tokens,
+                &frequency,
+                cards.len(),
+                max_shared_frequency,
+            ) {
+                add_edge(&root_card, &child_card, "parent_backbone", 0.68);
+            }
+        }
+        parent_roots.push((parent_id, root_card, total_members));
+    }
+    if let Some((root_parent, root_card, _)) = parent_roots.iter().max_by(|left, right| {
+        left.2
+            .cmp(&right.2)
+            .then_with(|| left.0.cmp(&right.0))
+    }) {
+        for (parent_id, card_id, _) in &parent_roots {
+            if parent_id != root_parent {
+                add_edge(root_card, card_id, "theme_backbone", 0.82);
+            }
+        }
+    }
     edges
+}
+
+fn study_web_group_anchor(
+    members: &[String],
+    tokens: &HashMap<String, HashSet<String>>,
+    frequency: &HashMap<String, usize>,
+    total_cards: usize,
+    max_shared_frequency: usize,
+) -> Option<String> {
+    members
+        .iter()
+        .max_by(|left, right| {
+            let score = |candidate: &String| {
+                members
+                    .iter()
+                    .filter(|other| *other != candidate)
+                    .map(|other| {
+                        study_web_relationship_score(
+                            candidate,
+                            other,
+                            tokens,
+                            frequency,
+                            total_cards,
+                            max_shared_frequency,
+                        )
+                    })
+                    .sum::<f64>()
+            };
+            score(left).total_cmp(&score(right))
+        })
+        .cloned()
 }
 
 fn study_web_relation_words(value: &str) -> HashSet<String> {
