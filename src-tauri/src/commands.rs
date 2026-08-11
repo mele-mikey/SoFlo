@@ -687,6 +687,7 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
         ("thier", "their", "Spelling", "This word is commonly misspelled."),
         ("wierd", "weird", "Spelling", "This word is commonly misspelled."),
         ("becuase", "because", "Spelling", "This word is commonly misspelled."),
+        ("lett", "let", "Spelling", "This word is commonly misspelled."),
     ];
     let mut issues = Vec::new();
     let mut seen = HashSet::new();
@@ -710,7 +711,65 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
         if character.is_alphabetic() { word.push(character); } else { inspect(&word); word.clear(); }
     }
     inspect(&word);
+    drop(inspect);
+
+    // Agreement and comparison errors are also safe to catch without waiting
+    // for the local model. Keep the original two-word phrase so the editor
+    // marks the right occurrence rather than the first matching verb on a page.
+    let words = source
+        .split_whitespace()
+        .map(|token| token.trim_matches(|character: char| !character.is_alphabetic() && character != '\''))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut add_context_issue = |original: String, replacement: String, category: &str, reason: &str| {
+        if issues.len() >= 12 { return; }
+        let key = format!("{}\u{0}{}", original.to_lowercase(), replacement.to_lowercase());
+        if seen.insert(key) {
+            issues.push(serde_json::json!({ "kind": "mechanic", "original": original, "replacement": replacement, "reason": reason, "category": category, "alternatives": [] }));
+        }
+    };
+    for pair in words.windows(2) {
+        let subject = pair[0];
+        let verb = pair[1];
+        let normalized_subject = subject.to_lowercase();
+        let normalized_verb = verb.to_lowercase();
+        if normalized_verb == "was" && (matches!(normalized_subject.as_str(), "they" | "we" | "you") || likely_plural_subject(&normalized_subject)) {
+            add_context_issue(
+                format!("{subject} {verb}"),
+                format!("{subject} were"),
+                "Subject–verb agreement",
+                "A plural subject takes “were,” not “was.”",
+            );
+        } else if normalized_verb == "has" && (matches!(normalized_subject.as_str(), "they" | "we" | "you") || likely_plural_subject(&normalized_subject)) {
+            add_context_issue(
+                format!("{subject} {verb}"),
+                format!("{subject} have"),
+                "Subject–verb agreement",
+                "A plural subject takes “have,” not “has.”",
+            );
+        } else if normalized_subject == "more" && (normalized_verb == "better" || normalized_verb == "worse" || normalized_verb.ends_with("er")) {
+            add_context_issue(
+                format!("{subject} {verb}"),
+                verb.to_string(),
+                "Comparative form",
+                "Use one comparative form instead of “more” plus a comparative adjective.",
+            );
+        }
+    }
     issues
+}
+
+fn likely_plural_subject(word: &str) -> bool {
+    if matches!(word, "people" | "children" | "men" | "women" | "police" | "cattle") {
+        return true;
+    }
+    word.len() > 3
+        && (word.ends_with("ies") || word.ends_with('s'))
+        && !word.ends_with("ss")
+        && !word.ends_with("us")
+        && !word.ends_with("is")
+        && !word.ends_with("ics")
+        && !matches!(word, "this" | "news" | "series" | "means")
 }
 
 fn review_grammar_text_blocking(
@@ -6001,7 +6060,7 @@ mod tests {
 
     #[test]
     fn quick_mechanics_prepass_catches_general_obvious_errors() {
-        let issues = quick_mechanics_prepass("i dont need alot, but i definately dont want it seperated.");
+        let issues = quick_mechanics_prepass("i dont need alot, but many writers was definately more easier to read when it seperated.");
         let corrections = issues
             .iter()
             .filter_map(|issue| issue.get("replacement").and_then(|value| value.as_str()))
@@ -6011,6 +6070,8 @@ mod tests {
         assert!(corrections.contains(&"a lot"));
         assert!(corrections.contains(&"definitely"));
         assert!(corrections.contains(&"separated"));
+        assert!(issues.iter().any(|issue| issue["original"] == "writers was" && issue["replacement"] == "writers were"));
+        assert!(issues.iter().any(|issue| issue["original"] == "more easier" && issue["replacement"] == "easier"));
     }
 
     #[test]

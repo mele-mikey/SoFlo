@@ -324,7 +324,7 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
     // Small local models sometimes preserve sentence context even when asked
     // for a word-level correction. Keep the useful correction by narrowing
     // both strings to their actual changed fragment.
-    if (kind === 'mechanic') ({ original, replacement } = isolateMechanicalChange(original, replacement))
+    if (kind === 'mechanic' && !categoryLabel.includes('agreement') && !categoryLabel.includes('comparative')) ({ original, replacement } = isolateMechanicalChange(original, replacement))
     const originalWords = original.trim().split(/\s+/).filter(Boolean)
     const replacementWords = replacement.trim().split(/\s+/).filter(Boolean)
     // AI Review asks for 1–9-word formal rewrites. Allow a small amount of
