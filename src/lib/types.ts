@@ -229,6 +229,9 @@ export interface AppSettings {
   aiEnabled: boolean
   aiGrammar: boolean
   aiModelPath: string
+  aiWritingModelPath: string
+  aiGeneralModelTier: 'low' | 'medium' | 'high'
+  aiWritingModelTier: 'low' | 'medium' | 'high'
   studyWebAutoPin: boolean
   studyWebGroupHighlights: boolean
   defaultQuestionTypes: string[]

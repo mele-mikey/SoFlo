@@ -272,6 +272,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub ai_model_path: String,
     #[serde(default)]
+    pub ai_writing_model_path: String,
+    #[serde(default = "default_ai_model_tier")]
+    pub ai_general_model_tier: String,
+    #[serde(default = "default_ai_model_tier")]
+    pub ai_writing_model_tier: String,
+    #[serde(default)]
     pub study_web_auto_pin: bool,
     #[serde(default)]
     pub study_web_group_highlights: bool,
@@ -289,6 +295,9 @@ fn default_ai_enabled() -> bool {
 }
 fn default_ai_grammar() -> bool {
     true
+}
+fn default_ai_model_tier() -> String {
+    "medium".to_string()
 }
 
 impl Default for AppSettings {
@@ -311,6 +320,9 @@ impl Default for AppSettings {
             ai_enabled: true,
             ai_grammar: true,
             ai_model_path: String::new(),
+            ai_writing_model_path: String::new(),
+            ai_general_model_tier: default_ai_model_tier(),
+            ai_writing_model_tier: default_ai_model_tier(),
             study_web_auto_pin: false,
             study_web_group_highlights: false,
             default_question_types: vec![

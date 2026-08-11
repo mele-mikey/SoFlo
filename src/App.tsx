@@ -363,7 +363,7 @@ function App() {
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) throw new Error('Turn on AI in Settings to review grammar.')
     setAiProgress({ progress: 3, message: 'Preparing your grammar review' })
-    try { return await api.reviewGrammarText(aiModelPath, text, quick, paperContext) } finally { setAiProgress(null) }
+    try { return await api.reviewGrammarText(quick ? (library?.settings.aiWritingModelPath || '') : aiModelPath, text, quick, paperContext) } finally { setAiProgress(null) }
   }
   const researchAndGrade = async (text: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
@@ -374,20 +374,20 @@ function App() {
   const defineWord = async (word: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) throw new Error('Turn on AI in Settings to look up a word.')
-    let modelPath = aiModelPath
+    let modelPath = library?.settings.aiWritingModelPath || ''
     if (!await api.wordAiModelReady()) {
       setAiDownloadProgress(0)
-      try { modelPath = await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
+      try { await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
     }
     return api.defineWord(modelPath, word, paperContext)
   }
   const aiThesaurus = async (word: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
     if (!aiModelPath) throw new Error('Turn on AI in Settings to use the thesaurus.')
-    let modelPath = aiModelPath
+    let modelPath = library?.settings.aiWritingModelPath || ''
     if (!await api.wordAiModelReady()) {
       setAiDownloadProgress(0)
-      try { modelPath = await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
+      try { await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
     }
     return api.aiThesaurus(modelPath, word, paperContext)
   }

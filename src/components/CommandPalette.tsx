@@ -1,5 +1,5 @@
 import { Command } from 'cmdk'
-import { BookOpen, FilePlus2, FolderPlus, House, Search, Settings, Sparkles } from 'lucide-react'
+import { Archive, BookOpen, CalendarDays, FilePlus2, FolderPlus, GraduationCap, House, Search, Settings, Sparkles } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import type { AppView, CourseClass, SearchResult } from '../lib/types'
@@ -29,13 +29,16 @@ export function CommandPalette({ open, onOpenChange, classes, onNavigate, onNewN
       <div className="command-input-wrap"><Search size={18} /><Command.Input autoFocus value={query} onValueChange={setQuery} placeholder="Search your library or run a command…" /><kbd>Esc</kbd></div>
       <Command.List>
         <Command.Empty>No results found.</Command.Empty>
+        <Command.Group heading={query ? 'Pages & actions' : 'Quick actions'}>
+          <Command.Item onSelect={onNewNote}><FilePlus2 size={16} />New paper</Command.Item>
+          <Command.Item onSelect={onNewSet}><BookOpen size={16} />New flashcard set</Command.Item>
+          <Command.Item onSelect={() => choose({ kind: 'home' })}><House size={16} />Overview</Command.Item>
+          <Command.Item onSelect={() => choose({ kind: 'calendar' })}><CalendarDays size={16} />Calendar</Command.Item>
+          <Command.Item onSelect={() => choose({ kind: 'help' })}><GraduationCap size={16} />Help and walkthrough</Command.Item>
+          <Command.Item onSelect={() => choose({ kind: 'archive' })}><Archive size={16} />Archived classes</Command.Item>
+          <Command.Item onSelect={() => choose({ kind: 'settings' })}><Settings size={16} />Settings · personal, appearance, security, AI models, library data</Command.Item>
+        </Command.Group>
         {!query && <>
-          <Command.Group heading="Quick actions">
-            <Command.Item onSelect={onNewNote}><FilePlus2 size={16} />New paper</Command.Item>
-            <Command.Item onSelect={onNewSet}><BookOpen size={16} />New flashcard set</Command.Item>
-            <Command.Item onSelect={() => choose({ kind: 'home' })}><House size={16} />Go home</Command.Item>
-            <Command.Item onSelect={() => choose({ kind: 'settings' })}><Settings size={16} />Open settings</Command.Item>
-          </Command.Group>
           <Command.Group heading="Classes">
             {classes.map((course) => <Command.Item key={course.id} onSelect={() => choose({ kind: 'class', classId: course.id, tab: 'overview' })}><FolderPlus size={16} />{course.courseCode || course.name}<span className="command-item-detail">{course.name}</span></Command.Item>)}
           </Command.Group>

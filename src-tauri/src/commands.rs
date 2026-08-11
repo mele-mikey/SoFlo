@@ -150,6 +150,33 @@ const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
 const WORD_AI_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
 const WORD_AI_MINIMUM_BYTES: u64 = 1_000_000_000;
 const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
+const GENERAL_LOW_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
+const GENERAL_HIGH_MODEL_NAME: &str = "Qwen3-8B-Q4_K_M.gguf";
+const WRITING_LOW_MODEL_NAME: &str = "Qwen3-0.6B-Q4_K_M.gguf";
+const WRITING_HIGH_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+
+#[derive(Clone, Copy)]
+struct ManagedAiModel {
+    filename: &'static str,
+    url: &'static str,
+    minimum_bytes: Option<u64>,
+}
+
+fn managed_ai_model(role: &str, tier: &str) -> CommandResult<ManagedAiModel> {
+    match (role, tier) {
+        ("general", "low") => Ok(ManagedAiModel { filename: GENERAL_LOW_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true", minimum_bytes: Some(1_000_000_000) }),
+        ("general", "medium") => Ok(ManagedAiModel { filename: DEFAULT_AI_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true", minimum_bytes: Some(2_000_000_000) }),
+        ("general", "high") => Ok(ManagedAiModel { filename: GENERAL_HIGH_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true", minimum_bytes: Some(4_000_000_000) }),
+        ("writing", "low") => Ok(ManagedAiModel { filename: WRITING_LOW_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf?download=true", minimum_bytes: Some(350_000_000) }),
+        ("writing", "medium") => Ok(ManagedAiModel { filename: WORD_AI_MODEL_NAME, url: "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true", minimum_bytes: Some(1_000_000_000) }),
+        ("writing", "high") => Ok(ManagedAiModel { filename: WRITING_HIGH_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true", minimum_bytes: Some(2_000_000_000) }),
+        _ => Err("Choose a Low, Medium, or High SoFlo AI model.".into()),
+    }
+}
+
+fn managed_models_dir(app: &tauri::AppHandle) -> CommandResult<std::path::PathBuf> {
+    Ok(app.path().app_data_dir().map_err(|error| error.to_string())?.join("models"))
+}
 struct AiServer {
     child: Child,
     model_path: String,
@@ -189,19 +216,16 @@ fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> Comman
     let size = fs::metadata(&model)
         .map_err(|_| "SoFlo could not read the local AI model.".to_string())?
         .len();
-    if size > 5_000_000_000 {
-        return Err("Choose a compact local model (4B parameters or less).".into());
+    if size > 8_000_000_000 {
+        return Err("Choose a compact local model (8B parameters or less).".into());
     }
     Ok(model.to_string_lossy().to_string())
 }
 
-fn resolve_word_ai_model_path(app: &tauri::AppHandle) -> CommandResult<String> {
-    let model = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("models")
-        .join(WORD_AI_MODEL_NAME);
+fn resolve_word_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
+    let requested = Path::new(requested_path.trim());
+    let default = managed_models_dir(app)?.join(WORD_AI_MODEL_NAME);
+    let model = if requested.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) && requested.is_file() { requested.to_path_buf() } else { default };
     if !is_complete_word_ai_model(&model) {
         return Err("SoFlo's fast word-reference model is not downloaded yet. Download the AI model package in Settings, then try again.".into());
     }
@@ -214,13 +238,11 @@ fn is_complete_word_ai_model(path: &Path) -> bool {
 }
 
 #[tauri::command]
-pub fn word_ai_model_ready(app: tauri::AppHandle) -> CommandResult<bool> {
-    let model = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("models")
-        .join(WORD_AI_MODEL_NAME);
+pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+    let settings = get_settings(&database.open()?, None)?;
+    let model = if settings.ai_writing_model_path.trim().is_empty() {
+        managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME)
+    } else { Path::new(&settings.ai_writing_model_path).to_path_buf() };
     Ok(is_complete_word_ai_model(&model))
 }
 
@@ -651,7 +673,7 @@ fn review_grammar_text_blocking(
     };
     emit_ai_progress(&app, 12, "Reading your writing");
     let server_port = if quick {
-        let writing_model_path = resolve_word_ai_model_path(&app)?;
+        let writing_model_path = resolve_word_ai_model_path(&app, &model_path)?;
         ensure_word_ai_server(&writing_model_path, &app)?
     } else {
         let general_model_path = resolve_ai_model_path(&app, &model_path)?;
@@ -1016,9 +1038,8 @@ fn define_word_blocking(
     if word.is_empty() || word.chars().count() > 80 {
         return Err("Select one ordinary word to look it up.".into());
     }
-    let _ = model_path;
     let paper_context = normalized_paper_context(&paper_context);
-    let word_model_path = resolve_word_ai_model_path(&app)?;
+    let word_model_path = resolve_word_ai_model_path(&app, &model_path)?;
     let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
@@ -1078,9 +1099,8 @@ fn ai_thesaurus_blocking(
     if query.is_empty() || query.chars().count() > 120 {
         return Err("Enter a word or short phrase to explore.".into());
     }
-    let _ = model_path;
     let paper_context = normalized_paper_context(&paper_context);
-    let word_model_path = resolve_word_ai_model_path(&app)?;
+    let word_model_path = resolve_word_ai_model_path(&app, &model_path)?;
     let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
@@ -1785,6 +1805,68 @@ pub async fn download_default_ai_model(
 }
 
 #[tauri::command]
+pub async fn install_ai_model(
+    app: tauri::AppHandle,
+    role: String,
+    tier: String,
+) -> CommandResult<String> {
+    let profile = managed_ai_model(role.trim(), tier.trim())?;
+    let download_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let destination = managed_models_dir(&download_app)?.join(profile.filename);
+        download_ai_model_file(&download_app, profile.url, &destination, 0, 100, profile.minimum_bytes)?;
+        let _ = download_app.emit("ai-download-progress", 100u8);
+        let _ = download_app.emit("ai-download-finished", ());
+        Ok(destination.to_string_lossy().to_string())
+    }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
+    if result.is_err() { let _ = app.emit("ai-download-finished", ()); }
+    result
+}
+
+#[tauri::command]
+pub fn get_ai_model_inventory(app: tauri::AppHandle) -> CommandResult<serde_json::Value> {
+    let models = managed_models_dir(&app)?;
+    let installed = |role: &str, tier: &str| -> bool {
+        managed_ai_model(role, tier).ok().is_some_and(|profile| {
+            let path = models.join(profile.filename);
+            path.is_file() && profile.minimum_bytes.map_or(true, |minimum| fs::metadata(path).is_ok_and(|metadata| metadata.len() >= minimum))
+        })
+    };
+    Ok(serde_json::json!({
+        "general": { "low": installed("general", "low"), "medium": installed("general", "medium"), "high": installed("general", "high") },
+        "writing": { "low": installed("writing", "low"), "medium": installed("writing", "medium"), "high": installed("writing", "high") }
+    }))
+}
+
+#[tauri::command]
+pub fn delete_unused_ai_models(
+    app: tauri::AppHandle,
+    general_path: String,
+    writing_path: String,
+) -> CommandResult<()> {
+    stop_model_server(&AI_SERVER);
+    stop_model_server(&WORD_AI_SERVER);
+    let models = managed_models_dir(&app)?;
+    let active = [
+        if general_path.trim().is_empty() { models.join(DEFAULT_AI_MODEL_NAME) } else { Path::new(general_path.trim()).to_path_buf() },
+        if writing_path.trim().is_empty() { models.join(WORD_AI_MODEL_NAME) } else { Path::new(writing_path.trim()).to_path_buf() },
+    ];
+    let mut names = std::collections::HashSet::new();
+    for role in ["general", "writing"] {
+        for tier in ["low", "medium", "high"] {
+            if let Ok(profile) = managed_ai_model(role, tier) { names.insert(profile.filename); }
+        }
+    }
+    for name in names {
+        let path = models.join(name);
+        if path.is_file() && !active.iter().any(|item| item == &path) {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn delete_local_ai_models(
     app: tauri::AppHandle,
     database: State<'_, Database>,
@@ -1792,13 +1874,16 @@ pub fn delete_local_ai_models(
     stop_model_server(&AI_SERVER);
     stop_model_server(&WORD_AI_SERVER);
     let models = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");
-    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME] {
+    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME, GENERAL_LOW_MODEL_NAME, GENERAL_HIGH_MODEL_NAME, WRITING_LOW_MODEL_NAME, WRITING_HIGH_MODEL_NAME] {
         let path = models.join(name);
         if path.is_file() { fs::remove_file(path).map_err(|error| error.to_string())?; }
     }
     let connection = database.open()?;
     let mut settings = get_settings(&connection, None)?;
     settings.ai_model_path.clear();
+    settings.ai_writing_model_path.clear();
+    settings.ai_general_model_tier = "medium".to_string();
+    settings.ai_writing_model_tier = "medium".to_string();
     settings.ai_grammar = false;
     let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;

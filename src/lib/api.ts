@@ -110,5 +110,8 @@ export const api = {
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
   stopAiServer: () => call<void>('stop_ai_server'),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
+  installAiModel: (role: 'general' | 'writing', tier: 'low' | 'medium' | 'high') => call<string>('install_ai_model', { role, tier }),
+  getAiModelInventory: () => call<{ general: Record<'low' | 'medium' | 'high', boolean>; writing: Record<'low' | 'medium' | 'high', boolean> }>('get_ai_model_inventory'),
+  deleteUnusedAiModels: (generalPath: string, writingPath: string) => call<void>('delete_unused_ai_models', { generalPath, writingPath }),
   deleteLocalAiModels: () => call<void>('delete_local_ai_models'),
 }
