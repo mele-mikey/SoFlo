@@ -3388,7 +3388,25 @@ fn study_web_source_hash(cards: &[StudyWebSourceCard]) -> String {
         .join("\u{1f}")
 }
 
+fn ensure_study_web_group_color_column(connection: &Connection) -> CommandResult<()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(study_web_groups)")
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if !columns.iter().any(|column| column == "color") {
+        connection
+            .execute_batch("ALTER TABLE study_web_groups ADD COLUMN color TEXT NOT NULL DEFAULT '#7E70D6'; PRAGMA user_version = 14;")
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<StudyWebDetail> {
+    ensure_study_web_group_color_column(connection)?;
     let (id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at): (String, String, String, String, String, String, String) = connection.query_row("SELECT id, class_id, flashcard_set_id, name, source_hash, generated_at, updated_at FROM study_webs WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).map_err(|_| "That Study Web could not be found.".to_string())?;
     let mut node_statement = connection.prepare("SELECT flashcard_id, x, y, manually_positioned, pinned FROM study_web_nodes WHERE study_web_id=?1 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
     let nodes = node_statement
