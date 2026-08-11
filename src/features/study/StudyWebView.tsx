@@ -1,11 +1,11 @@
-import { ChevronLeft, Layers3, Maximize2, Minus, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Sparkles, X } from 'lucide-react'
+import { ChevronLeft, Layers3, Maximize2, Minus, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Settings2, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import type { Flashcard, FlashcardSetDetail, StudyWebDetail, StudyWebGroup, StudyWebNode } from '../../lib/types'
 
 type Viewport = { x: number; y: number; scale: number }
 
-interface StudyWebViewProps { web: StudyWebDetail; sets: FlashcardSetDetail[]; aiEnabled: boolean; startInEditMode?: boolean; onBack: () => void; onRegenerate: () => void; onStudyCard: (cardId: string) => void }
+interface StudyWebViewProps { web: StudyWebDetail; sets: FlashcardSetDetail[]; aiEnabled: boolean; autoPin: boolean; groupHighlights: boolean; startInEditMode?: boolean; onBack: () => void; onRegenerate: () => void; onStudyCard: (cardId: string) => void; onSettingsChange: (settings: { studyWebAutoPin: boolean; studyWebGroupHighlights: boolean }) => Promise<void> }
 
 const nodeWidth = 244
 const collapsedHeight = 68
@@ -64,6 +64,21 @@ function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: n
   })
 }
 
+function groupHighlightPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: number; y: number; height: number }>) {
+  const childrenByParent = new Map<string, StudyWebGroup[]>()
+  for (const group of groups) if (group.parentGroupId) childrenByParent.set(group.parentGroupId, [...(childrenByParent.get(group.parentGroupId) ?? []), group])
+  return groups.flatMap((group) => {
+    if (childrenByParent.has(group.id)) return []
+    const members = group.cardIds.map((id) => nodes.get(id)).filter((node): node is { x: number; y: number; height: number } => Boolean(node))
+    if (!members.length) return []
+    const left = Math.min(...members.map((node) => node.x)) - 30
+    const top = Math.min(...members.map((node) => node.y)) - 47
+    const right = Math.max(...members.map((node) => node.x + nodeWidth)) + 30
+    const bottom = Math.max(...members.map((node) => node.y + node.height)) + 30
+    return [{ id: group.id, left, top, width: right - left, height: bottom - top }]
+  })
+}
+
 type StudyWebCanvasEdge = { id: string; sourceCardId: string; targetCardId: string; structural: boolean }
 
 // The AI supplies a hierarchy, not invisible connector coordinates. Turn that
@@ -98,7 +113,6 @@ function studyWebHierarchyEdges(groups: StudyWebGroup[]): StudyWebCanvasEdge[] {
   }
   for (const group of groups) {
     const ownAnchor = group.cardIds[0] ?? null
-    for (const cardId of group.cardIds.slice(1)) add(ownAnchor, cardId, `group:${group.id}:${cardId}`)
     const childAnchors = (children.get(group.id) ?? []).map(anchor).filter((cardId): cardId is string => Boolean(cardId))
     const groupAnchor = ownAnchor ?? childAnchors[0] ?? null
     for (const childAnchor of childAnchors) add(groupAnchor, childAnchor, `child:${group.id}:${childAnchor}`)
@@ -110,7 +124,7 @@ function studyWebHierarchyEdges(groups: StudyWebGroup[]): StudyWebCanvasEdge[] {
   return edges
 }
 
-export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, onBack, onRegenerate, onStudyCard }: StudyWebViewProps) {
+export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, startInEditMode = false, onBack, onRegenerate, onStudyCard, onSettingsChange }: StudyWebViewProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState<Viewport>({ x: 80, y: 80, scale: 0.8 })
   const [nodes, setNodes] = useState(() => new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])))
@@ -130,6 +144,9 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   const [editingCardId, setEditingCardId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [confirmRegenerate, setConfirmRegenerate] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsDraft, setSettingsDraft] = useState({ autoPin, groupHighlights })
+  const [savingSettings, setSavingSettings] = useState(false)
   const dragRef = useRef<{ kind: 'canvas' | 'node'; cardId?: string; x: number; y: number; viewport: Viewport; node?: { x: number; y: number }; moved: boolean } | null>(null)
   const consumeNodeClick = useRef<string | null>(null)
   const [cards, setCards] = useState(() => new Map<string, Flashcard>(sets.flatMap((set) => set.cards).map((card) => [card.id, card])))
@@ -154,6 +171,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   const laidOutNodes = useMemo(() => resolveNodeOverlap([...nodes.values()], expanded, cards), [cards, nodes, expanded])
   const displayNodes = useMemo(() => new Map(laidOutNodes.map((item) => [item.node.cardId, item])), [laidOutNodes])
   const groupLabels = useMemo(() => groupLabelPlacements(groups, displayNodes), [displayNodes, groups])
+  const groupHighlightRects = useMemo(() => groupHighlightPlacements(groups, displayNodes), [displayNodes, groups])
   const activeGroup = useMemo(() => groups.find((group) => group.id === activeGroupId) ?? null, [activeGroupId, groups])
   const activeGroupCards = useMemo(() => new Set(activeGroup?.cardIds ?? []), [activeGroup])
   const allPinned = nodes.size > 0 && [...nodes.values()].every((node) => node.pinned)
@@ -211,7 +229,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   }
   const startCanvasDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return
-    if ((event.target as HTMLElement).closest('.study-web-node, .study-web-control, .study-web-search, .study-web-edit-tools')) return
+    if ((event.target as HTMLElement).closest('.study-web-node, .study-web-control, .study-web-search, .study-web-edit-tools, .study-web-settings-menu')) return
     if (event.button === 0) { setSelected(null); setExpanded(null); if (editingLinks) { setLinkSource(null); if (groupEditMode) setActiveGroupId(null) } }
     event.preventDefault(); dragRef.current = { kind: 'canvas', x: event.clientX, y: event.clientY, viewport, moved: false }; window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop)
   }
@@ -221,14 +239,19 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     event.stopPropagation(); dragRef.current = { kind: 'node', cardId, x: event.clientX, y: event.clientY, viewport, node: { x: node.x, y: node.y }, moved: false }; window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop)
   }
   const setPinned = (cardId: string, pinned: boolean) => {
+    if (autoPin && !pinned) return
     const node = nodesRef.current.get(cardId); if (!node) return
     const next = new Map(nodesRef.current); next.set(cardId, { ...node, pinned }); nodesRef.current = next; setNodes(next)
     void api.saveStudyWebNodePosition({ studyWebId: web.id, cardId, x: node.x, y: node.y, pinned })
   }
   const setAllPinned = (pinned: boolean) => {
+    if (autoPin && !pinned) return
     const next = new Map([...nodesRef.current].map(([id, node]) => [id, { ...node, pinned }])); nodesRef.current = next; setNodes(next)
     void Promise.all([...next.values()].map((node) => api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: node.cardId, x: node.x, y: node.y, pinned })))
   }
+  useEffect(() => {
+    if (autoPin && [...nodes.values()].some((node) => !node.pinned)) setAllPinned(true)
+  }, [autoPin, nodes, web.id])
   const createCard = async () => {
     const setId = web.flashcardSetIds[0]
     if (!setId) return
@@ -237,13 +260,13 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     const y = canvas ? (canvas.height / 2 - viewport.y) / viewport.scale - collapsedHeight / 2 : 220
     try {
       const card = await api.saveCard({ setId, front: 'Untitled concept', back: 'Add a definition for this concept.', position: cards.size, isStarred: false })
-      await api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: card.id, x, y })
+      await api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: card.id, x, y, pinned: autoPin })
       if (groupEditMode && activeGroupId) {
         const detail = await api.updateStudyWebGroupMembership({ studyWebId: web.id, groupId: activeGroupId, cardId: card.id, included: true })
         setGroups(detail.groups)
       }
       setCards((current) => new Map(current).set(card.id, card))
-      setNodes((current) => { const next = new Map(current); next.set(card.id, { cardId: card.id, x, y, manuallyPositioned: true, pinned: false }); nodesRef.current = next; return next })
+      setNodes((current) => { const next = new Map(current); next.set(card.id, { cardId: card.id, x, y, manuallyPositioned: true, pinned: autoPin }); nodesRef.current = next; return next })
       setEditingCardId(card.id)
     } finally { setCreateMenuOpen(false) }
   }
@@ -335,6 +358,17 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     setNewGroupLabel('')
     setCreateMenuOpen(false)
   }
+  const openSettings = () => {
+    setSettingsDraft({ autoPin, groupHighlights })
+    setSettingsOpen((current) => !current)
+  }
+  const applySettings = async () => {
+    setSavingSettings(true)
+    try {
+      await onSettingsChange({ studyWebAutoPin: settingsDraft.autoPin, studyWebGroupHighlights: settingsDraft.groupHighlights })
+      setSettingsOpen(false)
+    } finally { setSavingSettings(false) }
+  }
   const focusCard = (cardId: string) => { const node = displayNodes.get(cardId); const canvas = canvasRef.current; if (!node || !canvas) return; const rect = canvas.getBoundingClientRect(); const scale = Math.max(viewport.scale, .8); setSelected(cardId); setExpanded(cardId); setViewport({ scale, x: rect.width / 2 - (node.x + nodeWidth / 2) * scale, y: rect.height / 2 - (node.y + collapsedHeight / 2) * scale }) }
   const searchMatch = search.trim().toLocaleLowerCase()
   const matches = searchMatch ? [...cards.values()].filter((card) => `${card.front} ${card.back}`.toLocaleLowerCase().includes(searchMatch)).slice(0, 6) : []
@@ -344,12 +378,13 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     return { x: node.x + nodeWidth / 2, y: node.y + collapsedHeight / 2 }
   }
   return <main className="study-web-view">
-    <header className="study-web-header"><button className="back-button" onClick={onBack}><ChevronLeft size={16} /> Back to Study Web</button>{web.outOfDate && <span className="study-web-stale">Study Web out of date</span>}<div className="study-web-header-actions"><button className={`button button-quiet button-small${allPinned ? ' active' : ''}`} onClick={() => setAllPinned(!allPinned)} title={allPinned ? 'Unpin all cards' : 'Pin all cards'}>{allPinned ? <PinOff size={14} /> : <Pin size={14} />}{allPinned ? ' Unpin all' : ' Pin all'}</button>{aiEnabled && <button className="button button-quiet button-small ai-action" onClick={() => setConfirmRegenerate(true)}><Sparkles size={14} /> Regenerate Web</button>}</div></header>
+    <header className="study-web-header"><button className="back-button" onClick={onBack}><ChevronLeft size={16} /> Back to Study Web</button>{web.outOfDate && <span className="study-web-stale">Study Web out of date</span>}<div className="study-web-header-actions"><button className={`button button-quiet button-small${allPinned ? ' active' : ''}`} disabled={autoPin} onClick={() => setAllPinned(!allPinned)} title={autoPin ? 'Auto pin is enabled in Study Web Settings.' : allPinned ? 'Unpin all cards' : 'Pin all cards'}>{autoPin || allPinned ? <Pin size={14} /> : <PinOff size={14} />}{autoPin ? ' Auto pin' : allPinned ? ' Unpin all' : ' Pin all'}</button>{aiEnabled && <button className="button button-quiet button-small ai-action" onClick={() => setConfirmRegenerate(true)}><Sparkles size={14} /> Regenerate Web</button>}</div></header>
     <section className={`study-web-canvas${editingLinks ? ' editing-links' : ''}`} ref={canvasRef} onPointerDown={startCanvasDrag}>
-      {editingLinks && <div className="study-web-edit-hint">{groupEditMode ? activeGroup ? `Editing ${activeGroup.label}. Click cards to add or remove them.` : 'Click a card to select its purple concept group.' : linkSource ? 'Click another card to add or remove its link.' : 'Select a card, then choose another to link or unlink.'}</div>}
+      {editingLinks && <div className="study-web-edit-hint">{groupEditMode ? activeGroup ? `Editing ${activeGroup.label}. Click cards to add or remove them.` : 'Click a card to select its concept group.' : linkSource ? 'Click another card to add or remove its link.' : 'Select a card, then choose another to link or unlink.'}</div>}
       <div className="study-web-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a concept" />{search && <button onClick={() => setSearch('')} aria-label="Clear search"><X size={14} /></button>}{matches.length > 0 && <div>{matches.map((card) => <button key={card.id} onClick={() => { focusCard(card.id); setSearch('') }}><strong>{card.front}</strong><span>{card.back}</span></button>)}</div>}</div>
-      <div className={`study-web-edit-tools${editingLinks ? ' editing' : ''}`}><button className={`study-web-floating-control study-web-group-button${groupEditMode ? ' active' : ''}`} onClick={toggleGroupEditMode} aria-label={groupEditMode ? 'Return to link editing' : 'Edit purple concept group'} title={groupEditMode ? 'Return to link editing' : 'Edit group'}><Layers3 size={15} /></button><div className="study-web-add-control"><button className="study-web-add-button" onClick={() => setCreateMenuOpen((value) => !value)} aria-label="Create flashcard" title="Create flashcard"><Plus size={18} /></button>{createMenuOpen && <div className="study-web-add-menu"><button onClick={() => void createCard()}><Plus size={14} /> Create flashcard</button></div>}</div><button className={`study-web-floating-control study-web-edit-button${editingLinks ? ' active' : ''}`} onClick={toggleEditMode} aria-label={editingLinks ? 'Exit edit mode' : 'Enter edit mode'} title={editingLinks ? 'Exit edit mode' : 'Edit Study Web'}><Pencil size={18} /></button></div><div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button></div>
+      <div className={`study-web-edit-tools${editingLinks ? ' editing' : ''}`}><button className={`study-web-floating-control study-web-group-button${groupEditMode ? ' active' : ''}`} onClick={toggleGroupEditMode} aria-label={groupEditMode ? 'Return to link editing' : 'Edit concept group'} title={groupEditMode ? 'Return to link editing' : 'Edit group'}><Layers3 size={15} /></button><div className="study-web-add-control"><button className="study-web-add-button" onClick={() => setCreateMenuOpen((value) => !value)} aria-label="Create flashcard" title="Create flashcard"><Plus size={18} /></button>{createMenuOpen && <div className="study-web-add-menu"><button onClick={() => void createCard()}><Plus size={14} /> Create flashcard</button></div>}</div><button className={`study-web-floating-control study-web-edit-button${editingLinks ? ' active' : ''}`} onClick={toggleEditMode} aria-label={editingLinks ? 'Exit edit mode' : 'Enter edit mode'} title={editingLinks ? 'Exit edit mode' : 'Edit Study Web'}><Pencil size={18} /></button></div><div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button><div className="study-web-settings-menu"><button className={`study-web-control${settingsOpen ? ' active' : ''}`} onClick={openSettings} aria-label="Study Web options" title="Study Web options"><Settings2 size={15} /></button>{settingsOpen && <section className="study-web-settings-popover"><header><span>Study Web Settings</span></header><label><input type="checkbox" checked={settingsDraft.autoPin} onChange={(event) => setSettingsDraft((current) => ({ ...current, autoPin: event.target.checked }))} /><span><strong>Auto pin</strong><small>Automatically pins your Study Web cards.</small></span></label><label><input type="checkbox" checked={settingsDraft.groupHighlights} onChange={(event) => setSettingsDraft((current) => ({ ...current, groupHighlights: event.target.checked }))} /><span><strong>Group highlights</strong><small>Lightly tint concept groups on the canvas.</small></span></label><footer><button className="button button-quiet button-small" onClick={() => setSettingsOpen(false)}>Exit</button><button className="button button-primary button-small" disabled={savingSettings} onClick={() => void applySettings()}>{savingSettings ? 'Applying...' : 'Apply'}</button></footer></section>}</div></div>
       <div className="study-web-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0' }}>
+        {groupHighlights && groupHighlightRects.map((group) => <span className="study-web-group-highlight" style={{ left: group.left - bounds.minX, top: group.top - bounds.minY, width: group.width, height: group.height }} key={group.id} />)}
         <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = edgePoint(edge.sourceCardId); const to = edgePoint(edge.targetCardId); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x - bounds.minX} y1={from.y - bounds.minY} x2={to.x - bounds.minX} y2={to.y - bounds.minY} className={`${edge.structural ? 'structure ' : ''}${active ? 'active' : selected ? 'muted' : ''}`} /> })}</svg>
         {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY }} key={group.id}>{group.label}</span>)}
         {laidOutNodes.map(({ node, x, y }) => {
@@ -365,7 +400,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
       </div>
     </section>
     {editingCardId && cards.get(editingCardId) && <StudyWebCardEditor card={cards.get(editingCardId)!} onClose={() => setEditingCardId(null)} onSave={saveCard} />}
-    {newGroupCardId && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-group-dialog" role="dialog" aria-modal="true" aria-label="Name Study Web group"><header><div><p className="eyebrow">STUDY WEB GROUP</p><h2>Name this group</h2></div><button className="icon-button" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => void createGroup(event)}><div className="paper-dialog-content"><p>{cards.get(newGroupCardId)?.front || 'This card'} is not in a purple concept group yet. Give the new group a clear name.</p><label>Group name<input autoFocus value={newGroupLabel} onChange={(event) => setNewGroupLabel(event.target.value)} placeholder="e.g. Stomach and surrounding organs" maxLength={72} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }}>Cancel</button><button className="button button-primary" disabled={!newGroupLabel.trim() || savingGroup}>{savingGroup ? 'Creating...' : 'Create group'}</button></footer></form></section></div>}
+    {newGroupCardId && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-group-dialog" role="dialog" aria-modal="true" aria-label="Name Study Web group"><header><div><p className="eyebrow">STUDY WEB GROUP</p><h2>Name this group</h2></div><button className="icon-button" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => void createGroup(event)}><div className="paper-dialog-content"><p>{cards.get(newGroupCardId)?.front || 'This card'} is not in a concept group yet. Give the new group a clear name.</p><label>Group name<input autoFocus value={newGroupLabel} onChange={(event) => setNewGroupLabel(event.target.value)} placeholder="e.g. Stomach and surrounding organs" maxLength={72} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }}>Cancel</button><button className="button button-primary" disabled={!newGroupLabel.trim() || savingGroup}>{savingGroup ? 'Creating...' : 'Create group'}</button></footer></form></section></div>}
     {confirmRegenerate && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-confirm"><header><h2>Regenerate Study Web?</h2><button className="icon-button" onClick={() => setConfirmRegenerate(false)}><X size={17} /></button></header><div className="paper-dialog-content"><p>SoFlo will re-analyze this set and replace the current organization and node positions.</p></div><footer><button className="button button-quiet" onClick={() => setConfirmRegenerate(false)}>Cancel</button><button className="button button-primary ai-action" onClick={() => { setConfirmRegenerate(false); onRegenerate() }}>Regenerate</button></footer></section></div>}
   </main>
 }

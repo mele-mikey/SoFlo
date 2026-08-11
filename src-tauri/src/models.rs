@@ -270,6 +270,10 @@ pub struct AppSettings {
     pub ai_grammar: bool,
     #[serde(default)]
     pub ai_model_path: String,
+    #[serde(default)]
+    pub study_web_auto_pin: bool,
+    #[serde(default)]
+    pub study_web_group_highlights: bool,
     pub default_question_types: Vec<String>,
 }
 
@@ -306,6 +310,8 @@ impl Default for AppSettings {
             ai_enabled: true,
             ai_grammar: true,
             ai_model_path: String::new(),
+            study_web_auto_pin: false,
+            study_web_group_highlights: false,
             default_question_types: vec![
                 "multipleChoice".into(),
                 "written".into(),

@@ -3787,7 +3787,7 @@ pub fn update_study_web_group_membership(
         .optional()
         .map_err(|error| error.to_string())?;
     if group_is_leaf != Some(1) {
-        return Err("Choose one of the purple concept groups before changing its cards.".into());
+        return Err("Choose one of the concept groups before changing its cards.".into());
     }
     let belongs_to_web: i64 = connection
         .query_row(

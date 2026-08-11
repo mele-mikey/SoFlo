@@ -228,6 +228,8 @@ export interface AppSettings {
   aiEnabled: boolean
   aiGrammar: boolean
   aiModelPath: string
+  studyWebAutoPin: boolean
+  studyWebGroupHighlights: boolean
   defaultQuestionTypes: string[]
 }
 
