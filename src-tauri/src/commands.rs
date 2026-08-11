@@ -785,21 +785,14 @@ fn review_grammar_text_blocking(
     quick: bool,
     paper_context: String,
 ) -> CommandResult<String> {
-    // The editor sends a rotating excerpt for quiet checks so long papers are
-    // covered over time instead of silently dropping the latter half.
-    let source = text
-        .chars()
-        .take(6_000)
-        .collect::<String>();
+    // The editor sends exactly the complete US-Letter page currently in view.
+    // Do not trim it here: reviewing page three must never silently become a
+    // review of the beginning of the document.
+    let source = text.trim().to_string();
     if source.trim().len() < 3 {
         return Ok("[]".into());
     }
     let paper_context = normalized_paper_context(&paper_context);
-    let system_instruction = if quick {
-        "You are SoFlo's fast, context-aware English mechanics checker. Proofread every word and sentence in the supplied passage before responding. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 8 clear errors. Find misspellings, capitalization, apostrophes, duplicated spaces, repeated words, obvious punctuation, unambiguous wrong-word or homophone mistakes, and clear subject-verb agreement errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only after checking the whole passage and finding no clear mechanics errors."
-    } else {
-        "You are SoFlo's rigorous, context-aware writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. A rough draft with several clear problems MUST receive 6 to 10 distinct suggestions; return fewer only when the supplied writing genuinely contains fewer than six clear improvements. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning and the document's stated goal. reason must say specifically why the replacement is more precise, clear, contextually grammatical, or better suited to the requested voice. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, subject-verb agreement, homophones, hyphenation, duplicated spaces, and contextually correct punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
-    };
     emit_ai_progress(&app, 12, "Reading your writing");
     let server_port = if quick {
         let writing_model_path = resolve_word_ai_model_path(&app, &model_path)?;
@@ -818,58 +811,51 @@ fn review_grammar_text_blocking(
     // generative model chooses to focus on style.
     let mut suggestions = quick_mechanics_prepass(&source);
     let mut model_suggestion_count = 0usize;
-    // A normal paper page fits comfortably inside the writing model context.
-    // One page-wide pass is both more useful and faster than several tiny,
-    // sequential requests that only reached the top of a page.
-    let review_sources = vec![source];
-    for (index, review_source) in review_sources.iter().enumerate() {
-        let progress = 45 + ((index as u8).saturating_mul(38) / review_sources.len().max(1) as u8);
-        emit_ai_progress(
-            &app,
-            progress,
-            if quick {
-                "Checking spelling and grammar"
-            } else {
-                "Reviewing another section"
-            },
-        );
-        let request = if quick {
-            format!(
-                "DOCUMENT GOAL AND VOICE:\n{}\n\nReview this writing. Return JSON only.\n\n{}",
-                paper_context, review_source
-            )
-        } else {
-            format!("DOCUMENT GOAL AND VOICE:\n{}\n\nReview this passage. Return 4 to 7 focused suggestions from this passage only. Return JSON only.\n\n{}", paper_context, review_source)
-        };
-        let output = local_chat_text(
-            &client,
-            server_port,
-            system_instruction,
-            &request,
-            if quick { 760 } else { 1_200 },
-        )?;
+    if quick {
+        let system = "You are SoFlo's fast, context-aware English mechanics checker. The supplied text is one complete page currently visible to the writer. Proofread that entire page from its first sentence through its final sentence before responding. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 12 clear errors. Find misspellings, capitalization, apostrophes, duplicated spaces, repeated words, obvious punctuation, unambiguous wrong-word or homophone mistakes, and clear subject-verb agreement errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only after checking the whole page and finding no clear mechanics errors.";
+        let request = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nProofread this complete visible page. Return JSON only.\n\n{}", paper_context, source);
+        let output = local_chat_text(&client, server_port, system, &request, 1_150)?;
         if let Some(array) = json_array_from_response(&output) {
-            if let Ok(serde_json::Value::Array(items)) =
-                serde_json::from_str::<serde_json::Value>(&array)
-            {
-                let accepted = items.into_iter().take(if quick { 8 } else { 10 }).collect::<Vec<_>>();
+            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+                suggestions.extend(items.into_iter().take(12));
+            }
+        }
+    } else {
+        emit_ai_progress(&app, 45, "Auditing grammar across this page");
+        let mechanics_system = "You are SoFlo's rigorous copy editor. The supplied text is one complete page currently visible to the writer. Inspect every sentence, including the middle and end of the page. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 8 to 12 distinct, unambiguous mechanics improvements when the page has that many; return fewer only when the writing is genuinely clean. Check spelling, capitalization, apostrophes, agreement, tense consistency, homophones, word forms, hyphenation, repeated words, duplicated spaces, comma use, sentence boundaries, fragments, run-ons, and contextually correct punctuation. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be mechanic. original must be copied exactly from the input. replacement must be the smallest exact correction, usually 1 to 6 words. reason must explain the specific grammar rule or contextual error. alternatives must be an empty JSON array. Never invent facts, change citations, flag proper names merely for being unfamiliar, or report text that is already correct.";
+        let mechanics_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nAudit this complete visible page for mechanics. Return JSON only.\n\n{}", paper_context, source);
+        let mechanics_output = local_chat_text(&client, server_port, mechanics_system, &mechanics_prompt, 1_650)?;
+        if let Some(array) = json_array_from_response(&mechanics_output) {
+            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+                let accepted = items.into_iter().take(12).collect::<Vec<_>>();
+                model_suggestion_count += accepted.len();
+                suggestions.extend(accepted);
+            }
+        }
+
+        emit_ai_progress(&app, 67, "Finding stronger writing choices");
+        let style_system = "You are SoFlo's senior college-writing editor. The supplied text is one complete page currently visible to the writer. Read the entire page before responding, then return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 6 to 10 concrete, meaningful writing improvements when the page has that many. Focus on vague or conversational language, weak verbs, repetitive sentence starters, imprecise claims, choppy transitions, redundant phrasing, weak topic or closing phrases, unclear logic, and opportunities for a more formal, precise voice that still matches the stated document goal. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be style. original must be copied exactly from the input. replacement must preserve the writer's meaning. For each suggestion, target a focused 1 to 9 word phrase; never rewrite a whole sentence. reason must explain specifically why the replacement is clearer, more formal, more precise, or improves flow. alternatives must contain zero to two short optional replacements. Do not invent facts, alter quotations or citations, make empty thesaurus substitutions, or praise text instead of offering a real improvement.";
+        let style_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nReview this complete visible page for focused writing improvements. Return JSON only.\n\n{}", paper_context, source);
+        let style_output = local_chat_text(&client, server_port, style_system, &style_prompt, 1_700)?;
+        if let Some(array) = json_array_from_response(&style_output) {
+            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+                let accepted = items.into_iter().take(10).collect::<Vec<_>>();
                 model_suggestion_count += accepted.len();
                 suggestions.extend(accepted);
             }
         }
     }
-    // Smaller local models occasionally stop after one or two broad comments.
-    // A full AI Review is intentional, so ask the same larger model for a
-    // focused mechanics audit when the first answer was too thin.
-    if !quick && model_suggestion_count < 5 {
+    // Local models can occasionally stop after only a couple broad comments.
+    // A deliberate AI Review earns a second focused mechanics audit in that case.
+    if !quick && model_suggestion_count < 8 {
         emit_ai_progress(&app, 78, "Double-checking grammar and punctuation");
         let audit_prompt = format!(
             "DOCUMENT GOAL AND VOICE:\n{}\n\nReview this same paper again. Find 6 to 8 additional, distinct grammar or punctuation issues. Return JSON only.\n\n{}",
             paper_context,
-            review_sources.first().map(String::as_str).unwrap_or_default()
+            source
         );
         let audit_system = "You are the second-pass grammar quality check for a college paper. Return only a valid JSON array with exactly these five keys per object: kind, original, replacement, reason, alternatives. kind must be mechanic. Find clear, specific grammar, spelling, agreement, capitalization, apostrophe, homophone, or punctuation problems that a first pass may have missed. Copy original exactly from the paper. Keep each correction focused on 1 to 6 words. Do not return style-only advice, commentary, Markdown, or an empty array when clear mechanics errors exist.";
-        let audit_output = local_chat_text(&client, server_port, audit_system, &audit_prompt, 1_000)?;
+        let audit_output = local_chat_text(&client, server_port, audit_system, &audit_prompt, 1_300)?;
         if let Some(array) = json_array_from_response(&audit_output) {
             if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
                 suggestions.extend(items.into_iter().take(8));

@@ -312,7 +312,7 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
   try { candidates = JSON.parse(raw) as typeof candidates } catch { return [] }
   const issues: GrammarIssue[] = []
   const used = new Set<string>()
-  for (const candidate of candidates.slice(0, 20)) {
+  for (const candidate of candidates.slice(0, 28)) {
     const kindLabel = candidate.kind?.toLocaleLowerCase() ?? ''
     const categoryLabel = candidate.category?.toLocaleLowerCase() ?? ''
     const kind: GrammarIssueKind = kindLabel === 'structure' || kindLabel === 'flow' ? 'structure' : kindLabel === 'style' || kindLabel === 'formal' || kindLabel === 'rewrite' || categoryLabel.includes('formal') || categoryLabel.includes('style') ? 'style' : 'mechanic'
@@ -325,6 +325,7 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
     // for a word-level correction. Keep the useful correction by narrowing
     // both strings to their actual changed fragment.
     if (kind === 'mechanic' && !categoryLabel.includes('agreement') && !categoryLabel.includes('comparative')) ({ original, replacement } = isolateMechanicalChange(original, replacement))
+    if (kind === 'style' && (original.trim().split(/\s+/).length > 18 || replacement.trim().split(/\s+/).length > 18)) ({ original, replacement } = isolateMechanicalChange(original, replacement))
     const originalWords = original.trim().split(/\s+/).filter(Boolean)
     const replacementWords = replacement.trim().split(/\s+/).filter(Boolean)
     // AI Review asks for 1–9-word formal rewrites. Allow a small amount of
@@ -720,7 +721,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarReviewRef = useRef<(quick: boolean) => Promise<boolean>>(async () => false)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
-  const grammarTextCursorRef = useRef(0)
   // When AI spelling is enabled, it owns the marks so the editor never mixes
   // its straight interactive underlines with the browser's red squiggles.
   const customAiSpellcheck = aiEnabled && aiGrammarEnabled
@@ -906,7 +906,6 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     selectedWordReferenceRef.current = ''
     selectedWordRangeRef.current = null
     ignoredGrammarKeysRef.current.clear()
-    grammarTextCursorRef.current = 0
     grammarLastAutomaticReviewAt.current = 0
     wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
@@ -1182,25 +1181,28 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}` })))
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
   }
-  const nextPassiveGrammarExcerpt = () => {
-    const text = editor.getText()
-    // A full US-Letter page of ordinary double-spaced writing is comfortably
-    // below this limit. Cover the page in one passive pass before rotating
-    // through longer documents, so the lower half is not left unchecked.
-    const maximumLength = 6_000
-    if (text.length <= maximumLength) return text
-    let start = Math.min(grammarTextCursorRef.current, Math.max(0, text.length - 1))
-    if (start > 0) {
-      const nextBreak = text.slice(start).search(/[\s]/)
-      start = nextBreak >= 0 ? start + nextBreak + 1 : 0
-    }
-    let end = Math.min(text.length, start + maximumLength)
-    if (end < text.length) {
-      const previousBreak = text.lastIndexOf(' ', end)
-      if (previousBreak > start + Math.floor(maximumLength / 2)) end = previousBreak
-    }
-    grammarTextCursorRef.current = end >= text.length - 1 ? 0 : end
-    return text.slice(start, end)
+  const visiblePaperPageText = () => {
+    const documentSize = editor.state.doc.content.size
+    const breaks = (paperPaginationKey.getState(editor.state) ?? DecorationSet.empty).find()
+      .filter((decoration) => String(decoration.spec.key ?? '').startsWith('paper-break-'))
+      .map((decoration) => decoration.from)
+      .sort((left, right) => left - right)
+    if (!breaks.length) return editor.getText()
+
+    const scrollArea = editor.view.dom.closest<HTMLElement>('.editor-page-wrap')
+    const visibleCenter = scrollArea
+      ? scrollArea.getBoundingClientRect().top + scrollArea.clientHeight / 2
+      : window.innerHeight / 2
+    const pageBreaks = Array.from(editor.view.dom.querySelectorAll<HTMLElement>('.paper-page-break'))
+    let visiblePage = 0
+    pageBreaks.forEach((element, index) => {
+      if (element.getBoundingClientRect().bottom <= visibleCenter) visiblePage = index + 1
+    })
+
+    const pageStarts = [0, ...breaks]
+    const start = pageStarts[Math.min(visiblePage, pageStarts.length - 1)]
+    const end = pageStarts[visiblePage + 1] ?? documentSize
+    return editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText()
   }
   const reviewGrammar = async (quick = false) => {
     if (!aiEnabled || !aiGrammarEnabled || !aiModelReady) return false
@@ -1219,7 +1221,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       editor.view.dom.classList.add('ai-grammar-scanning')
     }
     try {
-      const source = quick ? nextPassiveGrammarExcerpt() : editor.getText()
+      // The paper is visually paginated inside one ProseMirror document. Both
+      // quiet checks and AI Review must examine the complete page the person is
+      // viewing, rather than always beginning at page one of a longer paper.
+      const source = visiblePaperPageText()
       const issues = extractGrammarIssues(await onGrammarReview(source, quick, paperContext), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       // A manual review started after a passive pass should replace that pass,
       // never be overwritten by an older background response.
