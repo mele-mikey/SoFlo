@@ -56,6 +56,7 @@ pub fn run() {
             commands::define_word,
             commands::ai_thesaurus,
             commands::word_ai_model_ready,
+            commands::prepare_ai_for_session,
             commands::stop_ai_server,
             commands::download_default_ai_model,
             commands::install_ai_model,

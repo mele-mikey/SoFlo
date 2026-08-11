@@ -38,7 +38,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
   const localModelsInstalled = Boolean(settings.aiModelPath) || wordAiModelReady
 
   const update = async (partial: Partial<AppSettings>) => {
-    const next = { ...settings, ...partial, ...(partial.aiEnabled === false ? { aiGrammar: false } : {}) }
+    const next = { ...settings, ...partial, ...(partial.aiEnabled === false ? { aiGrammar: false, askForAiUse: false } : {}) }
     onSettingsChange(next)
     try {
       await api.updateSettings(next)
@@ -149,12 +149,13 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
       <SectionHeading icon={<Bot size={18} />} title="Artificial Intelligence" detail="Optional, private help for structuring imported documents." action={<button className="settings-info-button" onClick={() => setAiInfoOpen(true)} aria-label="About SoFlo AI"><Info size={15} /></button>} />
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
       <SettingRow title="AI spelling & grammar" detail="Passively check basics with SoFlo's upgraded writing model, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiEnabled && settings.aiGrammar} disabled={!settings.aiEnabled} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
+      <SettingRow title="Ask for AI use" detail="Depending on the mode you select, SoFlo automatically loads that AI and keeps it active for the remainder of the app session."><Toggle checked={settings.aiEnabled && settings.askForAiUse} disabled={!settings.aiEnabled} onChange={(askForAiUse) => void update({ askForAiUse })} /></SettingRow>
       <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's general and writing-model package." : modelPackageUpdateNeeded ? "An AI model update is available: install SoFlo's 1.7B writing model." : localModelsInstalled ? "Both local models are ready. Manage their performance level or remove downloaded files." : "Download SoFlo's 4B general model and 1.7B writing model now, or let the first AI action download them."}>{!settings.aiEnabled && localModelsInstalled ? <button className="button button-danger button-small" onClick={() => setDeleteModelsOpen(true)}>Delete models</button> : <button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!localModelsInstalled || modelUpdateNeeded ? downloadAiModel() : setModelManagerOpen(true))}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : localModelsInstalled ? 'Manage models' : 'Download models'}</button>}</SettingRow>
       {settings.aiEnabled && (!settings.aiModelPath || modelUpdateNeeded) && <p className="ai-model-note">{modelPackageUpdateNeeded && !modelUpgradeNeeded ? 'A local writing model is ready to add to your current AI setup.' : 'The general model and writing model are not on this PC yet. Download them here, or wait until the first AI action.'}</p>}
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.20" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.21" />
       <SettingRow title="Credits" detail="Created by Mikey M. · me@mikeymele.com" />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />
     </section>

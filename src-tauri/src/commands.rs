@@ -5,7 +5,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::{Mutex, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -187,6 +187,8 @@ struct AiServer {
 }
 static AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
 static WORD_AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
+static AI_SERVER_SESSION_PINNED: AtomicBool = AtomicBool::new(false);
+static WORD_AI_SERVER_SESSION_PINNED: AtomicBool = AtomicBool::new(false);
 
 fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
     let requested = Path::new(requested_path.trim());
@@ -272,6 +274,10 @@ pub fn close_window(window: tauri::Window) -> CommandResult<()> {
 
 #[tauri::command]
 pub fn force_close_window(window: tauri::Window) -> CommandResult<()> {
+    AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+    WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+    stop_model_server(&AI_SERVER);
+    stop_model_server(&WORD_AI_SERVER);
     window.destroy().map_err(|error| error.to_string())
 }
 
@@ -1669,7 +1675,7 @@ fn ensure_model_server(
         if server.model_path == model_path
             && server.context_size == context_size
             && server.reasoning == reasoning
-            && server.last_used.elapsed() < AI_WARM_WINDOW
+            && (server.last_used.elapsed() < AI_WARM_WINDOW || model_server_session_pinned(server_state))
             && server
                 .child
                 .try_wait()
@@ -1794,6 +1800,14 @@ fn touch_word_ai_server() {
     touch_model_server(&WORD_AI_SERVER)
 }
 
+fn model_server_session_pinned(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) -> bool {
+    if std::ptr::eq(server_state, &AI_SERVER) {
+        AI_SERVER_SESSION_PINNED.load(Ordering::Relaxed)
+    } else {
+        WORD_AI_SERVER_SESSION_PINNED.load(Ordering::Relaxed)
+    }
+}
+
 fn touch_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) {
     if let Some(state) = server_state.get() {
         if let Ok(mut guard) = state.lock() {
@@ -1806,7 +1820,7 @@ fn touch_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) 
         thread::sleep(AI_WARM_WINDOW);
         if let Some(state) = server_state.get() {
             if let Ok(mut guard) = state.lock() {
-                if guard
+                if !model_server_session_pinned(server_state) && guard
                     .as_ref()
                     .is_some_and(|server| server.last_used.elapsed() >= AI_WARM_WINDOW)
                 {
@@ -1833,9 +1847,63 @@ fn stop_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) {
 
 #[tauri::command]
 pub fn stop_ai_server() -> CommandResult<()> {
-    stop_model_server(&AI_SERVER);
-    stop_model_server(&WORD_AI_SERVER);
+    if !AI_SERVER_SESSION_PINNED.load(Ordering::Relaxed) {
+        stop_model_server(&AI_SERVER);
+    }
+    if !WORD_AI_SERVER_SESSION_PINNED.load(Ordering::Relaxed) {
+        stop_model_server(&WORD_AI_SERVER);
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn prepare_ai_for_session(
+    app: tauri::AppHandle,
+    general_model_path: String,
+    writing_model_path: String,
+    mode: String,
+) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = mode.trim().to_ascii_lowercase();
+        if mode != "writing" && mode != "study" {
+            return Err("Choose writing or study AI for this session.".into());
+        }
+
+        AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
+        let general_model = match resolve_ai_model_path(&app, &general_model_path) {
+            Ok(path) => path,
+            Err(error) => {
+                AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
+        emit_ai_progress(&app, 8, "Preparing your local AI for this session");
+        if let Err(error) = ensure_ai_server(&general_model, &app) {
+            AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+            return Err(error);
+        }
+
+        if mode == "writing" {
+            WORD_AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
+            let writing_model = match resolve_word_ai_model_path(&app, &writing_model_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
+            emit_ai_progress(&app, 48, "Preparing your writing AI");
+            if let Err(error) = ensure_word_ai_server(&writing_model, &app) {
+                WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+                return Err(error);
+            }
+        }
+
+        emit_ai_progress(&app, 100, "Your AI is ready for this session");
+        Ok(())
+    })
+    .await
+    .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
 fn download_ai_model_file(
@@ -2014,6 +2082,8 @@ pub fn delete_local_ai_models(
     app: tauri::AppHandle,
     database: State<'_, Database>,
 ) -> CommandResult<()> {
+    AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+    WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
     stop_model_server(&AI_SERVER);
     stop_model_server(&WORD_AI_SERVER);
     let models = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");

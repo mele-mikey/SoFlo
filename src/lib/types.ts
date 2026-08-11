@@ -228,6 +228,7 @@ export interface AppSettings {
   hideOverviewBanner: boolean
   aiEnabled: boolean
   aiGrammar: boolean
+  askForAiUse: boolean
   aiModelPath: string
   aiWritingModelPath: string
   aiGeneralModelTier: 'low' | 'medium' | 'high'

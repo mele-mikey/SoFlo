@@ -108,6 +108,7 @@ export const api = {
   defineWord: (modelPath: string, word: string, paperContext: string) => call<string>('define_word', { modelPath, word, paperContext }),
   aiThesaurus: (modelPath: string, word: string, paperContext: string) => call<string>('ai_thesaurus', { modelPath, word, paperContext }),
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
+  prepareAiForSession: (generalModelPath: string, writingModelPath: string, mode: 'writing' | 'study') => call<void>('prepare_ai_for_session', { generalModelPath, writingModelPath, mode }),
   stopAiServer: () => call<void>('stop_ai_server'),
   downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
   installAiModel: (role: 'general' | 'writing', tier: 'low' | 'medium' | 'high') => call<string>('install_ai_model', { role, tier }),

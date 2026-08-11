@@ -25,6 +25,7 @@ import { SettingsView } from './features/settings/SettingsView'
 import { HelpView } from './features/help/HelpView'
 import { StudyView } from './features/study/StudyView'
 import { StudyWebView } from './features/study/StudyWebView'
+import { AiLaunchChooser, type AiLaunchMode } from './features/ai/AiLaunchChooser'
 
 type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
@@ -74,6 +75,7 @@ function App() {
   const [syllabus, setSyllabus] = useState<DocumentDetail | null>(null)
   const [aiWorking, setAiWorking] = useState(false)
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null)
+  const [aiWorkingTitle, setAiWorkingTitle] = useState('Making this editable')
   const [aiDownloadProgress, setAiDownloadProgress] = useState<number | null>(null)
   const [wordAiModelReady, setWordAiModelReady] = useState(false)
   const [wordAiModelStatusLoaded, setWordAiModelStatusLoaded] = useState(false)
@@ -109,8 +111,10 @@ function App() {
   const lectureSaveTimer = useRef<number | null>(null)
   const [lectureToDelete, setLectureToDelete] = useState<LectureDetail | null>(null)
   const [walkthroughOpen, setWalkthroughOpen] = useState(false)
+  const [aiLaunchChooserOpen, setAiLaunchChooserOpen] = useState(false)
   const closing = useRef(false)
   const aiConsentResolver = useRef<((proceed: boolean) => void) | null>(null)
+  const aiLaunchPromptEvaluated = useRef(false)
 
   const showToast = useCallback((message: string, type: ToastKind = 'success') => {
     setToast({ message, type })
@@ -151,6 +155,12 @@ function App() {
     try { setWordAiModelReady(await api.wordAiModelReady()) } catch { setWordAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
   useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, refreshWordAiModelStatus])
+  useEffect(() => {
+    if (aiLaunchPromptEvaluated.current || !library || !wordAiModelStatusLoaded) return
+    aiLaunchPromptEvaluated.current = true
+    const settings = library.settings
+    if (settings.onboardingCompleted && settings.aiEnabled && settings.askForAiUse && Boolean(settings.aiModelPath) && wordAiModelReady) setAiLaunchChooserOpen(true)
+  }, [library, wordAiModelReady, wordAiModelStatusLoaded])
   const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' || view.kind === 'studyWeb' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])
   useEffect(() => {
@@ -402,6 +412,29 @@ function App() {
     return api.gradeTeachItBackAnswer(aiModelPath, front, back, question, target, answer)
   }
   const releaseAiModel = useCallback(async () => { await api.stopAiServer() }, [])
+  const chooseAiLaunchMode = async (mode: AiLaunchMode) => {
+    setAiLaunchChooserOpen(false)
+    if (mode === 'browsing' || !library) return
+    setAiWorkingTitle(mode === 'writing' ? 'Preparing your writing tools' : 'Preparing your study AI')
+    setAiWorking(true)
+    setAiProgress({ progress: 4, message: mode === 'writing' ? 'Loading your local writing and general AI.' : 'Loading your local study AI.' })
+    try {
+      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiWritingModelPath, mode)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'SoFlo could not prepare local AI for this session.', 'error')
+    } finally {
+      setAiWorking(false)
+      setAiProgress(null)
+      setAiWorkingTitle('Making this editable')
+    }
+  }
+  const neverShowAiLaunchChooser = async () => {
+    if (!library) return
+    const settings = { ...library.settings, askForAiUse: false }
+    setAiLaunchChooserOpen(false)
+    setSettings(settings)
+    try { await api.updateSettings(settings) } catch { setSettings(library.settings); showToast('Settings could not be saved.', 'error') }
+  }
   const importPdfAsNewNote = async () => {
     if (!classId) { showToast('Open a class before importing a PDF.', 'error'); return }
     const source = await open({ title: 'Import document as a new paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
@@ -740,9 +773,10 @@ function App() {
     {writingModelPromptOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Download writing AI"><p className="eyebrow">PRIVATE WRITING AI</p><h2>Add writing help?</h2><p>Download SoFlo’s local writing package for custom spelling, grammar, and word details. It runs on this PC after download. If the general AI model is not installed yet, this same one-time download adds it too.</p>{writingModelDownloadError && <p className="ai-download-error">{writingModelDownloadError}</p>}<p>You can choose not now; SoFlo will ask again the next time you open a paper.</p><div><button className="button button-quiet" onClick={() => { setWritingModelPromptOpen(false); setWritingModelDeferred(true); setWritingModelDownloadError('') }}>Not now</button><button className="button button-primary" onClick={() => void downloadWritingModel()}>Download writing AI</button></div></section></div>}
     {aiConsentOpen && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card" role="dialog" aria-modal="true" aria-label="Use local AI?"><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>This action will use AI.</h2><p>SoFlo will download its local models once, then process this document on your PC. Research & Grade only sends a short topic query - never your paper - to Crossref for scholarly metadata. Turn AI off any time in Settings.</p><div><button className="button button-quiet" onClick={() => closeAiConsent(false)}>Return</button><button className="button button-primary" onClick={() => closeAiConsent(true)}>Proceed</button></div></section></div>}
     {aiDownloadProgress !== null && <div className="ai-consent-backdrop" role="presentation"><section className="ai-consent-card ai-download-card" role="dialog" aria-modal="true" aria-label="Downloading local AI model"><p className="eyebrow">PREPARING LOCAL AI</p><h2>Downloading your private model</h2><p>This happens once. Keep SoFlo open while the model is saved on this PC.</p><div className="ai-download-track"><i style={{ width: `${aiDownloadProgress}%` }} /></div><strong>{aiDownloadProgress}%</strong></section></div>}
-    {aiWorking && <div className="ai-consent-backdrop ai-progress-backdrop" role="presentation"><section className="ai-consent-card ai-download-card ai-progress-card" role="status" aria-live="polite"><i className="ai-progress-spinner" /><p className="eyebrow">SOFLO AI IS WORKING</p><h2>Making this editable</h2><p>{aiProgress?.message ?? 'Formatting your document on this PC.'}</p><div className="ai-download-track"><i style={{ width: `${aiProgress?.progress ?? 4}%` }} /></div><strong>{aiProgress?.progress ?? 4}% complete</strong></section></div>}
+    {aiWorking && <div className="ai-consent-backdrop ai-progress-backdrop" role="presentation"><section className="ai-consent-card ai-download-card ai-progress-card" role="status" aria-live="polite"><i className="ai-progress-spinner" /><p className="eyebrow">SOFLO AI IS WORKING</p><h2>{aiWorkingTitle}</h2><p>{aiProgress?.message ?? 'Formatting your document on this PC.'}</p><div className="ai-download-track"><i style={{ width: `${aiProgress?.progress ?? 4}%` }} /></div><strong>{aiProgress?.progress ?? 4}% complete</strong></section></div>}
     {walkthroughOpen && <GuidedWalkthrough initialStep={library.settings.walkthroughStep} hasExample={Boolean(library.settings.walkthroughExampleClassId)} onStep={(step) => void saveWalkthroughStep(step)} onCreateExample={ensureWalkthroughClass} onBuildBasics={buildWalkthroughBasics} onOpenFlashcardSets={openWalkthroughFlashcardSets} onStartFlashcards={startWalkthroughFlashcards} onRemoveExample={removeWalkthroughExample} onFinish={() => void finishWalkthrough(false)} onSkip={() => void finishWalkthrough(true)} />}
     {!library.settings.onboardingCompleted && <WelcomeView onComplete={completeOnboarding} />}
+    {aiLaunchChooserOpen && <AiLaunchChooser onChoose={(mode) => void chooseAiLaunchMode(mode)} onNeverShowAgain={() => void neverShowAiLaunchChooser()} />}
   </div>
 }
 
