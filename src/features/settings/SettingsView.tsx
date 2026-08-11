@@ -1,7 +1,7 @@
 import { AlertTriangle, Bot, Check, Database, Download, Info, KeyRound, LockKeyhole, Moon, Palette, ShieldAlert, ShieldCheck, SpellCheck2, Upload, X } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { api } from '../../lib/api'
 import type { AppSettings, SecurityStatus } from '../../lib/types'
 
@@ -177,42 +177,37 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
 
 type ModelTier = 'low' | 'medium' | 'high'
 type ModelRole = 'general' | 'writing'
-const modelTiers: { value: ModelTier; label: string; performance: string }[] = [
-  { value: 'low', label: 'Low', performance: 'Easiest on your computer' },
-  { value: 'medium', label: 'Medium', performance: 'Balanced quality and speed' },
-  { value: 'high', label: 'High', performance: 'Best results; heavier processing' },
+const modelTiers: { value: ModelTier; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
 ]
 function expectedModelMemory(role: ModelRole, tier: ModelTier) { return role === 'general' ? ({ low: 'about 2–4 GB RAM', medium: 'about 5–8 GB RAM', high: 'about 9–14 GB RAM' }[tier]) : ({ low: 'about 1–2 GB RAM', medium: 'about 3–5 GB RAM', high: 'about 5–8 GB RAM' }[tier]) }
 
 function ModelManagerDialog({ settings, onClose, onSettingsChange, onModelsUpdated, onToast }: { settings: AppSettings; onClose: () => void; onSettingsChange: (settings: AppSettings) => void; onModelsUpdated: () => void; onToast: (message: string, type?: 'success' | 'error') => void }) {
   const [general, setGeneral] = useState<ModelTier>(settings.aiGeneralModelTier || 'medium')
   const [writing, setWriting] = useState<ModelTier>(settings.aiWritingModelTier || 'medium')
-  const [inventory, setInventory] = useState<{ general: Record<ModelTier, boolean>; writing: Record<ModelTier, boolean> } | null>(null)
-  const [working, setWorking] = useState<ModelRole | 'cleanup' | null>(null)
+  const [working, setWorking] = useState<'apply' | 'cleanup' | null>(null)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
-  const refresh = async () => { try { setInventory(await api.getAiModelInventory()) } catch { setInventory(null) } }
-  useEffect(() => { void refresh() }, [])
-  const select = async (role: ModelRole, tier: ModelTier) => {
-    setWorking(role)
+  const applyModels = async () => {
+    setWorking('apply')
     try {
-      const path = await api.installAiModel(role, tier)
-      const next = role === 'general'
-        ? { ...settings, aiModelPath: path, aiGeneralModelTier: tier }
-        : { ...settings, aiWritingModelPath: path, aiWritingModelTier: tier }
+      const aiModelPath = await api.installAiModel('general', general)
+      const aiWritingModelPath = await api.installAiModel('writing', writing)
+      const next = { ...settings, aiModelPath, aiWritingModelPath, aiGeneralModelTier: general, aiWritingModelTier: writing }
       await api.updateSettings(next)
       onSettingsChange(next)
-      role === 'general' ? setGeneral(tier) : setWriting(tier)
-      await refresh(); onModelsUpdated()
-      onToast(`${role === 'general' ? 'General' : 'Writing'} model set to ${tier}.`)
-    } catch (error) { onToast(error instanceof Error ? error.message : 'SoFlo could not download that model.', 'error') } finally { setWorking(null) }
+      onModelsUpdated()
+      onToast('Your AI model choices were applied.')
+    } catch (error) { onToast(error instanceof Error ? error.message : 'SoFlo could not download those models.', 'error') } finally { setWorking(null) }
   }
   const deleteUnused = async () => {
     setWorking('cleanup')
-    try { await api.deleteUnusedAiModels(settings.aiModelPath, settings.aiWritingModelPath); await refresh(); onToast('Unused local models were removed.') } catch (error) { onToast(error instanceof Error ? error.message : 'Unused models could not be removed.', 'error') } finally { setWorking(null) }
+    try { await api.deleteUnusedAiModels(settings.aiModelPath, settings.aiWritingModelPath); onToast('Unused local models were removed.') } catch (error) { onToast(error instanceof Error ? error.message : 'Unused models could not be removed.', 'error') } finally { setWorking(null) }
   }
   const selected = (role: ModelRole) => role === 'general' ? general : writing
   return <>
-    <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog model-manager-dialog" role="dialog" aria-modal="true" aria-label="Manage local AI models"><header><div><p className="eyebrow">LOCAL AI MODELS</p><h2>Manage models</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content model-manager-content"><p>Choose each model separately. Medium is SoFlo’s default balanced setup; downloaded choices stay on this PC.</p>{(['general', 'writing'] as ModelRole[]).map((role) => { const tier = selected(role); const detail = modelTiers.find((item) => item.value === tier)!; return <section className="model-manager-role" key={role}><div><strong>{role === 'general' ? 'General AI' : 'Writing AI'}</strong><span>{role === 'general' ? 'Imports, flashcards, reviews, and study webs' : 'Fast grammar checks, word reference, and thesaurus'}</span></div><div className="model-tier-slider"><input aria-label={`${role} model performance`} type="range" min="0" max="2" step="1" list={`${role}-model-tiers`} value={modelTiers.findIndex((item) => item.value === tier)} onChange={(event) => { const next = modelTiers[Number(event.target.value)].value; role === 'general' ? setGeneral(next) : setWriting(next) }} /><datalist id={`${role}-model-tiers`}>{modelTiers.map((item) => <option value={modelTiers.findIndex((candidate) => candidate.value === item.value)} key={item.value} />)}</datalist><div className="model-tier-labels" aria-hidden="true">{modelTiers.map((item) => <span className={tier === item.value ? 'active' : ''} key={item.value}>{item.label}</span>)}</div></div><p className="model-tier-detail"><strong>{detail.performance}</strong><span>Expected total memory use: {expectedModelMemory(role, tier)}.</span></p><button className="button button-soft button-small" disabled={working !== null} onClick={() => void select(role, tier)}>{working === role ? 'Downloading...' : inventory?.[role]?.[tier] ? `Use ${detail.label} model` : `Download ${detail.label} model`}</button></section>})}</div><footer><button className="button button-quiet" disabled={working !== null} onClick={() => void deleteUnused()}>{working === 'cleanup' ? 'Removing...' : 'Delete unused models'}</button><button className="button button-danger" disabled={working !== null} onClick={() => setDeleteAllOpen(true)}>Delete all models</button></footer></section></div>
+    <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog model-manager-dialog" role="dialog" aria-modal="true" aria-label="Manage local AI models"><header><div><p className="eyebrow">LOCAL AI MODELS</p><h2>Manage models</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content model-manager-content"><p>Choose each model separately. Medium is SoFlo’s default balanced setup; downloaded choices stay on this PC.</p>{(['general', 'writing'] as ModelRole[]).map((role) => { const tier = selected(role); return <section className="model-manager-role" key={role}><div><strong>{role === 'general' ? 'General AI' : 'Writing AI'}</strong><span>{role === 'general' ? 'Imports, flashcards, reviews, and study webs' : 'Fast grammar checks, word reference, and thesaurus'}</span></div><div className="model-tier-slider"><input aria-label={`${role} model performance`} type="range" min="0" max="2" step="1" list={`${role}-model-tiers`} value={modelTiers.findIndex((item) => item.value === tier)} onChange={(event) => { const next = modelTiers[Number(event.target.value)].value; role === 'general' ? setGeneral(next) : setWriting(next) }} /><datalist id={`${role}-model-tiers`}>{modelTiers.map((item) => <option value={modelTiers.findIndex((candidate) => candidate.value === item.value)} key={item.value} />)}</datalist><div className="model-tier-labels" aria-hidden="true">{modelTiers.map((item) => <span className={tier === item.value ? 'active' : ''} key={item.value}>{item.label}</span>)}</div></div><p className="model-tier-detail">Expected total memory use: {expectedModelMemory(role, tier)}.</p></section>})}</div><footer><button className="button button-danger" disabled={working !== null} onClick={() => setDeleteAllOpen(true)}>Delete all models</button><button className="button button-quiet" disabled={working !== null} onClick={() => void deleteUnused()}>{working === 'cleanup' ? 'Removing...' : 'Delete unused models'}</button><button className="button button-primary" disabled={working !== null} onClick={() => void applyModels()}>{working === 'apply' ? 'Applying...' : 'Apply'}</button></footer></section></div>
     {deleteAllOpen && <ConfirmDialog eyebrow="LOCAL AI" title="Delete every local AI model?" copy="This removes all downloaded SoFlo AI models from this PC. You can download a new package later." confirmLabel="Delete all models" onClose={() => setDeleteAllOpen(false)} onConfirm={() => void api.deleteLocalAiModels().then(() => { const next = { ...settings, aiModelPath: '', aiWritingModelPath: '', aiGrammar: false, aiGeneralModelTier: 'medium' as const, aiWritingModelTier: 'medium' as const }; onSettingsChange(next); onModelsUpdated(); setDeleteAllOpen(false); onClose(); onToast('SoFlo local AI models were removed from this PC.') }).catch(() => onToast('SoFlo could not remove its local AI models.', 'error'))} />}
   </>
 }
