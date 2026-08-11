@@ -3759,6 +3759,57 @@ pub fn toggle_study_web_relationship(
 }
 
 #[tauri::command]
+pub fn update_study_web_group_membership(
+    database: State<'_, Database>,
+    input: UpdateStudyWebGroupMembershipInput,
+) -> CommandResult<StudyWebDetail> {
+    let connection = database.open()?;
+    let group_is_leaf: Option<i64> = connection
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM study_web_groups child WHERE child.parent_group_id=g.id) FROM study_web_groups g WHERE g.id=?1 AND g.study_web_id=?2",
+            params![&input.group_id, &input.study_web_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if group_is_leaf != Some(1) {
+        return Err("Choose one of the purple concept groups before changing its cards.".into());
+    }
+    let belongs_to_web: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1 AND flashcard_id=?2",
+            params![&input.study_web_id, &input.card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if belongs_to_web != 1 {
+        return Err("That card is not part of this Study Web.".into());
+    }
+    if input.included {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)",
+                params![&input.study_web_id, &input.group_id, &input.card_id],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        connection
+            .execute(
+                "DELETE FROM study_web_group_members WHERE study_web_id=?1 AND group_id=?2 AND flashcard_id=?3",
+                params![&input.study_web_id, &input.group_id, &input.card_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute(
+            "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
+    read_study_web_detail(&connection, &input.study_web_id)
+}
+
+#[tauri::command]
 pub async fn generate_study_web(
     app: tauri::AppHandle,
     database: State<'_, Database>,

@@ -498,6 +498,15 @@ pub struct ToggleStudyWebRelationshipInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateStudyWebGroupMembershipInput {
+    pub study_web_id: String,
+    pub group_id: String,
+    pub card_id: String,
+    pub included: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsInput {
     pub settings: AppSettings,
 }
