@@ -667,7 +667,7 @@ fn review_grammar_text_blocking(
     }
     let paper_context = normalized_paper_context(&paper_context);
     let system_instruction = if quick {
-        "You are SoFlo's fast, context-aware English mechanics checker. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 3 clear spelling, capitalization, apostrophe, duplicated-space, or obvious punctuation errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only when there are no clear mechanics errors."
+        "You are SoFlo's fast, context-aware English mechanics checker. Proofread every word and sentence in the supplied passage before responding. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 5 clear errors. Find misspellings, capitalization, apostrophes, duplicated spaces, repeated words, obvious punctuation, unambiguous wrong-word or homophone mistakes, and clear subject-verb agreement errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only after checking the whole passage and finding no clear mechanics errors."
     } else {
         "You are SoFlo's rigorous, context-aware writing reviewer. Return only one complete valid JSON array: no Markdown, no code fences, and no commentary outside the array. Return 3 to 8 useful suggestions whenever the input contains a complete rough-draft paragraph; do not return [] merely because spelling is acceptable. For an obviously rough draft, aim for 5 to 8 distinct suggestions. Every array object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind is either mechanic or style. original must be copied exactly from the input. replacement must be a clear optional improvement that preserves the writer's meaning and the document's stated goal. reason must say specifically why the replacement is more precise, clear, contextually grammatical, or better suited to the requested voice. alternatives is an array with zero to two short alternatives. First include clear mechanics for spelling, apostrophes, capitalization, hyphenation, duplicated spaces, and contextually correct punctuation. Then actively find several distinct style improvements. Prioritize weak sentence starters and openers, conversational or vague phrases, weak verbs, transitions, short closing phrases, fragments, run-ons, unclear conclusions, and needless wordiness. For every style object, both original and replacement should normally be a focused 1 to 9 word phrase; use at most 18 words only when a short clause truly needs it, never an entire sentence. Never invent facts, alter citations, flag proper names merely for being unfamiliar, or make empty thesaurus substitutions."
     };
@@ -681,13 +681,13 @@ fn review_grammar_text_blocking(
     };
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(if quick { 15 } else { 50 }))
+        .timeout(Duration::from_secs(if quick { 24 } else { 50 }))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let review_sources = if quick {
-        split_source_for_ai(&source, 750)
+        split_source_for_ai(&source, 600)
             .into_iter()
-            .take(3)
+            .take(4)
             .collect::<Vec<_>>()
     } else {
         vec![source]
@@ -717,13 +717,13 @@ fn review_grammar_text_blocking(
             server_port,
             system_instruction,
             &request,
-            if quick { 320 } else { 800 },
+            if quick { 520 } else { 800 },
         )?;
         if let Some(array) = json_array_from_response(&output) {
             if let Ok(serde_json::Value::Array(items)) =
                 serde_json::from_str::<serde_json::Value>(&array)
             {
-                suggestions.extend(items.into_iter().take(if quick { 3 } else { 7 }));
+                suggestions.extend(items.into_iter().take(if quick { 5 } else { 7 }));
             }
         }
     }
