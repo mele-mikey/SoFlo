@@ -158,7 +158,9 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
   const consumeNodeClick = useRef<string | null>(null)
   const consumeGroupClick = useRef<string | null>(null)
   const [cards, setCards] = useState(() => new Map<string, Flashcard>(sets.flatMap((set) => set.cards).map((card) => [card.id, card])))
-  const hierarchyEdges = useMemo(() => studyWebHierarchyEdges(groups), [groups])
+  // A manually created or imported web only shows links the person explicitly
+  // makes. AI-built webs retain their generated hierarchy as a visual guide.
+  const hierarchyEdges = useMemo(() => web.isManual ? [] : studyWebHierarchyEdges(groups), [groups, web.isManual])
   const visualRelationships = useMemo<StudyWebCanvasEdge[]>(() => {
     const seen = new Set<string>()
     const combined: StudyWebCanvasEdge[] = []
