@@ -117,6 +117,7 @@ pub fn run() {
             commands::save_study_web_node_position,
             commands::toggle_study_web_relationship,
             commands::update_study_web_group_membership,
+            commands::create_study_web_group,
             commands::record_card_response,
             commands::start_study_session,
             commands::complete_study_session,

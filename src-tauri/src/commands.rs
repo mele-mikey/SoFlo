@@ -3758,6 +3758,20 @@ pub fn toggle_study_web_relationship(
     Ok(result)
 }
 
+fn remove_empty_study_web_groups(connection: &Connection, study_web_id: &str) -> CommandResult<()> {
+    loop {
+        let removed = connection
+            .execute(
+                "DELETE FROM study_web_groups WHERE study_web_id=?1 AND NOT EXISTS(SELECT 1 FROM study_web_group_members member WHERE member.study_web_id=study_web_groups.study_web_id AND member.group_id=study_web_groups.id) AND NOT EXISTS(SELECT 1 FROM study_web_groups child WHERE child.study_web_id=study_web_groups.study_web_id AND child.parent_group_id=study_web_groups.id)",
+                [study_web_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if removed == 0 {
+            return Ok(());
+        }
+    }
+}
+
 #[tauri::command]
 pub fn update_study_web_group_membership(
     database: State<'_, Database>,
@@ -3799,7 +3813,50 @@ pub fn update_study_web_group_membership(
                 params![&input.study_web_id, &input.group_id, &input.card_id],
             )
             .map_err(|error| error.to_string())?;
+        remove_empty_study_web_groups(&connection, &input.study_web_id)?;
     }
+    connection
+        .execute(
+            "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
+    read_study_web_detail(&connection, &input.study_web_id)
+}
+
+#[tauri::command]
+pub fn create_study_web_group(
+    database: State<'_, Database>,
+    input: CreateStudyWebGroupInput,
+) -> CommandResult<StudyWebDetail> {
+    let label = input.label.trim().chars().take(72).collect::<String>();
+    if label.is_empty() {
+        return Err("Give this concept group a name.".into());
+    }
+    let connection = database.open()?;
+    let belongs_to_web: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM study_web_nodes WHERE study_web_id=?1 AND flashcard_id=?2",
+            params![&input.study_web_id, &input.card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if belongs_to_web != 1 {
+        return Err("That card is not part of this Study Web.".into());
+    }
+    let group_id = Uuid::new_v4().to_string();
+    connection
+        .execute(
+            "INSERT INTO study_web_groups (id, study_web_id, label, parent_group_id) VALUES (?1,?2,?3,NULL)",
+            params![&group_id, &input.study_web_id, &label],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)",
+            params![&input.study_web_id, &group_id, &input.card_id],
+        )
+        .map_err(|error| error.to_string())?;
     connection
         .execute(
             "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",

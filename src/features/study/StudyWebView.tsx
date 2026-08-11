@@ -122,6 +122,9 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   const [editingLinks, setEditingLinks] = useState(startInEditMode)
   const [groupEditMode, setGroupEditMode] = useState(false)
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null)
+  const [newGroupCardId, setNewGroupCardId] = useState<string | null>(null)
+  const [newGroupLabel, setNewGroupLabel] = useState('')
+  const [savingGroup, setSavingGroup] = useState(false)
   const [linkSource, setLinkSource] = useState<string | null>(null)
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
   const [editingCardId, setEditingCardId] = useState<string | null>(null)
@@ -171,7 +174,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   }
   useEffect(() => { const frame = requestAnimationFrame(fit); return () => cancelAnimationFrame(frame) }, [web.id])
   useEffect(() => setCards(new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card]))), [sets])
-  useEffect(() => { const next = new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setGroups(web.groups); setExpanded(null); setSelected(null); setLinkSource(null); setGroupEditMode(false); setActiveGroupId(null); setEditingLinks(startInEditMode) }, [startInEditMode, web.groups, web.nodes, web.relationships])
+  useEffect(() => { const next = new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setGroups(web.groups); setExpanded(null); setSelected(null); setLinkSource(null); setGroupEditMode(false); setActiveGroupId(null); setNewGroupCardId(null); setNewGroupLabel(''); setEditingLinks(startInEditMode) }, [startInEditMode, web.groups, web.nodes, web.relationships])
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -260,7 +263,13 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
   }
   const editGroup = async (cardId: string) => {
     const selectedGroup = activeGroupId ? groups.find((group) => group.id === activeGroupId) ?? null : groups.find((group) => group.cardIds.includes(cardId)) ?? null
-    if (!selectedGroup) { setSelected(cardId); return }
+    if (!selectedGroup) {
+      setSelected(cardId)
+      setExpanded(null)
+      setNewGroupLabel('')
+      setNewGroupCardId(cardId)
+      return
+    }
     if (!activeGroupId) {
       setActiveGroupId(selectedGroup.id)
       setSelected(cardId)
@@ -275,8 +284,26 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
         included: !selectedGroup.cardIds.includes(cardId),
       })
       setGroups(detail.groups)
-      setSelected(cardId)
+      setActiveGroupId(detail.groups.some((group) => group.id === selectedGroup.id) ? selectedGroup.id : null)
+      setSelected(selectedGroup.cardIds.includes(cardId) ? null : cardId)
     } catch { /* Keep the current group visible if a concurrent change wins. */ }
+  }
+  const createGroup = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const cardId = newGroupCardId
+    const label = newGroupLabel.trim()
+    if (!cardId || !label) return
+    setSavingGroup(true)
+    try {
+      const existingIds = new Set(groups.map((group) => group.id))
+      const detail = await api.createStudyWebGroup({ studyWebId: web.id, cardId, label })
+      const created = detail.groups.find((group) => !existingIds.has(group.id))
+      setGroups(detail.groups)
+      setActiveGroupId(created?.id ?? null)
+      setSelected(cardId)
+      setNewGroupCardId(null)
+      setNewGroupLabel('')
+    } finally { setSavingGroup(false) }
   }
   const clickNode = (cardId: string, pinned: boolean) => {
     if (consumeNodeClick.current === cardId) { consumeNodeClick.current = null; return }
@@ -295,6 +322,8 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     setExpanded(null)
     setGroupEditMode(false)
     setActiveGroupId(null)
+    setNewGroupCardId(null)
+    setNewGroupLabel('')
     setCreateMenuOpen(false)
   }
   const toggleGroupEditMode = () => {
@@ -302,6 +331,8 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
     setLinkSource(null)
     setSelected(null)
     setActiveGroupId(null)
+    setNewGroupCardId(null)
+    setNewGroupLabel('')
     setCreateMenuOpen(false)
   }
   const focusCard = (cardId: string) => { const node = displayNodes.get(cardId); const canvas = canvasRef.current; if (!node || !canvas) return; const rect = canvas.getBoundingClientRect(); const scale = Math.max(viewport.scale, .8); setSelected(cardId); setExpanded(cardId); setViewport({ scale, x: rect.width / 2 - (node.x + nodeWidth / 2) * scale, y: rect.height / 2 - (node.y + collapsedHeight / 2) * scale }) }
@@ -334,6 +365,7 @@ export function StudyWebView({ web, sets, aiEnabled, startInEditMode = false, on
       </div>
     </section>
     {editingCardId && cards.get(editingCardId) && <StudyWebCardEditor card={cards.get(editingCardId)!} onClose={() => setEditingCardId(null)} onSave={saveCard} />}
+    {newGroupCardId && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-group-dialog" role="dialog" aria-modal="true" aria-label="Name Study Web group"><header><div><p className="eyebrow">STUDY WEB GROUP</p><h2>Name this group</h2></div><button className="icon-button" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => void createGroup(event)}><div className="paper-dialog-content"><p>{cards.get(newGroupCardId)?.front || 'This card'} is not in a purple concept group yet. Give the new group a clear name.</p><label>Group name<input autoFocus value={newGroupLabel} onChange={(event) => setNewGroupLabel(event.target.value)} placeholder="e.g. Stomach and surrounding organs" maxLength={72} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => { setNewGroupCardId(null); setNewGroupLabel(''); setSelected(null) }}>Cancel</button><button className="button button-primary" disabled={!newGroupLabel.trim() || savingGroup}>{savingGroup ? 'Creating...' : 'Create group'}</button></footer></form></section></div>}
     {confirmRegenerate && <div className="paper-dialog-backdrop"><section className="paper-dialog study-web-confirm"><header><h2>Regenerate Study Web?</h2><button className="icon-button" onClick={() => setConfirmRegenerate(false)}><X size={17} /></button></header><div className="paper-dialog-content"><p>SoFlo will re-analyze this set and replace the current organization and node positions.</p></div><footer><button className="button button-quiet" onClick={() => setConfirmRegenerate(false)}>Cancel</button><button className="button button-primary ai-action" onClick={() => { setConfirmRegenerate(false); onRegenerate() }}>Regenerate</button></footer></section></div>}
   </main>
 }
