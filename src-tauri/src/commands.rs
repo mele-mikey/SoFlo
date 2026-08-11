@@ -649,6 +649,70 @@ pub async fn review_grammar_text(
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
 }
 
+fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
+    // These are broad, unambiguous English mechanics corrections. They run
+    // before the small local model so passive checks do not miss obvious
+    // apostrophes and everyday misspellings when the model focuses elsewhere.
+    const CORRECTIONS: &[(&str, &str, &str, &str)] = &[
+        ("alot", "a lot", "Spelling", "This is written as two words."),
+        ("dont", "don't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("doesnt", "doesn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("didnt", "didn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("isnt", "isn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("arent", "aren't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("wasnt", "wasn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("werent", "weren't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("cant", "can't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("couldnt", "couldn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("shouldnt", "shouldn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("wouldnt", "wouldn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("hasnt", "hasn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("havent", "haven't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("hadnt", "hadn't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("wont", "won't", "Apostrophe", "This contraction needs an apostrophe."),
+        ("wouldve", "would've", "Apostrophe", "This contraction needs an apostrophe."),
+        ("couldve", "could've", "Apostrophe", "This contraction needs an apostrophe."),
+        ("shouldve", "should've", "Apostrophe", "This contraction needs an apostrophe."),
+        ("theyre", "they're", "Apostrophe", "This contraction needs an apostrophe."),
+        ("youre", "you're", "Apostrophe", "This contraction needs an apostrophe."),
+        ("weve", "we've", "Apostrophe", "This contraction needs an apostrophe."),
+        ("theyve", "they've", "Apostrophe", "This contraction needs an apostrophe."),
+        ("definately", "definitely", "Spelling", "This word is commonly misspelled."),
+        ("seperate", "separate", "Spelling", "This word is commonly misspelled."),
+        ("seperated", "separated", "Spelling", "This word is commonly misspelled."),
+        ("recieve", "receive", "Spelling", "This word is commonly misspelled."),
+        ("occured", "occurred", "Spelling", "This word is commonly misspelled."),
+        ("untill", "until", "Spelling", "This word is commonly misspelled."),
+        ("wich", "which", "Spelling", "This word is commonly misspelled."),
+        ("thier", "their", "Spelling", "This word is commonly misspelled."),
+        ("wierd", "weird", "Spelling", "This word is commonly misspelled."),
+        ("becuase", "because", "Spelling", "This word is commonly misspelled."),
+    ];
+    let mut issues = Vec::new();
+    let mut seen = HashSet::new();
+    let mut word = String::new();
+    let mut inspect = |word: &str| {
+        if word.is_empty() || issues.len() >= 12 { return; }
+        let normalized = word.to_lowercase();
+        let correction = if normalized == "i" { Some(("I", "Capitalization", "The English first-person pronoun is capitalized.")) } else {
+            CORRECTIONS.iter().find(|(original, _, _, _)| *original == normalized).map(|(_, replacement, category, reason)| (*replacement, *category, *reason))
+        };
+        if let Some((replacement, category, reason)) = correction {
+            let replacement = if word.chars().all(|character| !character.is_alphabetic() || character.is_uppercase()) { replacement.to_uppercase() } else if word.chars().next().is_some_and(|character| character.is_uppercase()) {
+                let mut characters = replacement.chars();
+                characters.next().map(|character| character.to_uppercase().collect::<String>() + characters.as_str()).unwrap_or_else(|| replacement.to_string())
+            } else { replacement.to_string() };
+            let key = format!("{}\u{0}{}", word.to_lowercase(), replacement.to_lowercase());
+            if seen.insert(key) { issues.push(serde_json::json!({ "kind": "mechanic", "original": word, "replacement": replacement, "reason": reason, "category": category, "alternatives": [] })); }
+        }
+    };
+    for character in source.chars() {
+        if character.is_alphabetic() { word.push(character); } else { inspect(&word); word.clear(); }
+    }
+    inspect(&word);
+    issues
+}
+
 fn review_grammar_text_blocking(
     app: tauri::AppHandle,
     model_path: String,
@@ -684,6 +748,7 @@ fn review_grammar_text_blocking(
         .timeout(Duration::from_secs(if quick { 24 } else { 50 }))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let mut suggestions = if quick { quick_mechanics_prepass(&source) } else { Vec::new() };
     let review_sources = if quick {
         split_source_for_ai(&source, 600)
             .into_iter()
@@ -692,7 +757,6 @@ fn review_grammar_text_blocking(
     } else {
         vec![source]
     };
-    let mut suggestions = Vec::new();
     for (index, review_source) in review_sources.iter().enumerate() {
         let progress = 45 + ((index as u8).saturating_mul(38) / review_sources.len().max(1) as u8);
         emit_ai_progress(
@@ -5922,6 +5986,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
         json_array_from_response, json_object_from_response, semester_end_date,
+        quick_mechanics_prepass,
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
         StudyWebSemanticPlan, StudyWebSourceCard,
@@ -5932,6 +5997,20 @@ mod tests {
         let port = available_loopback_port().expect("a private loopback port");
         assert!(port > 0);
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn quick_mechanics_prepass_catches_general_obvious_errors() {
+        let issues = quick_mechanics_prepass("i dont need alot, but i definately dont want it seperated.");
+        let corrections = issues
+            .iter()
+            .filter_map(|issue| issue.get("replacement").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(corrections.contains(&"I"));
+        assert!(corrections.contains(&"don't"));
+        assert!(corrections.contains(&"a lot"));
+        assert!(corrections.contains(&"definitely"));
+        assert!(corrections.contains(&"separated"));
     }
 
     #[test]

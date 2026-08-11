@@ -1452,6 +1452,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const focusBlankPaper = (event: React.MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return
     const target = event.target as HTMLElement
+    if (event.currentTarget.classList.contains('editor-page-wrap') && target === event.currentTarget) {
+      event.preventDefault()
+      return
+    }
     if (target.closest('.soflo-editor, .document-title, button, input, textarea, a, .paper-running-header, .paper-running-footer')) return
     event.preventDefault()
     editor.chain().focus('end').run()
