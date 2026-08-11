@@ -1184,9 +1184,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   }
   const nextPassiveGrammarExcerpt = () => {
     const text = editor.getText()
-    // Background checks need to finish quickly enough to stay invisible to
-    // writing. Subsequent checks rotate through the remaining text.
-    const maximumLength = 2_200
+    // A full US-Letter page of ordinary double-spaced writing is comfortably
+    // below this limit. Cover the page in one passive pass before rotating
+    // through longer documents, so the lower half is not left unchecked.
+    const maximumLength = 6_000
     if (text.length <= maximumLength) return text
     let start = Math.min(grammarTextCursorRef.current, Math.max(0, text.length - 1))
     if (start > 0) {
