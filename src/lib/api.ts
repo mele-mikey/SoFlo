@@ -73,6 +73,7 @@ export const api = {
   toggleStudyWebRelationship: (input: { studyWebId: string; sourceCardId: string; targetCardId: string }) => call<StudyWebRelationship | null>('toggle_study_web_relationship', { input }),
   updateStudyWebGroupMembership: (input: { studyWebId: string; groupId: string; cardId: string; included: boolean }) => call<StudyWebDetail>('update_study_web_group_membership', { input }),
   createStudyWebGroup: (input: { studyWebId: string; cardId: string; label: string }) => call<StudyWebDetail>('create_study_web_group', { input }),
+  updateStudyWebGroupColor: (input: { studyWebId: string; groupId: string; color: string }) => call<StudyWebDetail>('update_study_web_group_color', { input }),
   recordCardResponse: (cardId: string, isCorrect: boolean, details?: { sessionId?: string; mode?: string; questionType?: string; answer?: string }) => call<CardProgress>('record_card_response', { input: { cardId, isCorrect, ...details } }),
   startStudySession: (input: { setId: string; mode: string }) => call<StudySessionSummary>('start_study_session', { input }),
   completeStudySession: (id: string) => call<void>('complete_study_session', { input: { id } }),

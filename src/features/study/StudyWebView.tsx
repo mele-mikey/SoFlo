@@ -1,6 +1,7 @@
 import { ChevronLeft, Layers3, Maximize2, Minus, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Settings2, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
+import { SOFLO_PRESET_COLORS } from '../../lib/colors'
 import type { Flashcard, FlashcardSetDetail, StudyWebDetail, StudyWebGroup, StudyWebNode } from '../../lib/types'
 
 type Viewport = { x: number; y: number; scale: number }
@@ -60,7 +61,7 @@ function groupLabelPlacements(groups: StudyWebGroup[], nodes: Map<string, { x: n
     if (!groupNodes.length) return []
     const minX = Math.min(...groupNodes.map((node) => node.x))
     const minY = Math.min(...groupNodes.map((node) => node.y))
-    return [{ id: group.id, label: group.label, parent: false, x: minX, y: minY - 31 }]
+    return [{ id: group.id, label: group.label, color: group.color, parent: false, x: minX, y: minY - 31 }]
   })
 }
 
@@ -75,11 +76,15 @@ function groupHighlightPlacements(groups: StudyWebGroup[], nodes: Map<string, { 
     const top = Math.min(...members.map((node) => node.y)) - 47
     const right = Math.max(...members.map((node) => node.x + nodeWidth)) + 30
     const bottom = Math.max(...members.map((node) => node.y + node.height)) + 30
-    return [{ id: group.id, left, top, width: right - left, height: bottom - top }]
+    return [{ id: group.id, label: group.label, color: group.color, left, top, width: right - left, height: bottom - top }]
   })
 }
 
 type StudyWebCanvasEdge = { id: string; sourceCardId: string; targetCardId: string; structural: boolean }
+type StudyWebDrag =
+  | { kind: 'canvas'; x: number; y: number; viewport: Viewport; moved: boolean }
+  | { kind: 'node'; cardId: string; x: number; y: number; viewport: Viewport; node: { x: number; y: number }; moved: boolean }
+  | { kind: 'group'; groupId: string; x: number; y: number; viewport: Viewport; nodes: Map<string, { x: number; y: number }>; moved: boolean }
 
 // The AI supplies a hierarchy, not invisible connector coordinates. Turn that
 // hierarchy into a light card-to-card tree so every visible line starts and
@@ -147,8 +152,11 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({ autoPin, groupHighlights })
   const [savingSettings, setSavingSettings] = useState(false)
-  const dragRef = useRef<{ kind: 'canvas' | 'node'; cardId?: string; x: number; y: number; viewport: Viewport; node?: { x: number; y: number }; moved: boolean } | null>(null)
+  const [multiSelectedCardIds, setMultiSelectedCardIds] = useState<Set<string>>(() => new Set())
+  const [groupColorMenuId, setGroupColorMenuId] = useState<string | null>(null)
+  const dragRef = useRef<StudyWebDrag | null>(null)
   const consumeNodeClick = useRef<string | null>(null)
+  const consumeGroupClick = useRef<string | null>(null)
   const [cards, setCards] = useState(() => new Map<string, Flashcard>(sets.flatMap((set) => set.cards).map((card) => [card.id, card])))
   const hierarchyEdges = useMemo(() => studyWebHierarchyEdges(groups), [groups])
   const visualRelationships = useMemo<StudyWebCanvasEdge[]>(() => {
@@ -192,7 +200,7 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
   }
   useEffect(() => { const frame = requestAnimationFrame(fit); return () => cancelAnimationFrame(frame) }, [web.id])
   useEffect(() => setCards(new Map(sets.flatMap((set) => set.cards).map((card) => [card.id, card]))), [sets])
-  useEffect(() => { const next = new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setGroups(web.groups); setExpanded(null); setSelected(null); setLinkSource(null); setGroupEditMode(false); setActiveGroupId(null); setNewGroupCardId(null); setNewGroupLabel(''); setEditingLinks(startInEditMode) }, [startInEditMode, web.groups, web.nodes, web.relationships])
+  useEffect(() => { const next = new Map(compactAutomaticNodes(web.nodes).map((node) => [node.cardId, node])); nodesRef.current = next; setNodes(next); setRelationships(web.relationships); setGroups(web.groups); setExpanded(null); setSelected(null); setLinkSource(null); setMultiSelectedCardIds(new Set()); setGroupColorMenuId(null); setGroupEditMode(false); setActiveGroupId(null); setNewGroupCardId(null); setNewGroupLabel(''); setEditingLinks(startInEditMode) }, [startInEditMode, web.groups, web.nodes, web.relationships])
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -219,24 +227,49 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
       const y = drag.node.y + deltaY / drag.viewport.scale
       setNodes((current) => { const next = new Map(current); const node = next.get(drag.cardId!); if (node) next.set(drag.cardId!, { ...node, x, y, manuallyPositioned: true }); nodesRef.current = next; return next })
     }
+    if (drag.kind === 'group') {
+      const offsetX = deltaX / drag.viewport.scale
+      const offsetY = deltaY / drag.viewport.scale
+      setNodes((current) => {
+        const next = new Map(current)
+        for (const [cardId, original] of drag.nodes) {
+          const node = next.get(cardId)
+          if (node) next.set(cardId, { ...node, x: original.x + offsetX, y: original.y + offsetY, manuallyPositioned: true })
+        }
+        nodesRef.current = next
+        return next
+      })
+    }
   }
   const stop = () => {
     const drag = dragRef.current
     dragRef.current = null
     if (drag?.kind === 'node' && drag.cardId) { if (drag.moved) consumeNodeClick.current = drag.cardId; const node = nodesRef.current.get(drag.cardId); if (node) void api.saveStudyWebNodePosition({ studyWebId: web.id, cardId: node.cardId, x: node.x, y: node.y }) }
+    if (drag?.kind === 'group' && drag.moved) { consumeGroupClick.current = drag.groupId; void Promise.all([...drag.nodes.keys()].map((cardId) => { const node = nodesRef.current.get(cardId); return node ? api.saveStudyWebNodePosition({ studyWebId: web.id, cardId, x: node.x, y: node.y }) : Promise.resolve() })) }
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', stop)
   }
   const startCanvasDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 && event.button !== 1) return
     if ((event.target as HTMLElement).closest('.study-web-node, .study-web-control, .study-web-search, .study-web-edit-tools, .study-web-settings-menu')) return
-    if (event.button === 0) { setSelected(null); setExpanded(null); if (editingLinks) { setLinkSource(null); if (groupEditMode) setActiveGroupId(null) } }
+    if (event.button === 0) { setSelected(null); setExpanded(null); setMultiSelectedCardIds(new Set()); setGroupColorMenuId(null); if (editingLinks) { setLinkSource(null); if (groupEditMode) setActiveGroupId(null) } }
     event.preventDefault(); dragRef.current = { kind: 'canvas', x: event.clientX, y: event.clientY, viewport, moved: false }; window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop)
   }
   const startNodeDrag = (event: React.PointerEvent<HTMLButtonElement>, cardId: string) => {
     if (event.button !== 0 || editingLinks) return
     const node = nodes.get(cardId); if (!node) return
     event.stopPropagation(); dragRef.current = { kind: 'node', cardId, x: event.clientX, y: event.clientY, viewport, node: { x: node.x, y: node.y }, moved: false }; window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop)
+  }
+  const startGroupDrag = (event: React.PointerEvent<HTMLButtonElement>, groupId: string) => {
+    if (!groupEditMode || event.button !== 0) return
+    const group = groups.find((item) => item.id === groupId)
+    if (!group) return
+    const groupNodes = new Map(group.cardIds.flatMap((cardId) => { const node = nodesRef.current.get(cardId); return node ? [[cardId, { x: node.x, y: node.y }] as const] : [] }))
+    if (!groupNodes.size) return
+    event.stopPropagation()
+    dragRef.current = { kind: 'group', groupId, x: event.clientX, y: event.clientY, viewport, nodes: groupNodes, moved: false }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
   }
   const setPinned = (cardId: string, pinned: boolean) => {
     if (autoPin && !pinned) return
@@ -328,9 +361,19 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
       setNewGroupLabel('')
     } finally { setSavingGroup(false) }
   }
-  const clickNode = (cardId: string, pinned: boolean) => {
+  const clickNode = (cardId: string, pinned: boolean, additive = false) => {
     if (consumeNodeClick.current === cardId) { consumeNodeClick.current = null; return }
     if (editingLinks) {
+      if (additive) {
+        setMultiSelectedCardIds((current) => {
+          const next = new Set(current)
+          if (next.has(cardId)) next.delete(cardId)
+          else if (next.size < 100) next.add(cardId)
+          return next
+        })
+        return
+      }
+      setMultiSelectedCardIds(new Set())
       if (groupEditMode) { void editGroup(cardId); return }
       if (!linkSource || linkSource === cardId) { setLinkSource(linkSource === cardId ? null : cardId); setSelected(linkSource === cardId ? null : cardId); return }
       void toggleLink(linkSource, cardId); setSelected(linkSource); return
@@ -342,6 +385,8 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
     setEditingLinks((current) => !current)
     setLinkSource(null)
     setSelected(null)
+    setMultiSelectedCardIds(new Set())
+    setGroupColorMenuId(null)
     setExpanded(null)
     setGroupEditMode(false)
     setActiveGroupId(null)
@@ -353,6 +398,8 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
     setGroupEditMode((current) => !current)
     setLinkSource(null)
     setSelected(null)
+    setMultiSelectedCardIds(new Set())
+    setGroupColorMenuId(null)
     setActiveGroupId(null)
     setNewGroupCardId(null)
     setNewGroupLabel('')
@@ -369,6 +416,12 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
       setSettingsOpen(false)
     } finally { setSavingSettings(false) }
   }
+  const setGroupColor = async (groupId: string, color: string) => {
+    try {
+      const detail = await api.updateStudyWebGroupColor({ studyWebId: web.id, groupId, color })
+      setGroups(detail.groups)
+    } finally { setGroupColorMenuId(null) }
+  }
   const focusCard = (cardId: string) => { const node = displayNodes.get(cardId); const canvas = canvasRef.current; if (!node || !canvas) return; const rect = canvas.getBoundingClientRect(); const scale = Math.max(viewport.scale, .8); setSelected(cardId); setExpanded(cardId); setViewport({ scale, x: rect.width / 2 - (node.x + nodeWidth / 2) * scale, y: rect.height / 2 - (node.y + collapsedHeight / 2) * scale }) }
   const searchMatch = search.trim().toLocaleLowerCase()
   const matches = searchMatch ? [...cards.values()].filter((card) => `${card.front} ${card.back}`.toLocaleLowerCase().includes(searchMatch)).slice(0, 6) : []
@@ -384,15 +437,16 @@ export function StudyWebView({ web, sets, aiEnabled, autoPin, groupHighlights, s
       <div className="study-web-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a concept" />{search && <button onClick={() => setSearch('')} aria-label="Clear search"><X size={14} /></button>}{matches.length > 0 && <div>{matches.map((card) => <button key={card.id} onClick={() => { focusCard(card.id); setSearch('') }}><strong>{card.front}</strong><span>{card.back}</span></button>)}</div>}</div>
       <div className={`study-web-edit-tools${editingLinks ? ' editing' : ''}`}><button className={`study-web-floating-control study-web-group-button${groupEditMode ? ' active' : ''}`} onClick={toggleGroupEditMode} aria-label={groupEditMode ? 'Return to link editing' : 'Edit concept group'} title={groupEditMode ? 'Return to link editing' : 'Edit group'}><Layers3 size={15} /></button><div className="study-web-add-control"><button className="study-web-add-button" onClick={() => setCreateMenuOpen((value) => !value)} aria-label="Create flashcard" title="Create flashcard"><Plus size={18} /></button>{createMenuOpen && <div className="study-web-add-menu"><button onClick={() => void createCard()}><Plus size={14} /> Create flashcard</button></div>}</div><button className={`study-web-floating-control study-web-edit-button${editingLinks ? ' active' : ''}`} onClick={toggleEditMode} aria-label={editingLinks ? 'Exit edit mode' : 'Enter edit mode'} title={editingLinks ? 'Exit edit mode' : 'Edit Study Web'}><Pencil size={18} /></button></div><div className="study-web-controls"><button className="study-web-control" onClick={() => zoom(1.16)} aria-label="Zoom in"><Plus size={16} /></button><button className="study-web-control" onClick={() => zoom(.86)} aria-label="Zoom out"><Minus size={16} /></button><button className="study-web-control" onClick={fit} aria-label="Fit Study Web"><Maximize2 size={15} /></button><button className="study-web-control" onClick={() => setViewport({ x: 80, y: 80, scale: .8 })} aria-label="Reset view"><RotateCcw size={15} /></button><div className="study-web-settings-menu"><button className={`study-web-control${settingsOpen ? ' active' : ''}`} onClick={openSettings} aria-label="Study Web options" title="Study Web options"><Settings2 size={15} /></button>{settingsOpen && <section className="study-web-settings-popover"><header><span>Study Web Settings</span></header><label><input type="checkbox" checked={settingsDraft.autoPin} onChange={(event) => setSettingsDraft((current) => ({ ...current, autoPin: event.target.checked }))} /><span><strong>Auto pin</strong><small>Automatically pins your Study Web cards.</small></span></label><label><input type="checkbox" checked={settingsDraft.groupHighlights} onChange={(event) => setSettingsDraft((current) => ({ ...current, groupHighlights: event.target.checked }))} /><span><strong>Group highlights</strong><small>Lightly tint concept groups on the canvas.</small></span></label><footer><button className="button button-quiet button-small" onClick={() => setSettingsOpen(false)}>Exit</button><button className="button button-primary button-small" disabled={savingSettings} onClick={() => void applySettings()}>{savingSettings ? 'Applying...' : 'Apply'}</button></footer></section>}</div></div>
       <div className="study-web-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0' }}>
-        {groupHighlights && groupHighlightRects.map((group) => <span className="study-web-group-highlight" style={{ left: group.left - bounds.minX, top: group.top - bounds.minY, width: group.width, height: group.height }} key={group.id} />)}
+        {(groupHighlights || groupEditMode) && groupHighlightRects.map((group) => <button type="button" className={`study-web-group-highlight${groupHighlights ? ' visible' : ''}${groupEditMode ? ' editable' : ''}${groupColorMenuId === group.id ? ' selected' : ''}`} style={{ left: group.left - bounds.minX, top: group.top - bounds.minY, width: group.width, height: group.height, '--study-web-group-color': group.color } as React.CSSProperties} key={group.id} aria-label={`Edit ${group.label} group`} onPointerDown={(event) => startGroupDrag(event, group.id)} onClick={(event) => { event.stopPropagation(); if (consumeGroupClick.current === group.id) { consumeGroupClick.current = null; return }; if (groupEditMode) setGroupColorMenuId((current) => current === group.id ? null : group.id) }} />)}
         <svg className="study-web-edges" width={bounds.width} height={bounds.height} aria-hidden="true">{visualRelationships.map((edge) => { const from = edgePoint(edge.sourceCardId); const to = edgePoint(edge.targetCardId); if (!from || !to) return null; const active = selected === edge.sourceCardId || selected === edge.targetCardId; return <line key={edge.id} x1={from.x - bounds.minX} y1={from.y - bounds.minY} x2={to.x - bounds.minX} y2={to.y - bounds.minY} className={`${edge.structural ? 'structure ' : ''}${active ? 'active' : selected ? 'muted' : ''}`} /> })}</svg>
-        {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY }} key={group.id}>{group.label}</span>)}
+        {groupLabels.map((group) => <span className={`study-web-group-label${group.parent ? ' parent' : ''}`} style={{ left: group.x - bounds.minX, top: group.y - bounds.minY, '--study-web-group-color': group.color } as React.CSSProperties} key={group.id}>{group.label}</span>)}
+        {groupColorMenuId && groupHighlightRects.filter((group) => group.id === groupColorMenuId).map((group) => <section className="study-web-group-color-picker" style={{ left: group.left - bounds.minX + 12, top: group.top - bounds.minY + 12 }} key={group.id} onPointerDown={(event) => event.stopPropagation()}><span>Group color</span><div>{SOFLO_PRESET_COLORS.map((color) => <button key={color.value} type="button" className={color.value === group.color ? 'selected' : ''} style={{ background: color.value }} title={color.name} aria-label={`Use ${color.name}`} onClick={() => void setGroupColor(group.id, color.value)} />)}</div></section>)}
         {laidOutNodes.map(({ node, x, y }) => {
           const card = cards.get(node.cardId)
           if (!card) return null
           const isExpanded = node.pinned || expanded === card.id
           const muted = !editingLinks && selected && selected !== card.id && !related.has(card.id)
-          return <button key={card.id} className={`study-web-node${isExpanded ? ' expanded' : ''}${node.pinned ? ' pinned' : ''}${linkSource === card.id ? ' link-source' : ''}${selected === card.id ? ' selected' : ''}${groupEditMode && activeGroupCards.has(card.id) ? ' group-member' : ''}${muted ? ' muted' : ''}`} style={{ left: x - bounds.minX, top: y - bounds.minY }} onPointerDown={(event) => startNodeDrag(event, card.id)} onClick={(event) => { event.stopPropagation(); clickNode(card.id, node.pinned) }}>
+          return <button key={card.id} className={`study-web-node${isExpanded ? ' expanded' : ''}${node.pinned ? ' pinned' : ''}${linkSource === card.id ? ' link-source' : ''}${selected === card.id ? ' selected' : ''}${multiSelectedCardIds.has(card.id) ? ' multi-selected' : ''}${groupEditMode && activeGroupCards.has(card.id) ? ' group-member' : ''}${muted ? ' muted' : ''}`} style={{ left: x - bounds.minX, top: y - bounds.minY }} onPointerDown={(event) => startNodeDrag(event, card.id)} onClick={(event) => { event.stopPropagation(); clickNode(card.id, node.pinned, event.ctrlKey || event.metaKey) }}>
             <span className="study-web-card-pin" role="button" tabIndex={0} title={node.pinned ? 'Unpin card' : 'Keep card open'} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setPinned(card.id, !node.pinned) }}>{node.pinned ? <PinOff size={13} /> : <Pin size={13} />}</span>
             <span className="study-web-term"><strong>{card.front || 'Untitled card'}</strong>{editingLinks && <span className="study-web-inline-edit" role="button" tabIndex={0} title="Edit term" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setEditingCardId(card.id) }}><Pencil size={12} /></span>}</span>{isExpanded && <span className="study-web-definition"><span>{card.back || 'No definition yet.'}</span>{editingLinks && <span className="study-web-inline-edit definition" role="button" tabIndex={0} title="Edit definition" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setEditingCardId(card.id) }}><Pencil size={12} /></span>}{!web.isManual && <em onClick={(event) => { event.stopPropagation(); onStudyCard(card.id) }}>Study this concept</em>}</span>}
           </button>

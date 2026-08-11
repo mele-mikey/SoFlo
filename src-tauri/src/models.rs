@@ -195,6 +195,7 @@ pub struct StudyWebSummary {
 pub struct StudyWebGroup {
     pub id: String,
     pub label: String,
+    pub color: String,
     pub parent_group_id: Option<String>,
     pub card_ids: Vec<String>,
 }
@@ -517,6 +518,14 @@ pub struct CreateStudyWebGroupInput {
     pub study_web_id: String,
     pub card_id: String,
     pub label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStudyWebGroupColorInput {
+    pub study_web_id: String,
+    pub group_id: String,
+    pub color: String,
 }
 
 #[derive(Debug, Deserialize)]

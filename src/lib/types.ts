@@ -134,6 +134,7 @@ export interface StudyWebSummary {
 export interface StudyWebGroup {
   id: string
   label: string
+  color: string
   parentGroupId: string | null
   cardIds: string[]
 }

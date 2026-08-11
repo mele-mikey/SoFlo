@@ -3279,6 +3279,8 @@ struct PortableStudyWebNode {
 struct PortableStudyWebGroup {
     id: String,
     label: String,
+    #[serde(default = "default_study_web_group_color")]
+    color: String,
     parent_group_id: Option<String>,
     card_ids: Vec<String>,
 }
@@ -3294,6 +3296,17 @@ struct PortableStudyWebRelationship {
 
 fn default_study_web_relationship_type() -> String {
     "related_to".into()
+}
+fn default_study_web_group_color() -> String {
+    "#7E70D6".into()
+}
+fn normalize_study_web_group_color(value: &str) -> String {
+    let value = value.trim();
+    if value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(|byte| byte.is_ascii_hexdigit()) {
+        value.to_ascii_uppercase()
+    } else {
+        default_study_web_group_color()
+    }
 }
 fn default_study_web_strength() -> f64 {
     0.5
@@ -3391,20 +3404,21 @@ fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<Stu
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let mut group_statement = connection.prepare("SELECT id, label, parent_group_id FROM study_web_groups WHERE study_web_id=?1 ORDER BY label COLLATE NOCASE").map_err(|error| error.to_string())?;
+    let mut group_statement = connection.prepare("SELECT id, label, color, parent_group_id FROM study_web_groups WHERE study_web_id=?1 ORDER BY label COLLATE NOCASE").map_err(|error| error.to_string())?;
     let group_rows = group_statement
         .query_map([&id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let mut groups = Vec::new();
-    for (group_id, label, parent_group_id) in group_rows {
+    for (group_id, label, color, parent_group_id) in group_rows {
         let mut members = connection.prepare("SELECT flashcard_id FROM study_web_group_members WHERE study_web_id=?1 AND group_id=?2 ORDER BY flashcard_id").map_err(|error| error.to_string())?;
         let card_ids = members
             .query_map(params![&id, &group_id], |row| row.get(0))
@@ -3414,6 +3428,7 @@ fn read_study_web_detail(connection: &Connection, id: &str) -> CommandResult<Stu
         groups.push(StudyWebGroup {
             id: group_id,
             label,
+            color,
             parent_group_id,
             card_ids,
         });
@@ -3619,7 +3634,7 @@ pub fn export_study_web_json(database: State<'_, Database>, id: String) -> Comma
         format: "soflo-study-web".into(), version: 1, name: detail.name,
         cards,
         nodes: detail.nodes.into_iter().map(|node| PortableStudyWebNode { card_id: node.card_id, x: node.x, y: node.y, manually_positioned: node.manually_positioned, pinned: node.pinned }).collect(),
-        groups: detail.groups.into_iter().map(|group| PortableStudyWebGroup { id: group.id, label: group.label, parent_group_id: group.parent_group_id, card_ids: group.card_ids }).collect(),
+        groups: detail.groups.into_iter().map(|group| PortableStudyWebGroup { id: group.id, label: group.label, color: group.color, parent_group_id: group.parent_group_id, card_ids: group.card_ids }).collect(),
         relationships: detail.relationships.into_iter().map(|edge| PortableStudyWebRelationship { source_card_id: edge.source_card_id, target_card_id: edge.target_card_id, relationship_type: edge.relationship_type, strength: edge.strength }).collect(),
     };
     let downloads = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?).join("Downloads");
@@ -3672,7 +3687,7 @@ pub fn import_study_web_json(
     for group in &portable.groups {
         if group.id.trim().is_empty() || group.label.trim().is_empty() || group_ids.contains_key(&group.id) { continue; }
         let new_id = Uuid::new_v4().to_string();
-        transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, parent_group_id) VALUES (?1,?2,?3,NULL)", params![&new_id, &web_id, group.label.trim().chars().take(72).collect::<String>()]).map_err(|error| error.to_string())?;
+        transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, color, parent_group_id) VALUES (?1,?2,?3,?4,NULL)", params![&new_id, &web_id, group.label.trim().chars().take(72).collect::<String>(), normalize_study_web_group_color(&group.color)]).map_err(|error| error.to_string())?;
         group_ids.insert(group.id.clone(), new_id);
     }
     for group in &portable.groups {
@@ -3814,6 +3829,31 @@ pub fn update_study_web_group_membership(
             )
             .map_err(|error| error.to_string())?;
         remove_empty_study_web_groups(&connection, &input.study_web_id)?;
+    }
+    connection
+        .execute(
+            "UPDATE study_webs SET updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [&input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
+    read_study_web_detail(&connection, &input.study_web_id)
+}
+
+#[tauri::command]
+pub fn update_study_web_group_color(
+    database: State<'_, Database>,
+    input: UpdateStudyWebGroupColorInput,
+) -> CommandResult<StudyWebDetail> {
+    let color = normalize_study_web_group_color(&input.color);
+    let connection = database.open()?;
+    let updated = connection
+        .execute(
+            "UPDATE study_web_groups SET color=?1 WHERE id=?2 AND study_web_id=?3",
+            params![&color, &input.group_id, &input.study_web_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated != 1 {
+        return Err("That concept group could not be found.".into());
     }
     connection
         .execute(

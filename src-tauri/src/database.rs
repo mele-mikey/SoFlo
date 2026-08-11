@@ -763,6 +763,14 @@ impl Database {
                 PRAGMA user_version = 13;
             "#).map_err(|error| error.to_string())?;
         }
+        if version < 14 {
+            let mut statement = connection.prepare("PRAGMA table_info(study_web_groups)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "color") {
+                connection.execute_batch("ALTER TABLE study_web_groups ADD COLUMN color TEXT NOT NULL DEFAULT '#7E70D6';").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 14;").map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }
@@ -957,12 +965,17 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let set_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
             statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
         };
         assert!(set_columns.contains(&"is_study_web_private".to_string()));
+        let group_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(study_web_groups)").expect("study web group columns");
+            statement.query_map([], |row| row.get::<_, String>(1)).expect("study web group column rows").collect::<Result<Vec<_>, _>>().expect("study web group column names")
+        };
+        assert!(group_columns.contains(&"color".to_string()));
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -993,7 +1006,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);
