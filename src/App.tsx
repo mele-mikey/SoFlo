@@ -10,9 +10,10 @@ import { CommandPalette } from './components/CommandPalette'
 import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
 import { api } from './lib/api'
-import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureSummary, SecurityStatus, Semester, StudyWebDetail, StudyWebSummary } from './lib/types'
+import type { AppSettings, AppView, BootstrapData, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, Flashcard, FlashcardSetDetail, FlashcardSetSummary, LectureDetail, LectureNoteSuggestion, LectureSummary, SecurityStatus, Semester, StudyWebDetail, StudyWebSummary } from './lib/types'
 import { ClassView } from './features/classes/ClassView'
 import { DocumentEditor } from './features/editor/DocumentEditor'
+import { LectureRecordingPanel } from './features/lectures/LectureRecordingPanel'
 import { importAiFormattedNote, importPdfAsEditableNote, isLikelyMlaPaperImport } from './features/editor/pdfImport'
 import { FlashcardSetEditor } from './features/flashcards/FlashcardSetEditor'
 import { HomeView } from './features/home/HomeView'
@@ -78,6 +79,7 @@ function App() {
   const [aiWorkingTitle, setAiWorkingTitle] = useState('Making this editable')
   const [aiDownloadProgress, setAiDownloadProgress] = useState<number | null>(null)
   const [wordAiModelReady, setWordAiModelReady] = useState(false)
+  const [voiceAiModelReady, setVoiceAiModelReady] = useState(false)
   const [wordAiModelStatusLoaded, setWordAiModelStatusLoaded] = useState(false)
   const [aiConsentOpen, setAiConsentOpen] = useState(false)
   const [writingModelPromptOpen, setWritingModelPromptOpen] = useState(false)
@@ -93,6 +95,7 @@ function App() {
   const [recentDocuments, setRecentDocuments] = useState<DocumentSummary[]>([])
   const [activeDocument, setActiveDocument] = useState<DocumentDetail | null>(null)
   const [activeLecture, setActiveLecture] = useState<LectureDetail | null>(null)
+  const [activeLectureNoteSuggestions, setActiveLectureNoteSuggestions] = useState<{ lectureId: string; suggestions: LectureNoteSuggestion[] }>({ lectureId: '', suggestions: [] })
   const [activeSet, setActiveSet] = useState<FlashcardSetDetail | null>(null)
   const [activeStudySets, setActiveStudySets] = useState<FlashcardSetDetail[]>([])
   const [activeStudyWeb, setActiveStudyWeb] = useState<StudyWebDetail | null>(null)
@@ -109,6 +112,8 @@ function App() {
   const saveTimer = useRef<number | null>(null)
   const pendingLecture = useRef<LectureDetail | null>(null)
   const lectureSaveTimer = useRef<number | null>(null)
+  const pendingLectureCheckpoint = useRef<LectureDetail | null>(null)
+  const lectureCheckpointTimer = useRef<number | null>(null)
   const [lectureToDelete, setLectureToDelete] = useState<LectureDetail | null>(null)
   const [walkthroughOpen, setWalkthroughOpen] = useState(false)
   const [aiLaunchChooserOpen, setAiLaunchChooserOpen] = useState(false)
@@ -120,14 +125,18 @@ function App() {
     setToast({ message, type })
     window.setTimeout(() => setToast((current) => current?.message === message ? null : current), 3600)
   }, [])
+  const updateLectureNoteSuggestions = useCallback((lectureId: string, suggestions: LectureNoteSuggestion[]) => {
+    setActiveLectureNoteSuggestions((current) => current.lectureId === lectureId && JSON.stringify(current.suggestions) === JSON.stringify(suggestions) ? current : { lectureId, suggestions })
+  }, [])
   const loadLibrary = useCallback(async () => {
     try {
       const securityStatus = await api.getSecurityStatus()
       setSecurity(securityStatus)
       if (securityStatus.locked) return
-      const [data, recent] = await Promise.all([api.bootstrap(), api.listRecentDocuments()])
+      const [data, recent, interruptedRecordings] = await Promise.all([api.bootstrap(), api.listRecentDocuments(), api.recoverInterruptedLectureRecordings()])
       setLibrary(data)
       setRecentDocuments(recent)
+      if (interruptedRecordings.length) showToast(`${interruptedRecordings.length} interrupted lecture recording${interruptedRecordings.length === 1 ? '' : 's'} can be continued or finished safely.`, 'error')
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'SoFlo could not open its local library.', 'error')
     } finally { setBooting(false) }
@@ -151,8 +160,19 @@ function App() {
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<number>('ai-download-progress', (event) => setAiDownloadProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen('ai-download-finished', () => setAiDownloadProgress(null)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
   useEffect(() => { let unlisten: (() => void) | undefined; void listen<AiProgress>('ai-generation-progress', (event) => setAiProgress(event.payload)).then((dispose) => { unlisten = dispose }); return () => unlisten?.() }, [])
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<string>('lecture-content-updated', (event) => {
+      if (activeLecture?.id === event.payload) void api.getLecture(event.payload).then(setActiveLecture).catch(() => undefined)
+    }).then((dispose) => { unlisten = dispose })
+    return () => unlisten?.()
+  }, [activeLecture?.id])
   const refreshWordAiModelStatus = useCallback(async () => {
-    try { setWordAiModelReady(await api.wordAiModelReady()) } catch { setWordAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
+    try {
+      const [writingReady, voiceReady] = await Promise.all([api.wordAiModelReady(), api.voiceAiModelReady()])
+      setWordAiModelReady(writingReady)
+      setVoiceAiModelReady(voiceReady)
+    } catch { setWordAiModelReady(false); setVoiceAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
   useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, refreshWordAiModelStatus])
   useEffect(() => {
@@ -249,7 +269,19 @@ function App() {
     if (lectureSaveTimer.current !== null) window.clearTimeout(lectureSaveTimer.current)
     lectureSaveTimer.current = window.setTimeout(() => { void flushLecture() }, 550)
   }, [flushLecture])
-  useEffect(() => () => { void flushDocument(); void flushLecture() }, [flushDocument, flushLecture])
+  const flushLectureCheckpoint = useCallback(async () => {
+    if (lectureCheckpointTimer.current !== null) { window.clearTimeout(lectureCheckpointTimer.current); lectureCheckpointTimer.current = null }
+    const checkpoint = pendingLectureCheckpoint.current
+    if (!checkpoint) return
+    pendingLectureCheckpoint.current = null
+    try { await api.recordLectureNoteCheckpoint({ lectureId: checkpoint.id, content: checkpoint.content, contentPlain: checkpoint.contentPlain }) } catch { /* Checkpoints are an enhancement; the normal lecture save is still authoritative. */ }
+  }, [])
+  const scheduleLectureCheckpoint = useCallback((next: LectureDetail) => {
+    pendingLectureCheckpoint.current = next
+    if (lectureCheckpointTimer.current !== null) window.clearTimeout(lectureCheckpointTimer.current)
+    lectureCheckpointTimer.current = window.setTimeout(() => { void flushLectureCheckpoint() }, 1_500)
+  }, [flushLectureCheckpoint])
+  useEffect(() => () => { void flushDocument(); void flushLecture(); void flushLectureCheckpoint() }, [flushDocument, flushLecture, flushLectureCheckpoint])
   const closeSafely = useCallback(async () => {
     if (closing.current) return
     closing.current = true
@@ -331,11 +363,11 @@ function App() {
     if (!await requestAiConsent()) throw new Error('AI import was cancelled.')
     setAiDownloadProgress(0)
     try {
-      const aiModelPath = await api.downloadDefaultAiModel()
-      const settings = { ...library.settings, aiModelPath }
+      const models = await api.downloadDefaultAiModel()
+      const settings = { ...library.settings, aiModelPath: models.generalPath, aiWritingModelPath: models.writingPath, aiVoiceModelPath: models.voicePath, aiGeneralModelTier: 'medium' as const, aiWritingModelTier: 'medium' as const, aiVoiceModelTier: 'medium' as const }
       await api.updateSettings(settings)
       setLibrary((current) => current ? { ...current, settings } : current)
-      return aiModelPath
+      return models.generalPath
     } finally { setAiDownloadProgress(null) }
   }
   const downloadWritingModel = async () => {
@@ -345,8 +377,8 @@ function App() {
     setWritingModelDownloadError('')
     setAiDownloadProgress(0)
     try {
-      const aiModelPath = await api.downloadDefaultAiModel()
-      const settings = { ...library.settings, aiModelPath }
+      const models = await api.downloadDefaultAiModel()
+      const settings = { ...library.settings, aiModelPath: models.generalPath, aiWritingModelPath: models.writingPath, aiVoiceModelPath: models.voicePath, aiGeneralModelTier: 'medium' as const, aiWritingModelTier: 'medium' as const, aiVoiceModelTier: 'medium' as const }
       await api.updateSettings(settings)
       setLibrary((current) => current ? { ...current, settings } : current)
       setWordAiModelReady(true)
@@ -559,7 +591,12 @@ function App() {
     setActiveDocument((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleDocumentSave(next); return next })
   }
   const updateLecture = (partial: Partial<Pick<LectureDetail, 'content' | 'contentPlain' | 'title'>>) => {
-    setActiveLecture((current) => { if (!current) return current; const next = { ...current, ...partial }; scheduleLectureSave(next); return next })
+    const current = pendingLecture.current ?? activeLecture
+    if (!current) return
+    const next = { ...current, ...partial }
+    setActiveLecture((active) => active?.id === next.id ? next : active)
+    scheduleLectureSave(next)
+    if (partial.content !== undefined && partial.content !== current.content) scheduleLectureCheckpoint(next)
   }
   const archiveActiveClass = async () => {
     if (!activeCourse) return
@@ -601,7 +638,7 @@ function App() {
   const restoreDocument = async (id: string) => { if (!classId) return; await api.setDocumentDeleted(id, false); await loadClassContent(classId); setTrashedDocuments((current) => current.filter((document) => document.id !== id)); showToast('Paper restored.') }
   const restoreSet = async (id: string) => { if (!classId) return; await api.setSetDeleted(id, false); await loadClassContent(classId); setTrashedSets((current) => current.filter((set) => set.id !== id)); showToast('Flashcard set restored.') }
   const setSettings = (settings: AppSettings) => setLibrary((current) => current ? { ...current, settings } : current)
-  const updateEditorSettings = async (partial: Partial<Pick<AppSettings, 'spellcheck' | 'aiGrammar'>>) => {
+  const updateEditorSettings = async (partial: Partial<Pick<AppSettings, 'spellcheck' | 'aiGrammar' | 'lectureMicrophoneId'>>) => {
     if (!library) return
     const settings = { ...library.settings, ...partial }
     setSettings(settings)
@@ -732,7 +769,7 @@ function App() {
       <section className="app-content"><button className="sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <Plus size={17} /> : <Menu size={17} />}</button>
         {view.kind === 'home' && <HomeView semesters={library.semesters} classes={library.classes} recentDocuments={recentDocuments} userName={library.settings.userName} onNewSemester={() => setModal({ type: 'semester' })} onNewClass={() => openNewClass()} onOpenClass={(targetClassId) => navigate({ kind: 'class', classId: targetClassId, tab: 'overview' })} onOpenDocument={(document) => navigate({ kind: 'document', classId: document.classId, documentId: document.id })} />}
         {view.kind === 'calendar' && <CalendarView classes={library.classes} />}
-        {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} wordAiModelReady={wordAiModelReady} onModelsUpdated={() => void refreshWordAiModelStatus()} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} onStartWalkthrough={() => library.settings.walkthroughExampleClassId ? setModal({ type: 'restartWalkthrough' }) : void startWalkthrough()} />}
+        {view.kind === 'settings' && <SettingsView settings={library.settings} dataLocation={library.dataLocation} security={security} wordAiModelReady={wordAiModelReady} voiceAiModelReady={voiceAiModelReady} onModelsUpdated={() => void refreshWordAiModelStatus()} onSettingsChange={setSettings} onSecurityChange={setSecurity} onToast={showToast} onStartWalkthrough={() => library.settings.walkthroughExampleClassId ? setModal({ type: 'restartWalkthrough' }) : void startWalkthrough()} />}
         {view.kind === 'help' && <HelpView />}
         {view.kind === 'archive' && <ArchiveView semesters={archivedSemesters} classes={archivedClasses} onRestore={(course) => void restoreClass(course)} />}
         {view.kind === 'class' && activeCourse && <ClassView
@@ -753,7 +790,7 @@ function App() {
           onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} onToast={showToast}
         />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled && !writingModelDeferred} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listDocumentRevisions(activeDocument.id)} onReleaseAi={releaseAiModel} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
-        {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} /> : <LoadingView />)}
+        {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor key={`${activeLecture.id}:${activeLecture.revision}`} document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={Boolean(library.settings.aiModelPath) && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} lectureSuggestions={activeLectureNoteSuggestions.lectureId === activeLecture.id ? activeLectureNoteSuggestions.suggestions : []} sidePanel={<LectureRecordingPanel lectureId={activeLecture.id} aiEnabled={library.settings.aiEnabled} voiceModelReady={voiceAiModelReady} voiceModelPath={library.settings.aiVoiceModelPath} microphoneId={library.settings.lectureMicrophoneId} onMicrophoneChange={(lectureMicrophoneId) => void updateEditorSettings({ lectureMicrophoneId })} onNoteSuggestionsChange={updateLectureNoteSuggestions} onToast={showToast} />} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setIds: [activeSet.id], mode })} onCreateStudyWeb={() => { const summary = sets.find((item) => item.id === activeSet.id); if (summary) void createStudyWeb([summary]) }} onDuplicate={(title) => void duplicateActiveSet(title)} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
         {view.kind === 'study' && (activeStudySets.length ? <StudyView sets={activeStudySets} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'flashcards' })} onModeChange={(mode) => navigate({ kind: 'study', classId: view.classId, setIds: view.setIds, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
         {view.kind === 'studyWeb' && (activeStudyWeb && activeStudyWebSets.length ? <StudyWebView web={activeStudyWeb} sets={activeStudyWebSets} aiEnabled={library.settings.aiEnabled} autoPin={library.settings.studyWebAutoPin} groupHighlights={library.settings.studyWebGroupHighlights} onSettingsChange={updateStudyWebSettings} startInEditMode={manualStudyWebEditingId === activeStudyWeb.id} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'studyWeb' })} onRegenerate={() => { const selectedSets = sets.filter((item) => activeStudyWeb.flashcardSetIds.includes(item.id)); if (selectedSets.length) void createStudyWeb(selectedSets, activeStudyWeb.id) }} onStudyCard={(cardId) => navigate({ kind: 'study', classId: view.classId, setIds: activeStudyWeb.flashcardSetIds, mode: 'flashcards', cardIds: [cardId] })} /> : <LoadingView />)}

@@ -100,4 +100,10 @@ Line two`
     expect(paragraphWithHardBreak?.content?.map((child) => child.text ?? child.type).join('')).toContain('Line two')
   })
 
+  it('keeps AI lecture connections as editable callouts', () => {
+    const imported = importAiFormattedNote('## Variables\n\n> Lecture connection (10:22): The professor used a physics example to show why variables need clear names.\n\n- Use descriptive names.', 'C:/Downloads/lecture.md')
+    const callout = imported.document.content.find((node) => node.type === 'blockquote')
+    expect(callout?.content?.[0]?.content?.[0]?.text).toContain('Lecture connection (10:22)')
+  })
+
 })

@@ -97,6 +97,12 @@ impl Database {
             .unwrap_or_else(|| self.path.clone())
     }
 
+    /// Files that belong to a library but are too large to keep inside SQLite,
+    /// such as crash-safe lecture audio chunks, live beside the library.
+    pub fn app_data_dir(&self) -> PathBuf {
+        self.path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    }
+
     pub fn installer_model_path(&self) -> Option<String> {
         let marker = self.path.parent()?.join("installer.model-path");
         fs::read_to_string(marker).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
@@ -575,7 +581,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 13 {
+        if version >= 20 {
             return Ok(());
         }
         if version < 1 {
@@ -771,6 +777,143 @@ impl Database {
             }
             connection.execute_batch("PRAGMA user_version = 14;").map_err(|error| error.to_string())?;
         }
+        if version < 15 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS lecture_recordings (
+                    lecture_id TEXT PRIMARY KEY NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    state TEXT NOT NULL DEFAULT 'ready',
+                    source_kind TEXT NOT NULL DEFAULT 'microphone',
+                    audio_path TEXT,
+                    raw_audio_path TEXT,
+                    sample_rate INTEGER NOT NULL DEFAULT 16000,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    captured_ms INTEGER NOT NULL DEFAULT 0,
+                    transcribed_ms INTEGER NOT NULL DEFAULT 0,
+                    pending_chunks INTEGER NOT NULL DEFAULT 0,
+                    status_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT,
+                    stopped_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS lecture_recording_chunks (
+                    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    byte_offset INTEGER NOT NULL,
+                    byte_length INTEGER NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'queued',
+                    PRIMARY KEY (lecture_id, chunk_index)
+                );
+                CREATE TABLE IF NOT EXISTS lecture_transcript_segments (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    speaker TEXT NOT NULL DEFAULT 'Speaker',
+                    text TEXT NOT NULL,
+                    is_final INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS lecture_analyses (
+                    lecture_id TEXT PRIMARY KEY NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    overview TEXT NOT NULL DEFAULT '',
+                    key_points_json TEXT NOT NULL DEFAULT '[]',
+                    concepts_json TEXT NOT NULL DEFAULT '[]',
+                    questions_json TEXT NOT NULL DEFAULT '[]',
+                    next_steps_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_lecture_transcript_segments_lecture ON lecture_transcript_segments(lecture_id, start_ms);
+                CREATE INDEX IF NOT EXISTS idx_lecture_recording_chunks_state ON lecture_recording_chunks(lecture_id, state, chunk_index);
+                PRAGMA user_version = 15;
+            "#).map_err(|error| error.to_string())?;
+        }
+        if version < 16 {
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "raw_transcript") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN raw_transcript TEXT NOT NULL DEFAULT '';").map_err(|error| error.to_string())?;
+            }
+            if !columns.iter().any(|column| column == "cleaned_transcript") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN cleaned_transcript TEXT NOT NULL DEFAULT '';").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 16;").map_err(|error| error.to_string())?;
+        }
+        if version < 17 {
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "detailed_notes") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN detailed_notes TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 17;").map_err(|error| error.to_string())?;
+        }
+        if version < 18 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS lecture_note_checkpoints (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    timestamp_ms INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    content_plain TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_lecture_note_checkpoints_lecture ON lecture_note_checkpoints(lecture_id, timestamp_ms);
+            "#).map_err(|error| error.to_string())?;
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "enriched_notes_markdown") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN enriched_notes_markdown TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 18;").map_err(|error| error.to_string())?;
+        }
+        if version < 19 {
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "note_suggestions_json") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN note_suggestions_json TEXT NOT NULL DEFAULT '[]'; ").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 19;").map_err(|error| error.to_string())?;
+        }
+        // Some development builds marked the schema as version 19 before the
+        // matching lecture-analysis column had reached disk. Repair every
+        // expected analysis field in one idempotent migration instead of
+        // leaving an otherwise healthy existing library unable to analyze.
+        if version < 20 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS lecture_note_checkpoints (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+                    timestamp_ms INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    content_plain TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_lecture_note_checkpoints_lecture ON lecture_note_checkpoints(lecture_id, timestamp_ms);
+            "#).map_err(|error| error.to_string())?;
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "raw_transcript") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN raw_transcript TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            if !columns.iter().any(|column| column == "cleaned_transcript") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN cleaned_transcript TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            if !columns.iter().any(|column| column == "detailed_notes") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN detailed_notes TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            if !columns.iter().any(|column| column == "enriched_notes_markdown") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN enriched_notes_markdown TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
+            }
+            if !columns.iter().any(|column| column == "note_suggestions_json") {
+                connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN note_suggestions_json TEXT NOT NULL DEFAULT '[]'; ").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 20;").map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }
@@ -965,7 +1108,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 14);
+        assert_eq!(version, 20);
         let set_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
             statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
@@ -976,6 +1119,11 @@ mod tests {
             statement.query_map([], |row| row.get::<_, String>(1)).expect("study web group column rows").collect::<Result<Vec<_>, _>>().expect("study web group column names")
         };
         assert!(group_columns.contains(&"color".to_string()));
+        let analysis_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").expect("lecture analysis columns");
+            statement.query_map([], |row| row.get::<_, String>(1)).expect("lecture analysis column rows").collect::<Result<Vec<_>, _>>().expect("lecture analysis column names")
+        };
+        assert!(analysis_columns.contains(&"note_suggestions_json".to_string()));
         for table in ["document_revisions", "lecture_revisions"] {
             let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
@@ -994,6 +1142,45 @@ mod tests {
     }
 
     #[test]
+    fn repairs_a_version_19_lecture_analysis_table_missing_suggestions() {
+        let directory = std::env::temp_dir().join(format!("soflo-lecture-analysis-repair-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("soflo.sqlite3");
+        let database = Database::new(path.clone()).expect("create database");
+        let connection = database.open().expect("open database");
+        connection.execute_batch(r#"
+            DROP TABLE lecture_analyses;
+            CREATE TABLE lecture_analyses (
+                lecture_id TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ready',
+                overview TEXT NOT NULL DEFAULT '',
+                key_points_json TEXT NOT NULL DEFAULT '[]',
+                concepts_json TEXT NOT NULL DEFAULT '[]',
+                questions_json TEXT NOT NULL DEFAULT '[]',
+                next_steps_json TEXT NOT NULL DEFAULT '[]',
+                raw_transcript TEXT NOT NULL DEFAULT '',
+                cleaned_transcript TEXT NOT NULL DEFAULT '',
+                detailed_notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            PRAGMA user_version = 19;
+        "#).expect("simulate incomplete version 19 schema");
+        drop(connection);
+        drop(database);
+        let repaired = Database::new(path).expect("repair database");
+        let connection = repaired.open().expect("open repaired database");
+        let columns = connection.prepare("PRAGMA table_info(lecture_analyses)").expect("analysis columns")
+            .query_map([], |row| row.get::<_, String>(1)).expect("analysis column rows")
+            .collect::<Result<Vec<_>, _>>().expect("analysis column names");
+        assert!(columns.contains(&"note_suggestions_json".to_string()));
+        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        assert_eq!(version, 20);
+        drop(connection);
+        drop(repaired);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn upgrades_existing_study_web_schema_to_multi_set_sources() {
         let directory = std::env::temp_dir().join(format!("soflo-study-web-upgrade-{}", uuid::Uuid::new_v4()));
         let path = directory.join("soflo.sqlite3");
@@ -1006,7 +1193,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 14);
+        assert_eq!(version, 20);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);

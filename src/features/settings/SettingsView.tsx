@@ -3,6 +3,7 @@ import { open, save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { useState, type ReactNode } from 'react'
 import { api } from '../../lib/api'
+import { LocalModelManager } from './LocalModelManager'
 import type { AppSettings, SecurityStatus } from '../../lib/types'
 
 interface SettingsViewProps {
@@ -10,6 +11,7 @@ interface SettingsViewProps {
   dataLocation: string
   security: SecurityStatus | null
   wordAiModelReady: boolean
+  voiceAiModelReady: boolean
   onModelsUpdated: () => void
   onSettingsChange: (settings: AppSettings) => void
   onSecurityChange: (security: SecurityStatus) => void
@@ -22,8 +24,9 @@ type BusyAction = 'export' | 'import' | 'wipe' | null
 const MODEL_INFORMATION_URL = 'https://huggingface.co/Qwen/Qwen3-4B-GGUF'
 const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
 const needsModelUpgrade = (path: string) => path.trim().toLocaleLowerCase().endsWith(LEGACY_DEFAULT_AI_MODEL)
+const modelDownloadError = (error: unknown) => typeof error === 'string' && error.trim() ? error : error instanceof Error && error.message ? error.message : 'The local AI model could not be downloaded.'
 
-export function SettingsView({ settings, dataLocation, security, wordAiModelReady, onModelsUpdated, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
+export function SettingsView({ settings, dataLocation, security, wordAiModelReady, voiceAiModelReady, onModelsUpdated, onSettingsChange, onSecurityChange, onToast, onStartWalkthrough }: SettingsViewProps) {
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
   const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
@@ -33,9 +36,9 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
   const [aiInfoOpen, setAiInfoOpen] = useState(false)
   const [modelManagerOpen, setModelManagerOpen] = useState(false)
   const modelUpgradeNeeded = needsModelUpgrade(settings.aiModelPath)
-  const modelPackageUpdateNeeded = Boolean(settings.aiModelPath) && !wordAiModelReady
+  const modelPackageUpdateNeeded = Boolean(settings.aiModelPath) && (!wordAiModelReady || !voiceAiModelReady)
   const modelUpdateNeeded = modelUpgradeNeeded || modelPackageUpdateNeeded
-  const localModelsInstalled = Boolean(settings.aiModelPath) || wordAiModelReady
+  const localModelsInstalled = Boolean(settings.aiModelPath) || wordAiModelReady || voiceAiModelReady
 
   const update = async (partial: Partial<AppSettings>) => {
     const next = { ...settings, ...partial, ...(partial.aiEnabled === false ? { aiGrammar: false, askForAiUse: false } : {}) }
@@ -89,11 +92,11 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
   const downloadAiModel = async () => {
     setDownloadingModel(true)
     try {
-      const aiModelPath = await api.downloadDefaultAiModel()
-      await update({ aiModelPath })
+      const models = await api.downloadDefaultAiModel()
+      await update({ aiModelPath: models.generalPath, aiWritingModelPath: models.writingPath, aiVoiceModelPath: models.voicePath, aiGeneralModelTier: 'medium', aiWritingModelTier: 'medium', aiVoiceModelTier: 'medium' })
       onModelsUpdated()
     } catch (error) {
-      onToast(error instanceof Error ? error.message : 'The local AI model could not be downloaded.', 'error')
+      onToast(modelDownloadError(error), 'error')
     } finally {
       setDownloadingModel(false)
     }
@@ -150,8 +153,8 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
       <SettingRow title="Use local AI" detail="When off, SoFlo hides AI actions and imports documents with the standard local converter."><Toggle checked={settings.aiEnabled} onChange={(aiEnabled) => void update({ aiEnabled })} /></SettingRow>
       <SettingRow title="AI spelling & grammar" detail="Passively check basics with SoFlo's upgraded writing model, then run a deeper formal-writing review on demand. Enabled by default when AI is on."><Toggle checked={settings.aiEnabled && settings.aiGrammar} disabled={!settings.aiEnabled} onChange={(aiGrammar) => void update({ aiGrammar })} /></SettingRow>
       <SettingRow title="Ask for AI use" detail="Depending on the mode you select, SoFlo automatically loads that AI and keeps it active for the remainder of the app session."><Toggle checked={settings.aiEnabled && settings.askForAiUse} disabled={!settings.aiEnabled} onChange={(askForAiUse) => void update({ askForAiUse })} /></SettingRow>
-      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's general and writing-model package." : modelPackageUpdateNeeded ? "An AI model update is available: install SoFlo's 1.7B writing model." : localModelsInstalled ? "Both local models are ready. Manage their performance level or remove downloaded files." : "Download SoFlo's 4B general model and 1.7B writing model now, or let the first AI action download them."}>{!settings.aiEnabled && localModelsInstalled ? <button className="button button-danger button-small" onClick={() => setDeleteModelsOpen(true)}>Delete models</button> : <button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!localModelsInstalled || modelUpdateNeeded ? downloadAiModel() : setModelManagerOpen(true))}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : localModelsInstalled ? 'Manage models' : 'Download models'}</button>}</SettingRow>
-      {settings.aiEnabled && (!settings.aiModelPath || modelUpdateNeeded) && <p className="ai-model-note">{modelPackageUpdateNeeded && !modelUpgradeNeeded ? 'A local writing model is ready to add to your current AI setup.' : 'The general model and writing model are not on this PC yet. Download them here, or wait until the first AI action.'}</p>}
+      <SettingRow title="Local AI models" detail={modelUpgradeNeeded ? "An earlier 3B default model is installed. Update SoFlo's AI package." : modelPackageUpdateNeeded ? "An AI model update is available: install the writing and Voice Transcription companions." : localModelsInstalled ? "General AI, Writing AI, and Voice Transcription are ready. Manage their performance level or remove downloaded files." : "Download SoFlo's General AI, Writing AI, and Voice Transcription models now, or let the first AI action download them."}>{!settings.aiEnabled && localModelsInstalled ? <button className="button button-danger button-small" onClick={() => setDeleteModelsOpen(true)}>Delete models</button> : <button className="button button-quiet button-small" disabled={!settings.aiEnabled || downloadingModel} onClick={() => void (!localModelsInstalled || modelUpdateNeeded ? downloadAiModel() : setModelManagerOpen(true))}>{downloadingModel ? 'Downloading...' : modelUpdateNeeded ? 'Update models' : localModelsInstalled ? 'Manage models' : 'Download models'}</button>}</SettingRow>
+      {settings.aiEnabled && (!settings.aiModelPath || modelUpdateNeeded) && <p className="ai-model-note">{modelPackageUpdateNeeded && !modelUpgradeNeeded ? 'The Writing AI and Voice Transcription companions are ready to add to your current setup.' : 'The General AI, Writing AI, and Voice Transcription models are not on this PC yet. Download them here, or wait until the first AI action.'}</p>}
     </section>
 
     <section className="settings-section about-section">
@@ -172,22 +175,24 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     {deleteModelsOpen && <ConfirmDialog eyebrow="LOCAL AI" title="Delete local AI models?" copy="This removes SoFlo's downloaded local models from this PC. AI actions stay disabled until you turn AI back on and download models again." confirmLabel="Delete models" onClose={() => setDeleteModelsOpen(false)} onConfirm={() => void deleteAiModels()} />}
     {securityDialog && <SecurityDialog security={security} type={securityDialog.type} remove={securityDialog.remove} onClose={() => setSecurityDialog(null)} onUpdated={(next) => { onSecurityChange(next); setSecurityDialog(null); onToast(next.configured ? 'Library security updated.' : 'Library encryption removed.') }} />}
     {aiInfoOpen && <AiInfoDialog modelPath={settings.aiModelPath} onClose={() => setAiInfoOpen(false)} />}
-    {modelManagerOpen && <ModelManagerDialog settings={settings} onClose={() => setModelManagerOpen(false)} onSettingsChange={onSettingsChange} onModelsUpdated={onModelsUpdated} onToast={onToast} />}
+    {false && <ModelManagerDialog settings={settings} onClose={() => setModelManagerOpen(false)} onSettingsChange={onSettingsChange} onModelsUpdated={onModelsUpdated} onToast={onToast} />}
+    {modelManagerOpen && <LocalModelManager settings={settings} onClose={() => setModelManagerOpen(false)} onSettingsChange={onSettingsChange} onModelsUpdated={onModelsUpdated} onToast={onToast} />}
   </main>
 }
 
 type ModelTier = 'low' | 'medium' | 'high'
-type ModelRole = 'general' | 'writing'
+type ModelRole = 'general' | 'writing' | 'voice'
 const modelTiers: { value: ModelTier; label: string }[] = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
 ]
-function expectedModelMemory(role: ModelRole, tier: ModelTier) { return role === 'general' ? ({ low: 'about 2–4 GB RAM', medium: 'about 5–8 GB RAM', high: 'about 9–14 GB RAM' }[tier]) : ({ low: 'about 1–2 GB RAM', medium: 'about 3–5 GB RAM', high: 'about 5–8 GB RAM' }[tier]) }
+function expectedModelMemory(role: ModelRole, tier: ModelTier) { if (role === 'general') return ({ low: 'about 2–4 GB RAM', medium: 'about 5–8 GB RAM', high: 'about 9–14 GB RAM' }[tier]); if (role === 'writing') return ({ low: 'about 1–2 GB RAM', medium: 'about 3–5 GB RAM', high: 'about 5–8 GB RAM' }[tier]); return ({ low: 'about 1 GB RAM', medium: 'about 2–3 GB RAM', high: 'about 3–5 GB RAM' }[tier]) }
 
 function ModelManagerDialog({ settings, onClose, onSettingsChange, onModelsUpdated, onToast }: { settings: AppSettings; onClose: () => void; onSettingsChange: (settings: AppSettings) => void; onModelsUpdated: () => void; onToast: (message: string, type?: 'success' | 'error') => void }) {
   const [general, setGeneral] = useState<ModelTier>(settings.aiGeneralModelTier || 'medium')
   const [writing, setWriting] = useState<ModelTier>(settings.aiWritingModelTier || 'medium')
+  const [voice] = useState<ModelTier>(settings.aiVoiceModelTier || 'medium')
   const [working, setWorking] = useState<'apply' | 'cleanup' | null>(null)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const applyModels = async () => {
@@ -195,7 +200,8 @@ function ModelManagerDialog({ settings, onClose, onSettingsChange, onModelsUpdat
     try {
       const aiModelPath = await api.installAiModel('general', general)
       const aiWritingModelPath = await api.installAiModel('writing', writing)
-      const next = { ...settings, aiModelPath, aiWritingModelPath, aiGeneralModelTier: general, aiWritingModelTier: writing }
+      const aiVoiceModelPath = await api.installAiModel('voice', voice)
+      const next = { ...settings, aiModelPath, aiWritingModelPath, aiVoiceModelPath, aiGeneralModelTier: general, aiWritingModelTier: writing, aiVoiceModelTier: voice }
       await api.updateSettings(next)
       onSettingsChange(next)
       onModelsUpdated()
@@ -204,9 +210,9 @@ function ModelManagerDialog({ settings, onClose, onSettingsChange, onModelsUpdat
   }
   const deleteUnused = async () => {
     setWorking('cleanup')
-    try { await api.deleteUnusedAiModels(settings.aiModelPath, settings.aiWritingModelPath); onToast('Unused local models were removed.') } catch (error) { onToast(error instanceof Error ? error.message : 'Unused models could not be removed.', 'error') } finally { setWorking(null) }
+    try { await api.deleteUnusedAiModels(settings.aiModelPath, settings.aiWritingModelPath, settings.aiVoiceModelPath); onToast('Unused local models were removed.') } catch (error) { onToast(error instanceof Error ? error.message : 'Unused models could not be removed.', 'error') } finally { setWorking(null) }
   }
-  const selected = (role: ModelRole) => role === 'general' ? general : writing
+  const selected = (role: ModelRole) => role === 'general' ? general : role === 'writing' ? writing : voice
   return <>
     <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog model-manager-dialog" role="dialog" aria-modal="true" aria-label="Manage local AI models"><header><div><p className="eyebrow">LOCAL AI MODELS</p><h2>Manage models</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content model-manager-content"><p>Choose each AI model separately. Medium is SoFlo’s default balanced setup.</p>{(['general', 'writing'] as ModelRole[]).map((role) => { const tier = selected(role); return <section className="model-manager-role" key={role}><div><strong>{role === 'general' ? 'General AI' : 'Writing AI'}</strong><span>{role === 'general' ? 'Imports, flashcards, reviews, and study webs' : 'Fast grammar checks, word reference, and thesaurus'}</span></div><div className="model-tier-slider"><input aria-label={`${role} model performance`} type="range" min="0" max="2" step="1" list={`${role}-model-tiers`} value={modelTiers.findIndex((item) => item.value === tier)} onChange={(event) => { const next = modelTiers[Number(event.target.value)].value; role === 'general' ? setGeneral(next) : setWriting(next) }} /><datalist id={`${role}-model-tiers`}>{modelTiers.map((item) => <option value={modelTiers.findIndex((candidate) => candidate.value === item.value)} key={item.value} />)}</datalist><div className="model-tier-labels" aria-hidden="true">{modelTiers.map((item) => <span className={tier === item.value ? 'active' : ''} key={item.value}>{item.label}</span>)}</div></div><p className="model-tier-detail">Expected total memory use: {expectedModelMemory(role, tier)}.</p></section>})}</div><footer><button className="button button-danger" disabled={working !== null} onClick={() => setDeleteAllOpen(true)}>Delete all models</button><button className="button button-quiet" disabled={working !== null} onClick={() => void deleteUnused()}>{working === 'cleanup' ? 'Removing...' : 'Delete unused models'}</button><button className="button button-primary" disabled={working !== null} onClick={() => void applyModels()}>{working === 'apply' ? 'Applying...' : 'Apply'}</button></footer></section></div>
     {deleteAllOpen && <ConfirmDialog eyebrow="LOCAL AI" title="Delete every local AI model?" copy="This removes all downloaded SoFlo AI models from this PC. You can download a new package later." confirmLabel="Delete all models" onClose={() => setDeleteAllOpen(false)} onConfirm={() => void api.deleteLocalAiModels().then(() => { const next = { ...settings, aiModelPath: '', aiWritingModelPath: '', aiGrammar: false, aiGeneralModelTier: 'medium' as const, aiWritingModelTier: 'medium' as const }; onSettingsChange(next); onModelsUpdated(); setDeleteAllOpen(false); onClose(); onToast('SoFlo local AI models were removed from this PC.') }).catch(() => onToast('SoFlo could not remove its local AI models.', 'error'))} />}
@@ -247,9 +253,9 @@ function AiInfoDialog({ modelPath, onClose }: { modelPath: string; onClose: () =
         <header><div><p className="eyebrow">LOCAL ARTIFICIAL INTELLIGENCE</p><h2>About SoFlo AI</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header>
         <div className="paper-dialog-content">
           <div className="ai-info-copy"><strong>Runs locally</strong><p>SoFlo runs its AI prompts through llama.cpp on this computer at 127.0.0.1. Regular AI actions do not send your papers or study material to SoFlo servers or Hugging Face for inference.</p></div>
-          <div className="ai-info-copy"><strong>Two local AI models</strong><p>The general model handles imports, flashcards, AI Review, and Research & Grade. A separate writing model handles fast custom spelling checks, definitions, and formal related words. Both models stay on this computer, and Manage models lets you choose Low, Medium, or High for each.</p></div>
+          <div className="ai-info-copy"><strong>Three local AI models</strong><p>The general model handles imports, flashcards, AI Review, Research & Grade, and lecture analysis. The writing model handles custom spelling checks, definitions, and formal related words. Voice Transcription turns live and imported lecture audio into timestamped text. All three stay on this computer, and Manage models lets you choose Low, Medium, or High for each.</p></div>
           <div className="ai-info-copy"><strong>Online research is different</strong><p>AI Research & Grade first creates a short topic query locally, then sends that query — not your paper — to Crossref for scholarly metadata. Open and evaluate each suggested source before citing it.</p></div>
-          <div className="ai-info-copy"><strong>Model download</strong><p>A fresh default download installs both models together. An update keeps any general model you chose and adds the writing companion. Downloads need an internet connection; once installed, local inference stays on your computer.</p></div>
+          <div className="ai-info-copy"><strong>Model download</strong><p>A fresh default download installs all three models together. An update keeps any general model you chose and adds the Writing AI and Voice Transcription companions. Downloads need an internet connection; once installed, local inference stays on your computer.</p></div>
           <div className="ai-info-copy"><strong>Disable AI</strong><p>You can disable AI at any time above. Papers, lectures, manual flashcards, and study modes continue to work.</p></div>
           <button type="button" className="text-button ai-model-link" onClick={() => setConfirmModelLinkOpen(true)}>Model information</button>
           <button className="text-button ai-details-toggle" onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? 'Hide technical details' : 'Technical details'}</button>

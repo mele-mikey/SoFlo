@@ -221,7 +221,9 @@ export function importAiFormattedNote(markdown: string, path: string, sourceText
     const heading = line.match(/^(#{1,6})\s+(.+)$/)
     const bullet = line.match(/^[-*+]\s+(.+)$/)
     const ordered = line.match(/^\d+[.)]\s+(.+)$/)
+    const quote = line.match(/^>\s+(.+)$/)
     if (heading) { content.push({ type: 'heading', attrs: { level: Math.min(3, heading[1].length) }, content: textNode(heading[2]) }); index += 1; continue }
+    if (quote) { content.push({ type: 'blockquote', content: [paragraph(quote[1])] }); index += 1; continue }
     if (isTableRow(rawLine) && isTableSeparator(lines[index + 1] ?? '')) {
       const headers = rowValues(rawLine)
       const rows: string[][] = []
@@ -241,7 +243,7 @@ export function importAiFormattedNote(markdown: string, path: string, sourceText
         const match = candidate.match(matcher)
         if (match) { flushItem(); itemLines.push(match[1]); index += 1; continue }
         if (!candidate) { index += 1; break }
-        if (candidate.match(/^(#{1,6})\s+/) || candidate.match(/^[-*+]\s+(.+)$/) || candidate.match(/^\d+[.)]\s+(.+)$/) || isTableRow(lines[index])) break
+        if (candidate.match(/^(#{1,6})\s+/) || candidate.match(/^>\s+(.+)$/) || candidate.match(/^[-*+]\s+(.+)$/) || candidate.match(/^\d+[.)]\s+(.+)$/) || isTableRow(lines[index])) break
         itemLines.push(candidate); index += 1
       }
       flushItem()
@@ -253,7 +255,7 @@ export function importAiFormattedNote(markdown: string, path: string, sourceText
       const candidateRaw = lines[index]
       const candidate = candidateRaw.trim()
       if (!candidate) break
-      if (parts.length && (candidate.match(/^(#{1,6})\s+/) || candidate.match(/^[-*+]\s+(.+)$/) || candidate.match(/^\d+[.)]\s+(.+)$/) || isTableRow(candidateRaw))) break
+      if (parts.length && (candidate.match(/^(#{1,6})\s+/) || candidate.match(/^>\s+(.+)$/) || candidate.match(/^[-*+]\s+(.+)$/) || candidate.match(/^\d+[.)]\s+(.+)$/) || isTableRow(candidateRaw))) break
       const breakAfter = /\s{2}$|<br\s*\/?>\s*$/i.test(candidateRaw)
       parts.push({ text: candidate.replace(/<br\s*\/?>\s*$/i, ''), breakAfter })
       index += 1

@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
-  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureDetail, LectureSummary, RevisionHistoryEntry,
+  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureAnalysis, LectureDetail, LectureRecording, LectureSummary, LectureTranscriptSegment, RevisionHistoryEntry,
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, StudyWebDetail, StudyWebRelationship, StudyWebSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'create_empty_study_web', 'import_study_web_json', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'update_study_web_group_membership', 'create_study_web_group', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'delete_local_ai_models', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'start_lecture_recording', 'append_lecture_audio_chunk', 'import_lecture_audio', 'finish_lecture_recording', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'create_empty_study_web', 'import_study_web_json', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'update_study_web_group_membership', 'create_study_web_group', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'delete_local_ai_models', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -40,8 +40,19 @@ export const api = {
   restoreLectureRevision: (id: string, revisionId: string) => call<LectureDetail>('restore_lecture_revision', { id, revisionId }),
   getLecture: (id: string) => call<LectureDetail>('get_lecture', { id }),
   createLecture: (input: { classId: string; courseCode: string; courseName: string; lectureDate: string; scheduledStart: string | null; scheduledEnd: string | null; professorSnapshot: string | null; title: string }) => call<LectureDetail>('create_lecture', { input }),
-  saveLecture: (input: Pick<LectureDetail, 'id' | 'title' | 'content' | 'contentPlain'>) => call<LectureDetail>('save_lecture', { input }),
+  saveLecture: (input: Pick<LectureDetail, 'id' | 'title' | 'content' | 'contentPlain'> & { forceCheckpoint?: boolean }) => call<LectureDetail>('save_lecture', { input }),
+  recordLectureNoteCheckpoint: (input: { lectureId: string; content: string; contentPlain: string }) => call<void>('record_lecture_note_checkpoint', { input }),
   deleteLecture: (id: string) => call<void>('delete_lecture', { id }),
+  getLectureRecording: (lectureId: string) => call<LectureRecording>('get_lecture_recording', { lectureId }),
+  listLectureTranscriptSegments: (lectureId: string) => call<LectureTranscriptSegment[]>('list_lecture_transcript_segments', { lectureId }),
+  getLectureAnalysis: (lectureId: string) => call<LectureAnalysis | null>('get_lecture_analysis', { lectureId }),
+  retryLectureAnalysis: (lectureId: string) => call<void>('retry_lecture_analysis', { lectureId }),
+  startLectureRecording: (lectureId: string) => call<LectureRecording>('start_lecture_recording', { lectureId }),
+  appendLectureAudioChunk: (lectureId: string, pcmBase64: string, durationMs: number) => call<number>('append_lecture_audio_chunk', { lectureId, pcmBase64, durationMs }),
+  importLectureAudio: (lectureId: string, sourcePath: string, modelPath: string) => call<void>('import_lecture_audio', { lectureId, sourcePath, modelPath }),
+  queueLectureTranscription: (lectureId: string, chunkIndex: number, modelPath: string) => call<void>('queue_lecture_transcription', { lectureId, chunkIndex, modelPath }),
+  finishLectureRecording: (lectureId: string, modelPath: string) => call<void>('finish_lecture_recording', { lectureId, modelPath }),
+  recoverInterruptedLectureRecordings: () => call<LectureRecording[]>('recover_interrupted_lecture_recordings'),
   setDocumentSyllabus: (id: string) => call<DocumentDetail>('set_document_syllabus', { id }),
   setDocumentDeleted: (id: string, deleted: boolean) => call<void>('set_document_deleted', { id, deleted }),
   duplicateDocument: (id: string, title?: string) => call<DocumentDetail>('duplicate_document', { id, title }),
@@ -108,11 +119,12 @@ export const api = {
   defineWord: (modelPath: string, word: string, paperContext: string) => call<string>('define_word', { modelPath, word, paperContext }),
   aiThesaurus: (modelPath: string, word: string, paperContext: string) => call<string>('ai_thesaurus', { modelPath, word, paperContext }),
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
+  voiceAiModelReady: () => call<boolean>('voice_ai_model_ready'),
   prepareAiForSession: (generalModelPath: string, writingModelPath: string, mode: 'writing' | 'study') => call<void>('prepare_ai_for_session', { generalModelPath, writingModelPath, mode }),
   stopAiServer: () => call<void>('stop_ai_server'),
-  downloadDefaultAiModel: () => call<string>('download_default_ai_model'),
-  installAiModel: (role: 'general' | 'writing', tier: 'low' | 'medium' | 'high') => call<string>('install_ai_model', { role, tier }),
-  getAiModelInventory: () => call<{ general: Record<'low' | 'medium' | 'high', boolean>; writing: Record<'low' | 'medium' | 'high', boolean> }>('get_ai_model_inventory'),
-  deleteUnusedAiModels: (generalPath: string, writingPath: string) => call<void>('delete_unused_ai_models', { generalPath, writingPath }),
+  downloadDefaultAiModel: () => call<{ generalPath: string; writingPath: string; voicePath: string }>('download_default_ai_model'),
+  installAiModel: (role: 'general' | 'writing' | 'voice', tier: 'low' | 'medium' | 'high') => call<string>('install_ai_model', { role, tier }),
+  getAiModelInventory: () => call<{ general: Record<'low' | 'medium' | 'high', boolean>; writing: Record<'low' | 'medium' | 'high', boolean>; voice: Record<'low' | 'medium' | 'high', boolean> }>('get_ai_model_inventory'),
+  deleteUnusedAiModels: (generalPath: string, writingPath: string, voicePath = '') => call<void>('delete_unused_ai_models', { generalPath, writingPath, voicePath }),
   deleteLocalAiModels: () => call<void>('delete_local_ai_models'),
 }

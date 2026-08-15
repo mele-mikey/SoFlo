@@ -106,6 +106,58 @@ export interface Flashcard {
   updatedAt: string
 }
 
+export interface LectureRecording {
+  lectureId: string
+  state: 'ready' | 'recording' | 'queued' | 'transcribing' | 'finalizing' | 'analyzing' | 'complete' | 'interrupted' | 'transcription_failed' | string
+  sourceKind: 'microphone' | 'import' | string
+  audioPath: string | null
+  rawAudioPath: string | null
+  durationMs: number
+  capturedMs: number
+  transcribedMs: number
+  pendingChunks: number
+  statusMessage: string
+  startedAt: string | null
+  stoppedAt: string | null
+  updatedAt: string
+}
+
+export interface LectureTranscriptSegment {
+  id: string
+  lectureId: string
+  chunkIndex: number
+  startMs: number
+  endMs: number
+  speaker: string
+  text: string
+  isFinal: boolean
+  createdAt: string
+}
+
+export interface LectureAnalysis {
+  lectureId: string
+  status: 'ready' | 'analyzing' | 'complete' | string
+  overview: string
+  keyPoints: string[]
+  concepts: string[]
+  questions: string[]
+  nextSteps: string[]
+  rawTranscript: string
+  cleanedTranscript: string
+  detailedNotes: string
+  noteSuggestions: LectureNoteSuggestion[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface LectureNoteSuggestion {
+  original: string
+  replacement: string
+  reason: string
+  timestamp: string
+  kind: 'bridge' | 'clarify' | string
+}
+
 export interface FlashcardSetDetail {
   id: string
   classId: string
@@ -231,8 +283,11 @@ export interface AppSettings {
   askForAiUse: boolean
   aiModelPath: string
   aiWritingModelPath: string
+  aiVoiceModelPath: string
   aiGeneralModelTier: 'low' | 'medium' | 'high'
   aiWritingModelTier: 'low' | 'medium' | 'high'
+  aiVoiceModelTier: 'low' | 'medium' | 'high'
+  lectureMicrophoneId: string
   studyWebAutoPin: boolean
   studyWebGroupHighlights: boolean
   defaultQuestionTypes: string[]

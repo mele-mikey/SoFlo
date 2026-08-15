@@ -123,6 +123,66 @@ pub struct LectureDetail {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct LectureRecording {
+    pub lecture_id: String,
+    pub state: String,
+    pub source_kind: String,
+    pub audio_path: Option<String>,
+    pub raw_audio_path: Option<String>,
+    pub duration_ms: i64,
+    pub captured_ms: i64,
+    pub transcribed_ms: i64,
+    pub pending_chunks: i32,
+    pub status_message: String,
+    pub started_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LectureTranscriptSegment {
+    pub id: String,
+    pub lecture_id: String,
+    pub chunk_index: i32,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub speaker: String,
+    pub text: String,
+    pub is_final: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LectureAnalysis {
+    pub lecture_id: String,
+    pub status: String,
+    pub overview: String,
+    pub key_points: Vec<String>,
+    pub concepts: Vec<String>,
+    pub questions: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub raw_transcript: String,
+    pub cleaned_transcript: String,
+    pub detailed_notes: String,
+    pub note_suggestions: Vec<LectureNoteSuggestion>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LectureNoteSuggestion {
+    pub original: String,
+    pub replacement: String,
+    pub reason: String,
+    pub timestamp: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct FlashcardSetSummary {
     pub id: String,
     pub class_id: String,
@@ -280,6 +340,12 @@ pub struct AppSettings {
     #[serde(default = "default_ai_model_tier")]
     pub ai_writing_model_tier: String,
     #[serde(default)]
+    pub ai_voice_model_path: String,
+    #[serde(default = "default_ai_model_tier")]
+    pub ai_voice_model_tier: String,
+    #[serde(default)]
+    pub lecture_microphone_id: String,
+    #[serde(default)]
     pub study_web_auto_pin: bool,
     #[serde(default)]
     pub study_web_group_highlights: bool,
@@ -329,6 +395,9 @@ impl Default for AppSettings {
             ai_writing_model_path: String::new(),
             ai_general_model_tier: default_ai_model_tier(),
             ai_writing_model_tier: default_ai_model_tier(),
+            ai_voice_model_path: String::new(),
+            ai_voice_model_tier: default_ai_model_tier(),
+            lecture_microphone_id: String::new(),
             study_web_auto_pin: false,
             study_web_group_highlights: false,
             default_question_types: vec![
@@ -456,6 +525,16 @@ pub struct CreateLectureInput {
 pub struct SaveLectureInput {
     pub id: String,
     pub title: String,
+    pub content: String,
+    pub content_plain: String,
+    #[serde(default)]
+    pub force_checkpoint: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordLectureNoteCheckpointInput {
+    pub lecture_id: String,
     pub content: String,
     pub content_plain: String,
 }

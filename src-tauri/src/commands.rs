@@ -1,16 +1,27 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use symphonia::{
+    core::{
+        codecs::audio::AudioDecoderOptions,
+        errors::Error as SymphoniaError,
+        formats::{probe::Hint, FormatOptions, TrackType},
+        io::MediaSourceStream,
+        meta::MetadataOptions,
+    },
+    default::{get_codecs, get_probe},
+};
 use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -154,12 +165,25 @@ const GENERAL_LOW_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
 const GENERAL_HIGH_MODEL_NAME: &str = "Qwen3-8B-Q4_K_M.gguf";
 const WRITING_LOW_MODEL_NAME: &str = "Qwen3-0.6B-Q4_K_M.gguf";
 const WRITING_HIGH_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+const VOICE_LOW_MODEL_NAME: &str = "ggml-base.en.bin";
+const VOICE_MEDIUM_MODEL_NAME: &str = "ggml-small.en.bin";
+const VOICE_HIGH_MODEL_NAME: &str = "ggml-medium.en.bin";
+const VOICE_SAMPLE_RATE: i64 = 16_000;
+const VOICE_CHUNK_TARGET_MS: i64 = 20_000;
 
 #[derive(Clone, Copy)]
 struct ManagedAiModel {
     filename: &'static str,
     url: &'static str,
     minimum_bytes: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultAiModelPaths {
+    general_path: String,
+    writing_path: String,
+    voice_path: String,
 }
 
 fn managed_ai_model(role: &str, tier: &str) -> CommandResult<ManagedAiModel> {
@@ -170,6 +194,9 @@ fn managed_ai_model(role: &str, tier: &str) -> CommandResult<ManagedAiModel> {
         ("writing", "low") => Ok(ManagedAiModel { filename: WRITING_LOW_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf?download=true", minimum_bytes: Some(350_000_000) }),
         ("writing", "medium") => Ok(ManagedAiModel { filename: WORD_AI_MODEL_NAME, url: "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true", minimum_bytes: Some(1_000_000_000) }),
         ("writing", "high") => Ok(ManagedAiModel { filename: WRITING_HIGH_MODEL_NAME, url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true", minimum_bytes: Some(2_000_000_000) }),
+        ("voice", "low") => Ok(ManagedAiModel { filename: VOICE_LOW_MODEL_NAME, url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin?download=true", minimum_bytes: Some(100_000_000) }),
+        ("voice", "medium") => Ok(ManagedAiModel { filename: VOICE_MEDIUM_MODEL_NAME, url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin?download=true", minimum_bytes: Some(350_000_000) }),
+        ("voice", "high") => Ok(ManagedAiModel { filename: VOICE_HIGH_MODEL_NAME, url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin?download=true", minimum_bytes: Some(900_000_000) }),
         _ => Err("Choose a Low, Medium, or High SoFlo AI model.".into()),
     }
 }
@@ -239,6 +266,24 @@ fn is_complete_word_ai_model(path: &Path) -> bool {
         && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= WORD_AI_MINIMUM_BYTES)
 }
 
+fn resolve_voice_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
+    let requested = Path::new(requested_path.trim());
+    let fallback = managed_models_dir(app)?.join(VOICE_MEDIUM_MODEL_NAME);
+    let model = if requested.is_file() && requested.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("bin")) {
+        requested.to_path_buf()
+    } else {
+        fallback
+    };
+    if !is_complete_voice_model(&model) {
+        return Err("SoFlo's local transcription model is not downloaded yet. Download the AI model package in Settings, then try again.".into());
+    }
+    Ok(model.to_string_lossy().to_string())
+}
+
+fn is_complete_voice_model(path: &Path) -> bool {
+    path.is_file() && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= 100_000_000)
+}
+
 #[tauri::command]
 pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
@@ -246,6 +291,14 @@ pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>)
         managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME)
     } else { Path::new(&settings.ai_writing_model_path).to_path_buf() };
     Ok(is_complete_word_ai_model(&model))
+}
+
+#[tauri::command]
+pub fn voice_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+    let settings = get_settings(&database.open()?, None)?;
+    let configured = Path::new(&settings.ai_voice_model_path).to_path_buf();
+    let default = managed_models_dir(&app)?.join(VOICE_MEDIUM_MODEL_NAME);
+    Ok(is_complete_voice_model(&configured) || is_complete_voice_model(&default))
 }
 
 #[tauri::command]
@@ -1629,6 +1682,7 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) { return Ok(port); }
     ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "on")
 }
 
@@ -1637,6 +1691,7 @@ fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> Comma
 }
 
 fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    if let Some(port) = shared_model_server_port(&AI_SERVER, model_path) { return Ok(port); }
     ensure_model_server(
         &WORD_AI_SERVER,
         model_path,
@@ -1644,6 +1699,18 @@ fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandRes
         WORD_AI_CONTEXT_SIZE,
         "off",
     )
+}
+
+// General and Writing can intentionally point at the exact same GGUF (for
+// example General Medium and Writing High). Keep one llama.cpp process in
+// that case: these are two logical features, not two model instances.
+fn shared_model_server_port(server_state: &'static OnceLock<Mutex<Option<AiServer>>>, model_path: &str) -> Option<u16> {
+    let state = server_state.get()?;
+    let mut guard = state.lock().ok()?;
+    let server = guard.as_mut()?;
+    if server.model_path != model_path || server.child.try_wait().ok()?.is_some() || !ai_server_ready(server.port) { return None; }
+    server.last_used = Instant::now();
+    Some(server.port)
 }
 
 fn ensure_model_server(
@@ -1779,11 +1846,13 @@ fn ai_server_ready(port: u16) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 fn touch_ai_server() {
-    touch_model_server(&AI_SERVER)
+    touch_model_server(&AI_SERVER);
+    touch_model_server(&WORD_AI_SERVER)
 }
 
 fn touch_word_ai_server() {
-    touch_model_server(&WORD_AI_SERVER)
+    touch_model_server(&WORD_AI_SERVER);
+    touch_model_server(&AI_SERVER)
 }
 
 fn model_server_session_pinned(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) -> bool {
@@ -1925,9 +1994,10 @@ fn download_ai_model_file(
             response.status()
         ));
     }
-    let total = response
-        .content_length()
-        .ok_or_else(|| "The AI model download did not report its size.".to_string())?;
+    // Some CDN responses stream correctly but omit Content-Length. The model
+    // is still safe to download; we simply show indeterminate progress until
+    // the final integrity-size check below.
+    let total = response.content_length();
     let mut output = fs::File::create(&temporary).map_err(|error| error.to_string())?;
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 64 * 1024];
@@ -1943,11 +2013,19 @@ fn download_ai_model_file(
             .write_all(&buffer[..count])
             .map_err(|error| error.to_string())?;
         downloaded += count as u64;
-        let span = u64::from(progress_end.saturating_sub(progress_start));
-        let progress = u64::from(progress_start) + downloaded.saturating_mul(span) / total;
-        let _ = app.emit("ai-download-progress", progress.min(100) as u8);
+        if let Some(total) = total.filter(|total| *total > 0) {
+            let span = u64::from(progress_end.saturating_sub(progress_start));
+            let progress = u64::from(progress_start) + downloaded.saturating_mul(span) / total;
+            let _ = app.emit("ai-download-progress", progress.min(100) as u8);
+        }
     }
     drop(output);
+    if let Some(minimum) = minimum_size {
+        if downloaded < minimum {
+            let _ = fs::remove_file(&temporary);
+            return Err("The local AI model download ended before the complete file arrived. Please try again.".into());
+        }
+    }
     fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1956,12 +2034,11 @@ fn download_ai_model_file(
 pub async fn download_default_ai_model(
     app: tauri::AppHandle,
     database: State<'_, Database>,
-) -> CommandResult<String> {
+) -> CommandResult<DefaultAiModelPaths> {
     let configured_model_path = get_settings(&database.open()?, None)?.ai_model_path;
     let download_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || -> CommandResult<DefaultAiModelPaths> {
         const MAIN_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true";
-        const WORD_MODEL_URL: &str = "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true";
         let configured = Path::new(configured_model_path.trim());
         let configured_is_legacy_default = configured
             .file_name()
@@ -1985,20 +2062,44 @@ pub async fn download_default_ai_model(
             .map_err(|error| error.to_string())?
             .join("models")
             .join(WORD_AI_MODEL_NAME);
+        let voice_destination = download_app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("models")
+            .join(VOICE_MEDIUM_MODEL_NAME);
+        let word = managed_ai_model("writing", "medium")?;
+        let voice = managed_ai_model("voice", "medium")?;
         if use_existing_custom_model || destination.is_file() {
-            download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 0, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+            download_ai_model_file(&download_app, word.url, &word_destination, 0, 58, word.minimum_bytes)?;
         } else {
-            download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 68, None)?;
-            download_ai_model_file(&download_app, WORD_MODEL_URL, &word_destination, 68, 100, Some(WORD_AI_MINIMUM_BYTES))?;
+            download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 45, None)?;
+            download_ai_model_file(&download_app, word.url, &word_destination, 45, 72, word.minimum_bytes)?;
         }
+        download_ai_model_file(&download_app, voice.url, &voice_destination, 72, 100, voice.minimum_bytes)?;
         let _ = download_app.emit("ai-download-progress", 100u8);
         let _ = download_app.emit("ai-download-finished", ());
-        Ok(destination.to_string_lossy().to_string())
+        Ok(DefaultAiModelPaths {
+            general_path: destination.to_string_lossy().to_string(),
+            writing_path: word_destination.to_string_lossy().to_string(),
+            voice_path: voice_destination.to_string_lossy().to_string(),
+        })
     }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
     if result.is_err() {
         let _ = app.emit("ai-download-finished", ());
     }
-    result
+    let paths = result?;
+    let connection = database.open()?;
+    let mut settings = get_settings(&connection, None)?;
+    settings.ai_model_path = paths.general_path.clone();
+    settings.ai_writing_model_path = paths.writing_path.clone();
+    settings.ai_voice_model_path = paths.voice_path.clone();
+    settings.ai_general_model_tier = "medium".into();
+    settings.ai_writing_model_tier = "medium".into();
+    settings.ai_voice_model_tier = "medium".into();
+    let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+    connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;
+    Ok(paths)
 }
 
 #[tauri::command]
@@ -2031,7 +2132,8 @@ pub fn get_ai_model_inventory(app: tauri::AppHandle) -> CommandResult<serde_json
     };
     Ok(serde_json::json!({
         "general": { "low": installed("general", "low"), "medium": installed("general", "medium"), "high": installed("general", "high") },
-        "writing": { "low": installed("writing", "low"), "medium": installed("writing", "medium"), "high": installed("writing", "high") }
+        "writing": { "low": installed("writing", "low"), "medium": installed("writing", "medium"), "high": installed("writing", "high") },
+        "voice": { "low": installed("voice", "low"), "medium": installed("voice", "medium"), "high": installed("voice", "high") }
     }))
 }
 
@@ -2040,6 +2142,7 @@ pub fn delete_unused_ai_models(
     app: tauri::AppHandle,
     general_path: String,
     writing_path: String,
+    voice_path: String,
 ) -> CommandResult<()> {
     stop_model_server(&AI_SERVER);
     stop_model_server(&WORD_AI_SERVER);
@@ -2047,9 +2150,10 @@ pub fn delete_unused_ai_models(
     let active = [
         if general_path.trim().is_empty() { models.join(DEFAULT_AI_MODEL_NAME) } else { Path::new(general_path.trim()).to_path_buf() },
         if writing_path.trim().is_empty() { models.join(WORD_AI_MODEL_NAME) } else { Path::new(writing_path.trim()).to_path_buf() },
+        if voice_path.trim().is_empty() { models.join(VOICE_MEDIUM_MODEL_NAME) } else { Path::new(voice_path.trim()).to_path_buf() },
     ];
     let mut names = std::collections::HashSet::new();
-    for role in ["general", "writing"] {
+    for role in ["general", "writing", "voice"] {
         for tier in ["low", "medium", "high"] {
             if let Ok(profile) = managed_ai_model(role, tier) { names.insert(profile.filename); }
         }
@@ -2073,7 +2177,7 @@ pub fn delete_local_ai_models(
     stop_model_server(&AI_SERVER);
     stop_model_server(&WORD_AI_SERVER);
     let models = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");
-    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME, GENERAL_LOW_MODEL_NAME, GENERAL_HIGH_MODEL_NAME, WRITING_LOW_MODEL_NAME, WRITING_HIGH_MODEL_NAME] {
+    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME, GENERAL_LOW_MODEL_NAME, GENERAL_HIGH_MODEL_NAME, WRITING_LOW_MODEL_NAME, WRITING_HIGH_MODEL_NAME, VOICE_LOW_MODEL_NAME, VOICE_MEDIUM_MODEL_NAME, VOICE_HIGH_MODEL_NAME] {
         let path = models.join(name);
         if path.is_file() { fs::remove_file(path).map_err(|error| error.to_string())?; }
     }
@@ -2081,8 +2185,10 @@ pub fn delete_local_ai_models(
     let mut settings = get_settings(&connection, None)?;
     settings.ai_model_path.clear();
     settings.ai_writing_model_path.clear();
+    settings.ai_voice_model_path.clear();
     settings.ai_general_model_tier = "medium".to_string();
     settings.ai_writing_model_tier = "medium".to_string();
+    settings.ai_voice_model_tier = "medium".to_string();
     settings.ai_grammar = false;
     let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;
@@ -2862,7 +2968,7 @@ pub fn save_lecture(
             .map_err(|error| error.to_string())?;
     let changed = existing != input.content || existing_title != input.title.trim();
     let latest_checkpoint_age: Option<i64> = transaction.query_row("SELECT CAST(strftime('%s','now') - strftime('%s',created_at) AS INTEGER) FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC LIMIT 1", [&input.id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
-    let checkpoint = changed && latest_checkpoint_age.is_none_or(|seconds| seconds >= 180);
+    let checkpoint = changed && (input.force_checkpoint || latest_checkpoint_age.is_none_or(|seconds| seconds >= 180));
     let next_revision = if checkpoint { revision + 1 } else { revision };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
     if checkpoint {
@@ -2871,6 +2977,52 @@ pub fn save_lecture(
     }
     transaction.commit().map_err(|error| error.to_string())?;
     get_lecture(database, input.id)
+}
+
+#[tauri::command]
+pub fn record_lecture_note_checkpoint(
+    database: State<'_, Database>,
+    input: RecordLectureNoteCheckpointInput,
+) -> CommandResult<()> {
+    if input.content_plain.trim().is_empty() {
+        return Ok(());
+    }
+    let connection = database.open()?;
+    let recording = connection.query_row(
+        "SELECT state, captured_ms, COALESCE(CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER), 0) FROM lecture_recordings WHERE lecture_id=?1",
+        [&input.lecture_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((state, captured_ms, elapsed_ms)) = recording else { return Ok(()) };
+    if state != "recording" {
+        return Ok(());
+    }
+    let timestamp_ms = captured_ms.max(elapsed_ms).max(0);
+    let latest = connection.query_row(
+        "SELECT id, timestamp_ms, content_plain FROM lecture_note_checkpoints WHERE lecture_id=?1 ORDER BY timestamp_ms DESC, created_at DESC LIMIT 1",
+        [&input.lecture_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    if let Some((id, previous_timestamp, previous_plain)) = latest {
+        if previous_plain == input.content_plain {
+            return Ok(());
+        }
+        // Keep a meaningful timeline without writing a full document snapshot
+        // for every keystroke. The newest change in a short typing burst replaces
+        // that burst's checkpoint and remains tied to the right lecture moment.
+        if timestamp_ms.saturating_sub(previous_timestamp) < 20_000 {
+            connection.execute(
+                "UPDATE lecture_note_checkpoints SET timestamp_ms=?1, content=?2, content_plain=?3, created_at=CURRENT_TIMESTAMP WHERE id=?4",
+                params![timestamp_ms, input.content, input.content_plain, id],
+            ).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    connection.execute(
+        "INSERT INTO lecture_note_checkpoints (id, lecture_id, timestamp_ms, content, content_plain) VALUES (?1,?2,?3,?4,?5)",
+        params![Uuid::new_v4().to_string(), input.lecture_id, timestamp_ms, input.content, input.content_plain],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2883,6 +3035,1094 @@ pub fn delete_lecture(database: State<'_, Database>, id: String) -> CommandResul
         return Err("That lecture could not be found.".into());
     }
     Ok(())
+}
+
+// ---- Lecture recording ----------------------------------------------------
+// Audio is written as little-endian 16 kHz mono PCM while recording. This
+// makes every short capture chunk independently durable; at the end we stream
+// that data into the compact MP3 the user keeps with the lecture.
+
+fn lecture_recordings_dir(database: &Database, lecture_id: &str) -> CommandResult<PathBuf> {
+    let directory = database.app_data_dir().join("recordings").join(lecture_id);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn recording_from_row(row: &Row<'_>) -> rusqlite::Result<LectureRecording> {
+    Ok(LectureRecording {
+        lecture_id: row.get(0)?,
+        state: row.get(1)?,
+        source_kind: row.get(2)?,
+        audio_path: row.get(3)?,
+        raw_audio_path: row.get(4)?,
+        duration_ms: row.get(5)?,
+        captured_ms: row.get(6)?,
+        transcribed_ms: row.get(7)?,
+        pending_chunks: row.get(8)?,
+        status_message: row.get(9)?,
+        started_at: row.get(10)?,
+        stopped_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn ready_lecture_recording(lecture_id: String) -> LectureRecording {
+    LectureRecording {
+        lecture_id,
+        state: "ready".into(),
+        source_kind: "microphone".into(),
+        audio_path: None,
+        raw_audio_path: None,
+        duration_ms: 0,
+        captured_ms: 0,
+        transcribed_ms: 0,
+        pending_chunks: 0,
+        status_message: "Ready to record or import audio.".into(),
+        started_at: None,
+        stopped_at: None,
+        updated_at: String::new(),
+    }
+}
+
+fn get_lecture_recording_from(connection: &Connection, lecture_id: &str) -> CommandResult<LectureRecording> {
+    connection.query_row(
+        "SELECT lecture_id, state, source_kind, audio_path, raw_audio_path, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at, updated_at FROM lecture_recordings WHERE lecture_id=?1",
+        [lecture_id],
+        recording_from_row,
+    ).optional().map_err(|error| error.to_string()).map(|value| value.unwrap_or_else(|| ready_lecture_recording(lecture_id.to_string())))
+}
+
+fn update_recording_status(connection: &Connection, lecture_id: &str, state: &str, message: &str) -> CommandResult<()> {
+    connection.execute(
+        "UPDATE lecture_recordings SET state=?1, status_message=?2, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?3",
+        params![state, message, lecture_id],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn emit_lecture_recording_update(app: &tauri::AppHandle, database: &Database, lecture_id: &str) {
+    if let Ok(connection) = database.open() {
+        if let Ok(recording) = get_lecture_recording_from(&connection, lecture_id) {
+            let _ = app.emit("lecture-recording-update", recording);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_lecture_recording(database: State<'_, Database>, lecture_id: String) -> CommandResult<LectureRecording> {
+    get_lecture_recording_from(&database.open()?, &lecture_id)
+}
+
+#[tauri::command]
+pub fn list_lecture_transcript_segments(database: State<'_, Database>, lecture_id: String) -> CommandResult<Vec<LectureTranscriptSegment>> {
+    let connection = database.open()?;
+    let mut statement = connection.prepare(
+        "SELECT id, lecture_id, chunk_index, start_ms, end_ms, speaker, text, is_final, created_at FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, chunk_index, id"
+    ).map_err(|error| error.to_string())?;
+    let segments = statement.query_map([lecture_id], |row| Ok(LectureTranscriptSegment {
+        id: row.get(0)?, lecture_id: row.get(1)?, chunk_index: row.get(2)?, start_ms: row.get(3)?, end_ms: row.get(4)?, speaker: row.get(5)?, text: row.get(6)?, is_final: row.get::<_, i64>(7)? != 0, created_at: row.get(8)?,
+    })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(segments)
+}
+
+#[tauri::command]
+pub fn get_lecture_analysis(database: State<'_, Database>, lecture_id: String) -> CommandResult<Option<LectureAnalysis>> {
+    let connection = database.open()?;
+    connection.query_row(
+        "SELECT lecture_id, status, overview, key_points_json, concepts_json, questions_json, next_steps_json, raw_transcript, cleaned_transcript, detailed_notes, note_suggestions_json, created_at, updated_at FROM lecture_analyses WHERE lecture_id=?1",
+        [lecture_id],
+        |row| Ok(LectureAnalysis {
+            lecture_id: row.get(0)?, status: row.get(1)?, overview: row.get(2)?,
+            key_points: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?).unwrap_or_default(),
+            concepts: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(4)?).unwrap_or_default(),
+            questions: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(5)?).unwrap_or_default(),
+            next_steps: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(6)?).unwrap_or_default(),
+            raw_transcript: row.get(7)?, cleaned_transcript: row.get(8)?, detailed_notes: row.get(9)?,
+            note_suggestions: serde_json::from_str::<Vec<LectureNoteSuggestion>>(&row.get::<_, String>(10)?).unwrap_or_default(),
+            created_at: row.get(11)?, updated_at: row.get(12)?,
+        })
+    ).optional().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn start_lecture_recording(database: State<'_, Database>, lecture_id: String) -> CommandResult<LectureRecording> {
+    let connection = database.open()?;
+    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0))
+        .map_err(|_| "That lecture could not be found.".to_string())?;
+    let existing = get_lecture_recording_from(&connection, &lecture_id)?;
+    let directory = lecture_recordings_dir(&database, &lecture_id)?;
+    let raw_path = directory.join("lecture.pcm");
+    let audio_path = directory.join("lecture.mp3");
+    // An interrupted take is intentionally preserved for recovery. A completed
+    // take starts a new recording only after the user deliberately presses Start.
+    if !matches!(existing.state.as_str(), "recording" | "interrupted") {
+        let _ = fs::remove_file(&raw_path);
+        let _ = fs::remove_file(&audio_path);
+        connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM lecture_analyses WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(&raw_path).map_err(|error| error.to_string())?;
+    connection.execute(r#"
+        INSERT INTO lecture_recordings (lecture_id, state, source_kind, audio_path, raw_audio_path, sample_rate, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at)
+        VALUES (?1,'recording','microphone',?2,?3,16000,?4,?4,?5,0,'Recording microphone audio.',CURRENT_TIMESTAMP,NULL)
+        ON CONFLICT(lecture_id) DO UPDATE SET state='recording', source_kind='microphone', audio_path=excluded.audio_path, raw_audio_path=excluded.raw_audio_path, status_message='Recording microphone audio.', stopped_at=NULL, updated_at=CURRENT_TIMESTAMP
+    "#, params![lecture_id, audio_path.to_string_lossy(), raw_path.to_string_lossy(), if existing.state == "interrupted" { existing.duration_ms } else { 0 }, if existing.state == "interrupted" { existing.transcribed_ms } else { 0 }]).map_err(|error| error.to_string())?;
+    get_lecture_recording_from(&connection, &lecture_id)
+}
+
+#[tauri::command]
+pub fn append_lecture_audio_chunk(
+    database: State<'_, Database>,
+    lecture_id: String,
+    pcm_base64: String,
+    duration_ms: i64,
+) -> CommandResult<i32> {
+    let bytes = BASE64.decode(pcm_base64.as_bytes()).map_err(|_| "SoFlo could not read that microphone audio chunk.".to_string())?;
+    if bytes.is_empty() || bytes.len() % 2 != 0 || bytes.len() > 4_000_000 || duration_ms <= 0 || duration_ms > 60_000 {
+        return Err("That audio chunk is not valid.".into());
+    }
+    let connection = database.open()?;
+    let recording = get_lecture_recording_from(&connection, &lecture_id)?;
+    if recording.state != "recording" {
+        return Err("Start a lecture recording before sending microphone audio.".into());
+    }
+    let raw_path = recording.raw_audio_path.ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
+    let offset = fs::metadata(&raw_path).map(|metadata| metadata.len() as i64).unwrap_or(0);
+    let mut output = std::fs::OpenOptions::new().create(true).append(true).open(&raw_path).map_err(|error| error.to_string())?;
+    output.write_all(&bytes).map_err(|error| error.to_string())?;
+    output.sync_data().map_err(|error| error.to_string())?;
+    let chunk_index: i32 = connection.query_row("SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    let start_ms = recording.captured_ms;
+    let end_ms = start_ms + duration_ms;
+    connection.execute("INSERT INTO lecture_recording_chunks (lecture_id, chunk_index, start_ms, end_ms, byte_offset, byte_length, state) VALUES (?1,?2,?3,?4,?5,?6,'queued')", params![lecture_id, chunk_index, start_ms, end_ms, offset, bytes.len() as i64]).map_err(|error| error.to_string())?;
+    connection.execute("UPDATE lecture_recordings SET duration_ms=?1, captured_ms=?1, pending_chunks=pending_chunks+1, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?2", params![end_ms, lecture_id]).map_err(|error| error.to_string())?;
+    Ok(chunk_index)
+}
+
+fn append_imported_pcm_chunk(
+    app: &tauri::AppHandle,
+    database: &Database,
+    connection: &Connection,
+    lecture_id: &str,
+    raw_path: &Path,
+    bytes: &[u8],
+    captured_ms: &mut i64,
+    next_chunk_index: &mut i32,
+) -> CommandResult<()> {
+    if bytes.is_empty() { return Ok(()); }
+    let offset = fs::metadata(raw_path).map(|metadata| metadata.len() as i64).unwrap_or(0);
+    let mut output = fs::OpenOptions::new().create(true).append(true).open(raw_path).map_err(|error| error.to_string())?;
+    output.write_all(bytes).map_err(|error| error.to_string())?;
+    output.sync_data().map_err(|error| error.to_string())?;
+    let duration_ms = ((bytes.len() as i64) * 1000 / (VOICE_SAMPLE_RATE * 2)).max(1);
+    let start_ms = *captured_ms;
+    *captured_ms += duration_ms;
+    connection.execute(
+        "INSERT INTO lecture_recording_chunks (lecture_id, chunk_index, start_ms, end_ms, byte_offset, byte_length, state) VALUES (?1,?2,?3,?4,?5,?6,'queued')",
+        params![lecture_id, *next_chunk_index, start_ms, *captured_ms, offset, bytes.len() as i64],
+    ).map_err(|error| error.to_string())?;
+    connection.execute(
+        "UPDATE lecture_recordings SET duration_ms=?1, captured_ms=?1, pending_chunks=pending_chunks+1, status_message='Preparing imported audio for transcription…', updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?2",
+        params![*captured_ms, lecture_id],
+    ).map_err(|error| error.to_string())?;
+    emit_lecture_recording_update(app, database, lecture_id);
+    *next_chunk_index += 1;
+    Ok(())
+}
+
+fn decode_imported_audio_to_pcm<F>(
+    app: &tauri::AppHandle,
+    database: &Database,
+    source: &Path,
+    destination: &Path,
+    connection: &Connection,
+    lecture_id: &str,
+    queue_chunk: &mut F,
+) -> CommandResult<i32>
+where
+    F: FnMut(i32) -> CommandResult<()>,
+{
+    let source_file = fs::File::open(source).map_err(|_| "SoFlo could not open that audio file.".to_string())?;
+    let mut hint = Hint::new();
+    if let Some(extension) = source.extension().and_then(|value| value.to_str()) { hint.with_extension(extension); }
+    let stream = MediaSourceStream::new(Box::new(source_file), Default::default());
+    let mut format = get_probe().probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
+        .map_err(|_| "SoFlo could not read that audio format. Try MP3, WAV, M4A, AAC, FLAC, or OGG.".to_string())?;
+    let track = format.default_track(TrackType::Audio).ok_or_else(|| "That file has no playable audio track.".to_string())?;
+    let track_id = track.id;
+    let mut decoder = get_codecs().make_audio_decoder(
+        track.codec_params.as_ref().ok_or_else(|| "That audio track has no usable codec information.".to_string())?.audio().ok_or_else(|| "That file does not contain an audio track SoFlo can decode.".to_string())?,
+        &AudioDecoderOptions::default(),
+    ).map_err(|_| "SoFlo could not decode that audio format.".to_string())?;
+    let _ = fs::remove_file(destination);
+    fs::File::create(destination).map_err(|error| error.to_string())?;
+    let mut captured_ms = 0i64;
+    let mut next_chunk_index = 0i32;
+    let mut source_frame_cursor = 0f64;
+    let mut next_output_source_frame = 0f64;
+    let mut pcm_chunk = Vec::<u8>::with_capacity((VOICE_SAMPLE_RATE as usize) * 2 * 21);
+    const CHUNK_BYTES: usize = (VOICE_SAMPLE_RATE as usize) * 2 * (VOICE_CHUNK_TARGET_MS as usize) / 1000;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(SymphoniaError::IoError(_)) => break,
+            Err(SymphoniaError::ResetRequired) => return Err("That audio stream changed format while it was being read.".into()),
+            Err(_) => return Err("SoFlo could not continue reading that audio file.".into()),
+        };
+        if packet.track_id != track_id { continue; }
+        let decoded = match decoder.decode(&packet) {
+            Ok(buffer) => buffer,
+            Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
+            Err(_) => return Err("SoFlo could not decode that audio file.".into()),
+        };
+        let channels = decoded.spec().channels().count().max(1);
+        let sample_rate = decoded.spec().rate().max(1) as f64;
+        let mut samples = vec![0f32; decoded.samples_interleaved()];
+        decoded.copy_to_slice_interleaved(&mut samples);
+        let frame_count = samples.len() / channels;
+        if frame_count == 0 { continue; }
+        let end_source_frame = source_frame_cursor + frame_count as f64;
+        while next_output_source_frame < end_source_frame {
+            let frame = ((next_output_source_frame - source_frame_cursor).floor().max(0.0) as usize).min(frame_count - 1);
+            let start = frame * channels;
+            let averaged = samples[start..start + channels].iter().copied().sum::<f32>() / channels as f32;
+            let sample = (averaged.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            pcm_chunk.extend_from_slice(&sample.to_le_bytes());
+            next_output_source_frame += sample_rate / VOICE_SAMPLE_RATE as f64;
+            while pcm_chunk.len() >= CHUNK_BYTES {
+                let batch = pcm_chunk.drain(..CHUNK_BYTES).collect::<Vec<_>>();
+                let chunk_index = next_chunk_index;
+                append_imported_pcm_chunk(app, database, connection, lecture_id, destination, &batch, &mut captured_ms, &mut next_chunk_index)?;
+                queue_chunk(chunk_index)?;
+            }
+        }
+        source_frame_cursor = end_source_frame;
+    }
+    if !pcm_chunk.is_empty() {
+        let chunk_index = next_chunk_index;
+        append_imported_pcm_chunk(app, database, connection, lecture_id, destination, &pcm_chunk, &mut captured_ms, &mut next_chunk_index)?;
+        queue_chunk(chunk_index)?;
+    }
+    if next_chunk_index == 0 { return Err("SoFlo could not decode usable audio from that file.".into()); }
+    Ok(next_chunk_index)
+}
+
+fn process_imported_lecture_audio(
+    app: tauri::AppHandle,
+    database: Database,
+    lecture_id: String,
+    source_path: String,
+    model_path: String,
+) -> CommandResult<()> {
+    let model_path = resolve_voice_model_path(&app, &model_path)?;
+    let source = PathBuf::from(source_path);
+    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg") { return Err("Choose an MP3, WAV, M4A, AAC, FLAC, or OGG audio file.".into()); }
+    if !source.is_file() { return Err("That audio file is no longer available.".into()); }
+    let connection = database.open()?;
+    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
+    let directory = lecture_recordings_dir(&database, &lecture_id)?;
+    let raw_path = directory.join("lecture.pcm");
+    let audio_path = directory.join("lecture.mp3");
+    let source_copy = directory.join(format!("imported-source.{}", extension));
+    let _ = fs::remove_file(&raw_path);
+    let _ = fs::remove_file(&audio_path);
+    let _ = fs::remove_file(&source_copy);
+    connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM lecture_analyses WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    fs::copy(&source, &source_copy).map_err(|_| "SoFlo could not copy that audio file into your lecture.".to_string())?;
+    connection.execute(
+        "INSERT INTO lecture_recordings (lecture_id, state, source_kind, audio_path, raw_audio_path, sample_rate, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at) VALUES (?1,'transcribing','import',?2,?3,16000,0,0,0,0,'Preparing imported audio…',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='transcribing', source_kind='import', audio_path=excluded.audio_path, raw_audio_path=excluded.raw_audio_path, duration_ms=0, captured_ms=0, transcribed_ms=0, pending_chunks=0, status_message=excluded.status_message, started_at=CURRENT_TIMESTAMP, stopped_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
+        params![lecture_id, audio_path.to_string_lossy(), raw_path.to_string_lossy()],
+    ).map_err(|error| error.to_string())?;
+    // Build the complete chunk index before transcription starts. The importer
+    // owns this SQLite connection while it writes that index; sending chunks to
+    // the worker immediately made large imports contend for the same library.
+    let mut imported_chunks = Vec::new();
+    let mut collect_chunk = |chunk_index| {
+        imported_chunks.push(chunk_index);
+        Ok(())
+    };
+    let _chunks = decode_imported_audio_to_pcm(&app, &database, &source_copy, &raw_path, &connection, &lecture_id, &mut collect_chunk)?;
+    connection.execute("UPDATE lecture_recordings SET state='queued', status_message='Transcribing imported lecture…', updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    drop(connection);
+    for chunk_index in imported_chunks {
+        voice_job_sender().send(VoiceTranscriptionJob {
+            app: app.clone(),
+            database: database.clone(),
+            lecture_id: lecture_id.clone(),
+            chunk_index,
+            model_path: model_path.clone(),
+            finalize: false,
+        }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+    }
+    voice_job_sender().send(VoiceTranscriptionJob { app: app.clone(), database: database.clone(), lecture_id: lecture_id.clone(), chunk_index: -1, model_path, finalize: true }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+    emit_lecture_recording_update(&app, &database, &lecture_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn import_lecture_audio(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    lecture_id: String,
+    source_path: String,
+    model_path: String,
+) -> CommandResult<()> {
+    let model_path = resolve_voice_model_path(&app, &model_path)?;
+    let source = PathBuf::from(source_path);
+    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg") {
+        return Err("Choose an MP3, WAV, M4A, AAC, FLAC, or OGG audio file.".into());
+    }
+    if !source.is_file() { return Err("That audio file is no longer available.".into()); }
+    let connection = database.open()?;
+    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
+    connection.execute("INSERT INTO lecture_recordings (lecture_id, state, source_kind, status_message, started_at, stopped_at) VALUES (?1,'importing','import','Importing audio in the background',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='importing', source_kind='import', status_message='Importing audio in the background', updated_at=CURRENT_TIMESTAMP", [&lecture_id]).map_err(|error| error.to_string())?;
+    let database_handle = database.inner().clone();
+    let thread_app = app.clone();
+    let thread_lecture_id = lecture_id.clone();
+    thread::Builder::new().name("soflo-lecture-import".into()).spawn(move || {
+        let result = process_imported_lecture_audio(thread_app.clone(), database_handle.clone(), thread_lecture_id.clone(), source.to_string_lossy().to_string(), model_path);
+        if let Err(error) = result {
+            if let Ok(connection) = database_handle.open() {
+                let _ = update_recording_status(&connection, &thread_lecture_id, "import_failed", &format!("SoFlo could not import this audio: {}", error));
+            }
+            emit_lecture_recording_update(&thread_app, &database_handle, &thread_lecture_id);
+        }
+    }).map_err(|_| "SoFlo could not start the audio import worker.".to_string())?;
+    emit_lecture_recording_update(&app, database.inner(), &lecture_id);
+    Ok(())
+}
+
+#[derive(Clone)]
+struct VoiceTranscriptionJob {
+    app: tauri::AppHandle,
+    database: Database,
+    lecture_id: String,
+    chunk_index: i32,
+    model_path: String,
+    finalize: bool,
+}
+
+static VOICE_JOB_SENDER: OnceLock<mpsc::Sender<VoiceTranscriptionJob>> = OnceLock::new();
+
+fn voice_job_sender() -> &'static mpsc::Sender<VoiceTranscriptionJob> {
+    VOICE_JOB_SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<VoiceTranscriptionJob>();
+        thread::Builder::new().name("soflo-voice-transcription".into()).spawn(move || run_voice_jobs(receiver)).expect("could not start SoFlo voice worker");
+        sender
+    })
+}
+
+fn run_voice_jobs(receiver: mpsc::Receiver<VoiceTranscriptionJob>) {
+    while let Ok(job) = receiver.recv() {
+        // Voice transcription is intentionally independent of General and
+        // Writing AI. Modern laptops can run the compact Whisper model beside
+        // those features, so do not make a lecture wait behind another task.
+        let result = if job.finalize {
+            finalize_lecture_recording_job(&job)
+        } else {
+            transcribe_lecture_chunk(&job)
+        };
+        if let Err(error) = result {
+            if let Ok(connection) = job.database.open() {
+                let _ = update_recording_status(&connection, &job.lecture_id, "transcription_failed", &format!("Audio is safe, but transcription needs attention: {}", error));
+            }
+            emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
+        }
+    }
+}
+
+fn write_pcm_wave(path: &Path, pcm: &[u8]) -> CommandResult<()> {
+    let mut file = fs::File::create(path).map_err(|error| error.to_string())?;
+    let byte_rate = (VOICE_SAMPLE_RATE * 2) as u32;
+    let block_align = 2u16;
+    let data_len = pcm.len() as u32;
+    file.write_all(b"RIFF").map_err(|error| error.to_string())?;
+    file.write_all(&(36u32 + data_len).to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(b"WAVEfmt ").map_err(|error| error.to_string())?;
+    file.write_all(&16u32.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&1u16.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&1u16.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&(VOICE_SAMPLE_RATE as u32).to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&byte_rate.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&block_align.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&16u16.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(b"data").map_err(|error| error.to_string())?;
+    file.write_all(&data_len.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(pcm).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+fn whisper_cli_path(app: &tauri::AppHandle) -> CommandResult<PathBuf> {
+    let bundled = app.path().resource_dir().ok().map(|directory| directory.join("resources").join("whisper").join("whisper-cli.exe"));
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("whisper").join("whisper-cli.exe");
+    bundled.filter(|path| path.is_file()).or_else(|| development.is_file().then_some(development)).ok_or_else(|| "SoFlo's private transcription helper is missing. Reinstall SoFlo to restore it.".to_string())
+}
+
+fn transcript_offset(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str().and_then(|text| {
+        let parts = text.replace(',', ".").split(':').map(str::parse::<f64>).collect::<Result<Vec<_>, _>>().ok()?;
+        match parts.as_slice() {
+            [seconds] => Some((seconds * 1000.0).round() as i64),
+            [minutes, seconds] => Some(((minutes * 60.0 + seconds) * 1000.0).round() as i64),
+            [hours, minutes, seconds] => Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0).round() as i64),
+            _ => None,
+        }
+    }))
+}
+
+fn transcribe_pcm_with_cli(app: &tauri::AppHandle, model_path: &str, pcm: &[u8], workspace: &Path) -> CommandResult<Vec<(i64, i64, String)>> {
+    let input_path = workspace.join("chunk.wav");
+    let output_prefix = workspace.join("chunk");
+    let json_path = workspace.join("chunk.json");
+    let _ = fs::remove_file(&json_path);
+    write_pcm_wave(&input_path, pcm)?;
+    let mut command = Command::new(whisper_cli_path(app)?);
+    command.args(["-m", model_path, "-f", &input_path.to_string_lossy(), "-l", "en", "-oj", "-of", &output_prefix.to_string_lossy(), "-nt"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().map_err(|_| "SoFlo could not start its private transcription helper.".to_string())?;
+    if !output.status.success() { return Err("SoFlo's private transcription helper could not read this audio.".into()); }
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&json_path).map_err(|_| "SoFlo could not read the local transcription result.".to_string())?).map_err(|_| "SoFlo could not read the local transcription result.".to_string())?;
+    let segments = value.get("transcription").or_else(|| value.get("segments")).and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    let mut result = Vec::new();
+    for item in segments {
+        let text = item.get("text").and_then(|value| value.as_str()).unwrap_or_default().trim().to_string();
+        if text.is_empty() { continue; }
+        let offsets = item.get("offsets").unwrap_or(&serde_json::Value::Null);
+        let timestamps = item.get("timestamps").unwrap_or(&serde_json::Value::Null);
+        let start = offsets.get("from").and_then(transcript_offset).or_else(|| timestamps.get("from").and_then(transcript_offset)).unwrap_or(0);
+        let end = offsets.get("to").and_then(transcript_offset).or_else(|| timestamps.get("to").and_then(transcript_offset)).unwrap_or(start);
+        result.push((start, end, text));
+    }
+    Ok(result)
+}
+
+fn refresh_lecture_speaker_labels(connection: &Connection, lecture_id: &str) -> CommandResult<()> {
+    // whisper.cpp's compact models do not perform genuine voice diarization on
+    // mono classroom audio. Keep this deliberately conservative: question-like
+    // turns become a neutral secondary speaker, while the sustained majority
+    // is only called Professor once it has a meaningful duration advantage.
+    let mut statement = connection.prepare("SELECT id, start_ms, end_ms, text FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, id").map_err(|error| error.to_string())?;
+    let segments = statement.query_map([lecture_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let primary_ms: i64 = segments.iter().filter(|(_, _, _, text)| !text.trim_end().ends_with('?')).map(|(_, start, end, _)| (end - start).max(0)).sum();
+    let secondary_ms: i64 = segments.iter().filter(|(_, _, _, text)| text.trim_end().ends_with('?')).map(|(_, start, end, _)| (end - start).max(0)).sum();
+    let professor_confident = primary_ms >= 60_000 && primary_ms >= secondary_ms.saturating_mul(3);
+    for (id, _start, _end, text) in segments {
+        let label = if text.trim_end().ends_with('?') { "Speaker 2" } else if professor_confident { "Professor" } else { "Speaker 1" };
+        connection.execute("UPDATE lecture_transcript_segments SET speaker=?1 WHERE id=?2", params![label, id]).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn transcribe_lecture_chunk(job: &VoiceTranscriptionJob) -> CommandResult<()> {
+    let connection = job.database.open()?;
+    let recording = get_lecture_recording_from(&connection, &job.lecture_id)?;
+    let chunk: Option<(i64, i64, i64, i64, String)> = connection.query_row(
+        "SELECT start_ms, end_ms, byte_offset, byte_length, state FROM lecture_recording_chunks WHERE lecture_id=?1 AND chunk_index=?2",
+        params![job.lecture_id, job.chunk_index],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    // A newer import may replace one while old jobs are still waiting in the
+    // shared worker queue. Those obsolete chunks should quietly disappear.
+    let Some((start_ms, end_ms, byte_offset, byte_length, state)) = chunk else { return Ok(()); };
+    if state == "complete" { return Ok(()); }
+    update_recording_status(&connection, &job.lecture_id, if recording.state == "recording" { "recording" } else { "transcribing" }, "Transcribing your lecture…")?;
+    let raw_path = recording.raw_audio_path.ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
+    let mut source = fs::File::open(raw_path).map_err(|error| error.to_string())?;
+    source.seek(SeekFrom::Start(byte_offset as u64)).map_err(|error| error.to_string())?;
+    let mut bytes = vec![0u8; byte_length as usize];
+    source.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    if bytes.len() < 3200 {
+        connection.execute("UPDATE lecture_recording_chunks SET state='complete' WHERE lecture_id=?1 AND chunk_index=?2", params![job.lecture_id, job.chunk_index]).map_err(|error| error.to_string())?;
+        connection.execute("UPDATE lecture_recordings SET pending_chunks=MAX(0, pending_chunks-1), updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&job.lecture_id]).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let workspace = lecture_recordings_dir(&job.database, &job.lecture_id)?.join("transcription").join(format!("{:06}", job.chunk_index));
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let transcribed = transcribe_pcm_with_cli(&job.app, &job.model_path, &bytes, &workspace)?;
+    connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1 AND chunk_index=?2", params![job.lecture_id, job.chunk_index]).map_err(|error| error.to_string())?;
+    for (relative_start, relative_end, text) in transcribed {
+        let segment_start = start_ms + relative_start;
+        let segment_end = (start_ms + relative_end).min(end_ms);
+        connection.execute("INSERT INTO lecture_transcript_segments (id, lecture_id, chunk_index, start_ms, end_ms, speaker, text, is_final) VALUES (?1,?2,?3,?4,?5,'Speaker 1',?6,1)", params![Uuid::new_v4().to_string(), job.lecture_id, job.chunk_index, segment_start, segment_end.max(segment_start), text]).map_err(|error| error.to_string())?;
+    }
+    refresh_lecture_speaker_labels(&connection, &job.lecture_id)?;
+    connection.execute("UPDATE lecture_recording_chunks SET state='complete' WHERE lecture_id=?1 AND chunk_index=?2", params![job.lecture_id, job.chunk_index]).map_err(|error| error.to_string())?;
+    connection.execute("UPDATE lecture_recordings SET transcribed_ms=MAX(transcribed_ms, ?1), pending_chunks=MAX(0, pending_chunks-1), status_message='Live transcript is up to date.', updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?2", params![end_ms, job.lecture_id]).map_err(|error| error.to_string())?;
+    emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
+    Ok(())
+}
+
+fn discard_lecture_audio(database: &Database, lecture_id: &str) -> CommandResult<()> {
+    let directory = lecture_recordings_dir(database, lecture_id)?;
+    if directory.exists() {
+        fs::remove_dir_all(&directory).map_err(|error| error.to_string())?;
+    }
+    let connection = database.open()?;
+    connection.execute("UPDATE lecture_recordings SET audio_path=NULL, raw_audio_path=NULL, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [lecture_id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn finalize_lecture_recording_job(job: &VoiceTranscriptionJob) -> CommandResult<()> {
+    let connection = job.database.open()?;
+    let state: Option<String> = connection.query_row("SELECT state FROM lecture_recordings WHERE lecture_id=?1", [&job.lecture_id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+    let Some(state) = state else { return Ok(()); };
+    if !matches!(state.as_str(), "queued" | "transcribing") { return Ok(()); }
+    let pending: i64 = connection.query_row("SELECT COUNT(*) FROM lecture_recording_chunks WHERE lecture_id=?1 AND state != 'complete'", [&job.lecture_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    // Ignore stale finalize jobs until the replacement import's chunks finish.
+    if pending > 0 { return Ok(()); }
+    update_recording_status(&connection, &job.lecture_id, "finalizing", "Transcript complete. Removing temporary audio…")?;
+    drop(connection);
+    emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
+    discard_lecture_audio(&job.database, &job.lecture_id)?;
+    let connection = job.database.open()?;
+    connection.execute("UPDATE lecture_recordings SET state='analyzing', duration_ms=captured_ms, status_message='Preparing lecture analysis…', stopped_at=COALESCE(stopped_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&job.lecture_id]).map_err(|error| error.to_string())?;
+    emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
+    let analysis_result = create_lecture_analysis(&job.app, &job.database, &job.lecture_id);
+    let connection = job.database.open()?;
+    match analysis_result {
+        Ok(()) => update_recording_status(&connection, &job.lecture_id, "complete", "Lecture analysis is ready.")?,
+        Err(error) => {
+            connection.execute("INSERT INTO lecture_analyses (lecture_id, status) VALUES (?1,'failed') ON CONFLICT(lecture_id) DO UPDATE SET status='failed', updated_at=CURRENT_TIMESTAMP", [&job.lecture_id]).map_err(|failure| failure.to_string())?;
+            update_recording_status(&connection, &job.lecture_id, "analysis_failed", &format!("Transcript is ready. Analysis can be retried: {}", error))?
+        },
+    }
+    emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
+    Ok(())
+}
+
+fn clean_lecture_segment(text: &str) -> String {
+    // Keep the source wording intact while removing the harmless repetitions and
+    // whitespace artifacts that Whisper commonly introduces. The raw transcript
+    // is stored separately and remains the audio-adjacent source of truth.
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut words = Vec::new();
+    for word in compact.split(' ') {
+        if words.last().is_some_and(|previous: &&str| previous.eq_ignore_ascii_case(word)) && word.len() > 2 {
+            continue;
+        }
+        words.push(word);
+    }
+    words.join(" ").trim().to_string()
+}
+
+fn stored_lecture_transcripts(connection: &Connection, lecture_id: &str) -> CommandResult<(String, String)> {
+    let mut statement = connection.prepare("SELECT start_ms, end_ms, speaker, text FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, chunk_index, id").map_err(|error| error.to_string())?;
+    let rows = statement.query_map([lecture_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))).map_err(|error| error.to_string())?;
+    let mut raw = Vec::new();
+    let mut clean = Vec::new();
+    for row in rows {
+        let (start, end, speaker, text) = row.map_err(|error| error.to_string())?;
+        let prefix = format!("[{:02}:{:02}–{:02}:{:02} · {}]", start / 60_000, (start / 1_000) % 60, end / 60_000, (end / 1_000) % 60, speaker);
+        raw.push(format!("{} {}", prefix, text.trim()));
+        let cleaned = clean_lecture_segment(&text);
+        if !cleaned.is_empty() { clean.push(format!("{} {}", prefix, cleaned)); }
+    }
+    Ok((raw.join("\n"), clean.join("\n")))
+}
+
+fn lecture_analysis_context(connection: &Connection, lecture_id: &str) -> CommandResult<String> {
+    connection.query_row(
+        "SELECT course_code, course_name, lecture_date, title, COALESCE(professor_snapshot, ''), COALESCE(content_plain, '') FROM lectures WHERE id=?1",
+        [lecture_id],
+        |row| Ok(format!(
+            "Course: {} {}\nLecture date: {}\nLecture title: {}\nProfessor: {}\nStudent notes already written: {}",
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?
+        )),
+    ).map_err(|_| "That lecture could not be found.".to_string())
+}
+
+fn lecture_timestamp_label(timestamp_ms: i64) -> String {
+    format!("{:02}:{:02}", timestamp_ms.max(0) / 60_000, (timestamp_ms.max(0) / 1_000) % 60)
+}
+
+fn compact_lecture_note_timeline(connection: &Connection, lecture_id: &str) -> CommandResult<(String, String)> {
+    let latest_notes = connection.query_row(
+        "SELECT content_plain FROM lectures WHERE id=?1",
+        [lecture_id],
+        |row| row.get::<_, String>(0),
+    ).map_err(|_| "That lecture could not be found.".to_string())?;
+    let mut statement = connection.prepare(
+        "SELECT timestamp_ms, content_plain FROM lecture_note_checkpoints WHERE lecture_id=?1 ORDER BY timestamp_ms ASC, created_at ASC"
+    ).map_err(|error| error.to_string())?;
+    let checkpoints = statement.query_map([lecture_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if checkpoints.is_empty() || latest_notes.trim().is_empty() {
+        return Ok((latest_notes, String::new()));
+    }
+    // Keep moments from the whole class rather than only the very end. A note
+    // snapshot can be large, so evenly sample the timeline before giving it to
+    // the model. This still preserves first/last changes and caps prompt size.
+    let checkpoint_count = checkpoints.len();
+    let max_entries = 38usize;
+    let stride = (checkpoint_count.div_ceil(max_entries)).max(1);
+    let sampled = checkpoints
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, checkpoint)| {
+            (index == 0 || index + 1 == checkpoint_count || index % stride == 0).then_some(checkpoint)
+        })
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    let mut prior = String::new();
+    for (timestamp_ms, snapshot) in sampled {
+        let normalized = snapshot.split_whitespace().collect::<Vec<_>>().join(" ");
+        let prior_normalized = prior.split_whitespace().collect::<Vec<_>>().join(" ");
+        let changed = normalized.strip_prefix(&prior_normalized).unwrap_or(&normalized).trim();
+        prior = snapshot;
+        if changed.is_empty() { continue; }
+        let mut transcript = connection.prepare(
+            "SELECT text FROM lecture_transcript_segments WHERE lecture_id=?1 AND end_ms >= ?2 AND start_ms <= ?3 ORDER BY start_ms ASC LIMIT 10"
+        ).map_err(|error| error.to_string())?;
+        let nearby = transcript.query_map(params![lecture_id, timestamp_ms.saturating_sub(45_000), timestamp_ms + 90_000], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .join(" ");
+        entries.push(format!(
+            "[{}] STUDENT WROTE: {}\nRELATED LECTURE MOMENT: {}",
+            lecture_timestamp_label(timestamp_ms),
+            changed.chars().take(900).collect::<String>(),
+            nearby.chars().take(1_500).collect::<String>(),
+        ));
+    }
+    Ok((latest_notes, entries.join("\n\n")))
+}
+
+fn normalize_note_fragment(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clean_lecture_markdown_line(value: &str) -> String {
+    value.trim()
+        .trim_matches('#')
+        .trim()
+        .trim_start_matches("- ")
+        .trim_start_matches("* ")
+        .trim_start_matches("• ")
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .trim()
+        .to_string()
+}
+
+/// Each AI call receives only a portion of a longer lecture. Keep the final
+/// document continuous by dropping the repeated document title/divider that a
+/// model may add to every chunk. Section headings and all instructional content
+/// remain intact.
+fn normalize_lecture_notes_part(markdown: &str) -> String {
+    markdown
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed == "---" || trimmed.starts_with("# ") {
+                None
+            } else {
+                Some(line.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn lecture_paragraph_node(text: String) -> serde_json::Value {
+    serde_json::json!({ "type": "paragraph", "content": [{ "type": "text", "text": text }] })
+}
+
+// AI output occasionally arrives as one perfectly valid but exhausting
+// paragraph. Keep the source wording while giving the paper sensible reading
+// breaks. This applies to any subject, not a specific lecture or example.
+fn push_lecture_paragraphs(nodes: &mut Vec<serde_json::Value>, text: String) {
+    const TARGET_CHARS: usize = 520;
+    const MIN_BREAK_CHARS: usize = 240;
+    let mut paragraph = String::new();
+    for sentence in text.split_inclusive(|character: char| matches!(character, '.' | '!' | '?')) {
+        let sentence = sentence.trim();
+        if sentence.is_empty() { continue; }
+        let would_exceed_target = !paragraph.is_empty()
+            && paragraph.len() + 1 + sentence.len() > TARGET_CHARS;
+        if would_exceed_target && paragraph.len() >= MIN_BREAK_CHARS {
+            nodes.push(lecture_paragraph_node(std::mem::take(&mut paragraph)));
+        }
+        if !paragraph.is_empty() { paragraph.push(' '); }
+        paragraph.push_str(sentence);
+    }
+    if !paragraph.trim().is_empty() {
+        nodes.push(lecture_paragraph_node(paragraph));
+    }
+}
+
+fn lecture_code_block_node(lines: Vec<String>) -> Option<serde_json::Value> {
+    let text = lines.join("\n").trim_end().to_string();
+    (!text.trim().is_empty()).then(|| serde_json::json!({
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [{ "type": "text", "text": text }]
+    }))
+}
+
+fn flush_lecture_bullets(nodes: &mut Vec<serde_json::Value>, bullets: &mut Vec<String>) {
+    if bullets.is_empty() { return; }
+    let items = std::mem::take(bullets).into_iter().map(|text| {
+        serde_json::json!({ "type": "listItem", "content": [lecture_paragraph_node(text)] })
+    }).collect::<Vec<_>>();
+    nodes.push(serde_json::json!({ "type": "bulletList", "content": items }));
+}
+
+fn lecture_markdown_to_editor_content(markdown: &str) -> String {
+    let mut nodes = Vec::new();
+    let mut bullets = Vec::new();
+    let mut code_lines: Option<Vec<String>> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            flush_lecture_bullets(&mut nodes, &mut bullets);
+            if let Some(lines) = code_lines.take() {
+                if let Some(node) = lecture_code_block_node(lines) { nodes.push(node); }
+            } else {
+                code_lines = Some(Vec::new());
+            }
+            continue;
+        }
+        if let Some(lines) = code_lines.as_mut() {
+            lines.push(line.trim_end().to_string());
+            continue;
+        }
+        if trimmed.is_empty() || trimmed == "---" {
+            flush_lecture_bullets(&mut nodes, &mut bullets);
+            continue;
+        }
+        let heading = [(3usize, "### "), (2usize, "## "), (1usize, "# ")]
+            .iter()
+            .find_map(|(level, prefix)| trimmed.strip_prefix(prefix).map(|text| (*level, text)));
+        if let Some((level, text)) = heading {
+            flush_lecture_bullets(&mut nodes, &mut bullets);
+            let text = clean_lecture_markdown_line(text);
+            if !text.is_empty() {
+                // Lecture titles belong to the lecture itself, not once per AI
+                // chunk. Keep imported/generated note sections at H2 or below.
+                nodes.push(serde_json::json!({ "type": "heading", "attrs": { "level": level.max(2) }, "content": [{ "type": "text", "text": text }] }));
+            }
+            continue;
+        }
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
+            let text = clean_lecture_markdown_line(trimmed);
+            if !text.is_empty() { bullets.push(text); }
+            continue;
+        }
+        let bold_heading = trimmed.strip_prefix("**").and_then(|text| text.strip_suffix("**"));
+        if let Some(text) = bold_heading.filter(|text| !text.contains("**")) {
+            flush_lecture_bullets(&mut nodes, &mut bullets);
+            let text = clean_lecture_markdown_line(text);
+            if !text.is_empty() {
+                nodes.push(serde_json::json!({ "type": "heading", "attrs": { "level": 3 }, "content": [{ "type": "text", "text": text }] }));
+            }
+            continue;
+        }
+        flush_lecture_bullets(&mut nodes, &mut bullets);
+        let text = clean_lecture_markdown_line(trimmed);
+        if !text.is_empty() { push_lecture_paragraphs(&mut nodes, text); }
+    }
+    if let Some(lines) = code_lines.take() {
+        if let Some(node) = lecture_code_block_node(lines) { nodes.push(node); }
+    }
+    flush_lecture_bullets(&mut nodes, &mut bullets);
+    if nodes.is_empty() { nodes.push(serde_json::json!({ "type": "paragraph" })); }
+    serde_json::json!({ "type": "doc", "content": nodes }).to_string()
+}
+
+fn lecture_markdown_to_plain_text(markdown: &str) -> String {
+    markdown.lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .map(clean_lecture_markdown_line)
+        .filter(|line| !line.is_empty() && line != "---")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn usable_lecture_notes(value: &str, transcript_part: &str) -> Option<String> {
+    let notes = normalize_lecture_notes_part(value);
+    let normalized_notes = normalize_note_fragment(&notes);
+    let normalized_transcript = normalize_note_fragment(transcript_part);
+    if normalized_notes.is_empty() {
+        return None;
+    }
+    // A model occasionally echoes the source when it is interrupted. That is a
+    // transcript, not study notes, and must never replace a lecture paper.
+    let likely_transcript_echo = normalized_notes.len() >= normalized_transcript.len().saturating_mul(2) / 3
+        && normalized_notes.matches(" · ").count() >= 4;
+    let timestamp_sections = notes.lines().filter(|line| {
+        let line = line.trim();
+        (line.starts_with('[') || line.starts_with('#') || line.starts_with("**["))
+            && line.contains(':')
+            && line.contains("Professor")
+    }).count();
+    (!likely_transcript_echo && timestamp_sections < 3).then_some(notes)
+}
+
+fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
+    let highlights = detailed_notes.lines()
+        .map(clean_lecture_markdown_line)
+        .filter(|line| line.len() > 18)
+        .take(18)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "overview": "The complete chronological lecture notes are available below and were also added to this empty lecture paper.",
+        "keyPoints": highlights,
+        "concepts": [],
+        "questions": [],
+        "nextSteps": []
+    })
+}
+
+fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str, prior_generated_notes: Option<&str>) -> CommandResult<bool> {
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let (title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
+        "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
+        [lecture_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|_| "That lecture could not be found.".to_string())?;
+    let current_is_prior_generated_notes = prior_generated_notes
+        .map(lecture_markdown_to_plain_text)
+        .map(|prior_plain| normalize_note_fragment(&prior_plain) == normalize_note_fragment(&current_plain))
+        .unwrap_or(false);
+    // A regeneration may safely replace the AI-created draft it originally
+    // filled. If the student has written or changed anything, leave it alone.
+    if !current_plain.trim().is_empty() && !current_is_prior_generated_notes {
+        return Ok(false);
+    }
+    let content = lecture_markdown_to_editor_content(detailed_notes);
+    let plain = lecture_markdown_to_plain_text(detailed_notes);
+    if plain.is_empty() { return Ok(false); }
+    transaction.execute(
+        "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
+        params![Uuid::new_v4().to_string(), lecture_id, title, current_content, current_plain, revision],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "UPDATE lectures SET content=?1, content_plain=?2, revision=?3, updated_at=CURRENT_TIMESTAMP WHERE id=?4",
+        params![content, plain, revision + 1, lecture_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn create_lecture_note_suggestions(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    connection: &Connection,
+    lecture_id: &str,
+    lecture_context: &str,
+    lecture_digest: &str,
+) -> CommandResult<Vec<LectureNoteSuggestion>> {
+    let (student_notes, timeline) = compact_lecture_note_timeline(connection, lecture_id)?;
+    if student_notes.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let system = "You create optional, precise additions to a student's live lecture notes. Return only a valid JSON array. Each object must have exactly original, replacement, reason, timestamp, kind. original must be an exact, short excerpt copied from the student's current notes (3 to 35 words). replacement must begin with that exact original text, then naturally add only the missing directly relevant lecture context in the student's concise note-taking voice. Do not rewrite the whole note, create headings, add generic summaries, add unrelated ideas, invent facts, cite sources, or add more than 70 words total to any one suggestion. Examine the full notes and timestamped lecture moments for every supported partial idea; return 12 to 24 distinct useful additions when the material supports them, rather than stopping after a few examples. reason must briefly say what was filled in. timestamp must be the relevant MM:SS moment. kind must be bridge or clarify. Return [] only if no responsible additions are supported.";
+    let prompt = format!(
+        "LECTURE CONTEXT\n{}\n\nCURRENT STUDENT NOTES\n{}\n\nTIMESTAMPED NOTE MOMENTS\n{}\n\nLECTURE GUIDE\n{}",
+        lecture_context,
+        student_notes.chars().take(28_000).collect::<String>(),
+        timeline.chars().take(30_000).collect::<String>(),
+        lecture_digest.chars().take(24_000).collect::<String>(),
+    );
+    let output = local_chat_text(client, port, system, &prompt, 4_200)?;
+    let json = json_array_from_response(&output).ok_or_else(|| "The local AI model returned unreadable lecture-note suggestions.".to_string())?;
+    let suggestions = serde_json::from_str::<Vec<LectureNoteSuggestion>>(&json).map_err(|_| "The local AI model returned unreadable lecture-note suggestions.".to_string())?;
+    let normalized_notes = normalize_note_fragment(&student_notes).to_lowercase();
+    let mut seen = HashSet::new();
+    Ok(suggestions.into_iter().filter_map(|suggestion| {
+        let original = suggestion.original.trim().to_string();
+        let replacement = suggestion.replacement.trim().to_string();
+        let normalized_original = normalize_note_fragment(&original);
+        let normalized_replacement = normalize_note_fragment(&replacement);
+        let original_words = normalized_original.split_whitespace().count();
+        let replacement_words = normalized_replacement.split_whitespace().count();
+        let valid = original_words >= 3
+            && original_words <= 35
+            && replacement_words > original_words
+            && replacement_words <= 70
+            && original.len() <= 360
+            && replacement.len() <= 760
+            && normalized_notes.contains(&normalized_original.to_lowercase())
+            && normalized_replacement.to_lowercase().starts_with(&normalized_original.to_lowercase())
+            && matches!(suggestion.kind.trim().to_lowercase().as_str(), "bridge" | "clarify");
+        if !valid || !seen.insert(normalized_original.to_lowercase()) { return None; }
+        Some(LectureNoteSuggestion {
+            original,
+            replacement,
+            reason: suggestion.reason.trim().chars().take(280).collect(),
+            timestamp: suggestion.timestamp.trim().chars().take(12).collect(),
+            kind: suggestion.kind.trim().to_lowercase(),
+        })
+    }).take(24).collect())
+}
+
+fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_id: &str) -> CommandResult<()> {
+    let connection = database.open()?;
+    let settings = get_settings(&connection, None)?;
+    if !settings.ai_enabled || settings.ai_model_path.trim().is_empty() {
+        return Err("Enable General AI to create the lecture analysis.".into());
+    }
+    let model_path = resolve_ai_model_path(app, &settings.ai_model_path)?;
+    let (raw_transcript, cleaned_transcript) = stored_lecture_transcripts(&connection, lecture_id)?;
+    let lecture_context = lecture_analysis_context(&connection, lecture_id)?;
+    let prior_detailed_notes: Option<String> = connection
+        .query_row(
+            "SELECT detailed_notes FROM lecture_analyses WHERE lecture_id=?1",
+            [lecture_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if cleaned_transcript.trim().is_empty() { return Err("There is no transcript to analyze yet.".into()); }
+    connection.execute("INSERT INTO lecture_analyses (lecture_id, status, raw_transcript, cleaned_transcript) VALUES (?1,'analyzing',?2,?3) ON CONFLICT(lecture_id) DO UPDATE SET status='analyzing', raw_transcript=excluded.raw_transcript, cleaned_transcript=excluded.cleaned_transcript, updated_at=CURRENT_TIMESTAMP", params![lecture_id, raw_transcript, cleaned_transcript]).map_err(|error| error.to_string())?;
+    let port = ensure_ai_server(&model_path, app)?;
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let chunks = split_source_for_ai(&cleaned_transcript, AI_SOURCE_CHUNK_CHARS);
+    let mut notes = Vec::with_capacity(chunks.len());
+    for (index, chunk) in chunks.iter().enumerate() {
+        let progress_connection = database.open()?;
+        update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Building detailed study notes: part {} of {}...", index + 1, chunks.len()))?;
+        emit_lecture_recording_update(app, database, lecture_id);
+        let system = "You are SoFlo's meticulous lecture note-taker. Turn this chronological portion of one lecture into dense, complete study notes that a student could rely on instead of rewatching it. Preserve every academic detail: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Keep the order of the lecture. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. This is one continuation inside a larger note document: do not add a document title, an H1 heading, a divider, timestamp, speaker label, or a recap of an earlier part. Do not turn every spoken moment into a section; merge related material into a few clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, and fenced ```python code blocks for every Python example. Never put code in ordinary prose.";
+        let prompt = format!("LECTURE CONTEXT\n{}\n\nLECTURE PART {} OF {} — continue directly from the prior part when applicable.\n\n{}", lecture_context, index + 1, chunks.len(), chunk);
+        let note = local_chat_text(&client, port, system, &prompt, 2_000)
+            .ok()
+            .and_then(|value| usable_lecture_notes(&value, chunk));
+        // A retry gives a temporarily busy local model a shorter, simpler
+        // instruction before we mark analysis as failed. We never substitute
+        // the raw transcript for an AI note draft.
+        let note = note.or_else(|| {
+            let retry_system = "Create structured study notes from this lecture excerpt. Use H2/H3 headings, short paragraphs, and bullets. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, a divider, or raw transcript text.";
+            local_chat_text(&client, port, retry_system, &prompt, 1_400)
+                .ok()
+                .and_then(|value| usable_lecture_notes(&value, chunk))
+        }).ok_or_else(|| format!("SoFlo could not turn lecture part {} into study notes. Your existing lecture paper was left unchanged.", index + 1))?;
+        notes.push(note);
+    }
+    let detailed_notes = notes.join("\n\n");
+    let digest_chunks = split_source_for_ai(&detailed_notes, AI_SOURCE_CHUNK_CHARS * 2);
+    let mut digest_parts = Vec::with_capacity(digest_chunks.len());
+    for (index, chunk) in digest_chunks.iter().enumerate() {
+        let progress_connection = database.open()?;
+        update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Organizing your lecture guide: section {} of {}...", index + 1, digest_chunks.len()))?;
+        emit_lecture_recording_update(app, database, lecture_id);
+        let system = "You are SoFlo's lecture analyst. Condense these detailed chronological study notes into a faithful sectional digest for a final course guide. Preserve all concrete facts, definitions, examples, assignments, questions, and cautions. Do not invent or remove meaningful academic content.";
+        let prompt = format!("LECTURE CONTEXT\n{}\n\nDETAILED NOTES SECTION {} OF {}\n\n{}", lecture_context, index + 1, digest_chunks.len(), chunk);
+        let digest = local_chat_text(&client, port, system, &prompt, 1_200)
+            .ok()
+            .filter(|digest| !digest.trim().is_empty())
+            .unwrap_or_else(|| chunk.to_string());
+        digest_parts.push(digest);
+    }
+    let synthesis = digest_parts.join("\n\n");
+    let system = "You are SoFlo's lecture analyst. Using every supplied lecture digest, return exactly one valid JSON object with keys overview, keyPoints, concepts, questions, nextSteps. Make the overview a helpful multi-sentence explanation rather than a one-line summary. The other keys are arrays with as many useful entries as the lecture supports. Preserve all assignments, dates, names, examples, corrections, and uncertainty. Never invent sources or information not present in the lecture.";
+    let output = local_chat_text(&client, port, system, &format!("LECTURE CONTEXT\n{}\n\nCreate a complete course-ready lecture guide from these chronological digests:\n\n{}", lecture_context, synthesis), 3_200).unwrap_or_default();
+    let value: serde_json::Value = json_object_from_response(&output)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_else(|| fallback_lecture_summary(&detailed_notes));
+    let array = |key: &str| value.get(key).and_then(|item| item.as_array()).map(|items| items.iter().filter_map(|item| item.as_str().map(|text| text.trim().to_string())).filter(|text| !text.is_empty()).take(36).collect::<Vec<_>>()).unwrap_or_default();
+    let progress_connection = database.open()?;
+    update_recording_status(&progress_connection, lecture_id, "analyzing", "Finding optional additions for your own notes...")?;
+    emit_lecture_recording_update(app, database, lecture_id);
+    let note_suggestions = create_lecture_note_suggestions(&client, port, &progress_connection, lecture_id, &lecture_context, &detailed_notes).unwrap_or_default();
+    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes, prior_detailed_notes.as_deref())?;
+    let connection = database.open()?;
+    connection.execute("UPDATE lecture_analyses SET status='complete', overview=?1, key_points_json=?2, concepts_json=?3, questions_json=?4, next_steps_json=?5, detailed_notes=?6, note_suggestions_json=?7, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?8", params![value.get("overview").and_then(|item| item.as_str()).unwrap_or_default().trim(), serde_json::to_string(&array("keyPoints")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("concepts")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("questions")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("nextSteps")).unwrap_or_else(|_| "[]".into()), detailed_notes, serde_json::to_string(&note_suggestions).unwrap_or_else(|_| "[]".into()), lecture_id]).map_err(|error| error.to_string())?;
+    touch_ai_server();
+    if auto_filled_lecture {
+        let _ = app.emit("lecture-content-updated", lecture_id.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn retry_lecture_analysis(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    lecture_id: String,
+) -> CommandResult<()> {
+    let connection = database.open()?;
+    let recording = get_lecture_recording_from(&connection, &lecture_id)?;
+    if !matches!(recording.state.as_str(), "complete" | "analysis_failed") {
+        return Err("Finish the lecture transcript before retrying the analysis.".into());
+    }
+    update_recording_status(&connection, &lecture_id, "analyzing", "Preparing lecture analysis…")?;
+    let database_handle = database.inner().clone();
+    let thread_app = app.clone();
+    let thread_lecture_id = lecture_id.clone();
+    thread::spawn(move || {
+        let result = create_lecture_analysis(&thread_app, &database_handle, &thread_lecture_id);
+        if let Ok(connection) = database_handle.open() {
+            let message = match result {
+                Ok(()) => ("complete", "Lecture analysis is ready.".to_string()),
+                Err(error) => ("analysis_failed", format!("Recording and transcript are ready, but analysis needs another try: {}", error)),
+            };
+            let _ = update_recording_status(&connection, &thread_lecture_id, message.0, &message.1);
+        }
+        emit_lecture_recording_update(&thread_app, &database_handle, &thread_lecture_id);
+    });
+    emit_lecture_recording_update(&app, database.inner(), &lecture_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn queue_lecture_transcription(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    lecture_id: String,
+    chunk_index: i32,
+    model_path: String,
+) -> CommandResult<()> {
+    let model_path = resolve_voice_model_path(&app, &model_path)?;
+    voice_job_sender().send(VoiceTranscriptionJob { app, database: database.inner().clone(), lecture_id, chunk_index, model_path, finalize: false }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
+}
+
+#[tauri::command]
+pub fn finish_lecture_recording(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    lecture_id: String,
+    model_path: String,
+) -> CommandResult<()> {
+    let model_path = resolve_voice_model_path(&app, &model_path)?;
+    let connection = database.open()?;
+    let recording = get_lecture_recording_from(&connection, &lecture_id)?;
+    if !matches!(recording.state.as_str(), "recording" | "interrupted" | "queued") { return Err("There is no active lecture recording to finish.".into()); }
+    connection.execute("UPDATE lecture_recordings SET state='queued', status_message='Finishing the recording after the remaining transcript chunks.', stopped_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT chunk_index FROM lecture_recording_chunks WHERE lecture_id=?1 AND state != 'complete' ORDER BY chunk_index").map_err(|error| error.to_string())?;
+    let pending = statement.query_map([&lecture_id], |row| row.get::<_, i32>(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    for chunk_index in pending {
+        voice_job_sender().send(VoiceTranscriptionJob { app: app.clone(), database: database.inner().clone(), lecture_id: lecture_id.clone(), chunk_index, model_path: model_path.clone(), finalize: false }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+    }
+    voice_job_sender().send(VoiceTranscriptionJob { app, database: database.inner().clone(), lecture_id, chunk_index: -1, model_path, finalize: true }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
+}
+
+#[tauri::command]
+pub fn recover_interrupted_lecture_recordings(database: State<'_, Database>) -> CommandResult<Vec<LectureRecording>> {
+    let connection = database.open()?;
+    connection.execute("UPDATE lecture_recordings SET state='interrupted', status_message=CASE WHEN source_kind='import' THEN 'Audio import was interrupted. The prepared audio is saved and can be finished.' ELSE 'Recording was interrupted. You can continue or finish the saved audio.' END, updated_at=CURRENT_TIMESTAMP WHERE state IN ('recording','importing','transcribing','queued','finalizing','analyzing')", []).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT lecture_id, state, source_kind, audio_path, raw_audio_path, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at, updated_at FROM lecture_recordings WHERE state='interrupted' ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
+    let recordings = statement.query_map([], recording_from_row).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(recordings)
 }
 
 #[tauri::command]
@@ -6121,7 +7361,8 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
         json_array_from_response, json_object_from_response, semester_end_date,
-        quick_mechanics_prepass,
+        lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
+        usable_lecture_notes,
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
         StudyWebSemanticPlan, StudyWebSourceCard,
@@ -6174,6 +7415,32 @@ mod tests {
             json_object_from_response(response).as_deref(),
             Some("{\"word\":\"test\",\"senses\":[{\"definition\":\"A trial\"}]}")
         );
+    }
+
+    #[test]
+    fn joins_ai_lecture_parts_without_repeated_document_titles() {
+        let part = "# CSCI 130 — August 14\n\n## String indexing\n- Strings use zero-based positions\n\n---\n\n# Repeated title\n\n### Example\n- s[0] returns the first character";
+        let normalized = normalize_lecture_notes_part(part);
+        assert!(!normalized.contains("# CSCI"));
+        assert!(!normalized.contains("# Repeated"));
+        assert!(!normalized.contains("---"));
+        assert!(normalized.contains("## String indexing"));
+        assert!(normalized.contains("### Example"));
+
+        let content = lecture_markdown_to_editor_content("# A title\n\n## A real section\n\n**Worked example**\n\n```python\nprint(\"hello\")\n```");
+        assert!(!content.contains("\"level\":1"));
+        assert!(content.contains("\"level\":2"));
+        assert!(content.contains("\"type\":\"codeBlock\""));
+        assert!(content.contains("print"));
+    }
+
+    #[test]
+    fn rejects_a_transcript_echo_as_lecture_notes() {
+        let transcript = "00:00–00:20 · Professor · Today we will review strings.\n00:20–00:40 · Professor · Strings are immutable.\n00:40–01:00 · Professor · Use indexes to access characters.\n01:00–01:20 · Professor · Slicing creates substrings.";
+        assert!(usable_lecture_notes(transcript, transcript).is_none());
+        assert!(usable_lecture_notes("## Strings\n- Strings are immutable.\n- Indexes access characters.", transcript).is_some());
+        let timestamped_notes = "## Strings\n\n#### [00:00–00:20 · Professor]\nStrings are immutable.\n\n#### [00:20–00:40 · Professor]\nIndexes access characters.\n\n#### [00:40–01:00 · Professor]\nSlicing returns a substring.";
+        assert!(usable_lecture_notes(timestamped_notes, "A brief transcript excerpt.").is_none());
     }
 
     #[test]
