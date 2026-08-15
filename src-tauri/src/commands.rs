@@ -339,6 +339,11 @@ pub fn is_installer_launch() -> bool {
     std::env::args().any(|argument| argument == "--installer")
 }
 
+#[tauri::command]
+pub fn is_uninstaller_launch() -> bool {
+    std::env::args().any(|argument| argument == "--uninstaller")
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallerVersionInfo {
@@ -369,6 +374,16 @@ fn setup_executable_argument() -> CommandResult<PathBuf> {
     Ok(path)
 }
 
+fn uninstaller_executable_argument() -> CommandResult<PathBuf> {
+    let path = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--uninstall-exe=").map(PathBuf::from))
+        .ok_or_else(|| "SoFlo could not find its uninstall worker.".to_string())?;
+    if !path.is_file() {
+        return Err("SoFlo could not find its uninstall worker.".into());
+    }
+    Ok(path)
+}
+
 #[tauri::command]
 pub fn run_installer_worker() -> CommandResult<()> {
     let setup = setup_executable_argument()?;
@@ -380,6 +395,22 @@ pub fn run_installer_worker() -> CommandResult<()> {
         Ok(())
     } else {
         Err("SoFlo could not finish installing. Please try again.".into())
+    }
+}
+
+#[tauri::command]
+pub fn run_uninstaller_worker(erase_data: bool) -> CommandResult<()> {
+    let uninstaller = uninstaller_executable_argument()?;
+    let mut command = Command::new(uninstaller);
+    command.arg("--perform-silent-uninstall=1");
+    if erase_data { command.arg("--erase-data=1"); }
+    let status = command
+        .status()
+        .map_err(|_| "SoFlo could not begin uninstalling.".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("SoFlo could not finish uninstalling. Please try again.".into())
     }
 }
 
@@ -398,6 +429,20 @@ pub fn launch_installed_soflo_and_close(app: tauri::AppHandle) -> CommandResult<
     Command::new(installed_app)
         .spawn()
         .map_err(|_| "SoFlo could not open after installation.".to_string())?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn launch_uninstaller_and_close(app: tauri::AppHandle) -> CommandResult<()> {
+    let current = std::env::current_exe().map_err(|_| "SoFlo could not locate its installation.".to_string())?;
+    let uninstaller = current.parent()
+        .map(|directory| directory.join("uninstall.exe"))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| "SoFlo's uninstaller is unavailable. Reinstall SoFlo to restore it.".to_string())?;
+    Command::new(uninstaller)
+        .spawn()
+        .map_err(|_| "SoFlo could not open its uninstaller.".to_string())?;
     app.exit(0);
     Ok(())
 }

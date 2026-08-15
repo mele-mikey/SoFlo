@@ -13,9 +13,12 @@ const call = async <T>(command: string, arguments_?: Record<string, unknown>) =>
 
 export const api = {
   isInstallerLaunch: () => invoke<boolean>('is_installer_launch'),
+  isUninstallerLaunch: () => invoke<boolean>('is_uninstaller_launch'),
   installerVersionInfo: () => invoke<{ currentVersion: string; targetVersion: string }>('installer_version_info'),
   runInstallerWorker: () => invoke<void>('run_installer_worker'),
   launchInstalledSofloAndClose: () => invoke<void>('launch_installed_soflo_and_close'),
+  runUninstallerWorker: (eraseData: boolean) => invoke<void>('run_uninstaller_worker', { eraseData }),
+  launchUninstallerAndClose: () => invoke<void>('launch_uninstaller_and_close'),
   bootstrap: () => call<BootstrapData>('bootstrap'),
   listSemesters: (includeArchived = false) => call<Semester[]>('list_semesters', { includeArchived }),
   createSemester: (input: { name: string; term: string; year: number }) => call<Semester>('create_semester', { input }),

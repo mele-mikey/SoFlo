@@ -438,7 +438,20 @@ Function FinishLeave
 FunctionEnd
 
 Function un.onInit
+  StrCpy $WorkerMode 0
   StrCpy $UninstallData 0
+  ; Never expose NSIS's stock pages. The section below opens SoFlo's own
+  ; uninstaller UI unless this is the background worker it launches.
+  SetSilent silent
+  ${GetParameters} $0
+  ${GetOptions} $0 "--perform-silent-uninstall=" $1
+  ${If} $1 == "1"
+    StrCpy $WorkerMode 1
+  ${EndIf}
+  ${GetOptions} $0 "--erase-data=" $1
+  ${If} $1 == "1"
+    StrCpy $UninstallData 1
+  ${EndIf}
 FunctionEnd
 
 Function un.ConfirmPage
@@ -467,6 +480,17 @@ Function un.ConfirmLeave
 FunctionEnd
 
 Section "Uninstall"
+  ${If} $WorkerMode == 0
+    ; The visible uninstaller is the same SoFlo-styled Tauri experience as
+    ; setup. NSIS remains the small background worker that removes files.
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File /oname=SoFlo-UninstallUI.exe "${APP_EXE}"
+    ; Do not wait here: the worker needs this uninstaller process to exit so
+    ; Windows can remove uninstall.exe cleanly after the SoFlo UI confirms.
+    Exec '"$PLUGINSDIR\SoFlo-UninstallUI.exe" --uninstaller --uninstall-exe="$EXEPATH"'
+    Quit
+  ${EndIf}
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SoFlo"
   Delete "$DESKTOP\SoFlo.lnk"
   Delete "$SMPROGRAMS\SoFlo\SoFlo.lnk"

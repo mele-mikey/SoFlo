@@ -19,7 +19,7 @@ interface SettingsViewProps {
   onStartWalkthrough: () => void
 }
 
-type BusyAction = 'export' | 'import' | 'wipe' | null
+type BusyAction = 'export' | 'import' | 'wipe' | 'uninstall' | null
 
 const MODEL_INFORMATION_URL = 'https://huggingface.co/Qwen/Qwen3-4B-GGUF'
 const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
@@ -30,6 +30,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
   const [busy, setBusy] = useState<BusyAction>(null)
   const [clearTrashOpen, setClearTrashOpen] = useState(false)
   const [wipeConfirmOpen, setWipeConfirmOpen] = useState(false)
+  const [uninstallConfirmOpen, setUninstallConfirmOpen] = useState(false)
   const [deleteModelsOpen, setDeleteModelsOpen] = useState(false)
   const [downloadingModel, setDownloadingModel] = useState(false)
   const [securityDialog, setSecurityDialog] = useState<{ type: 'pin' | 'password'; remove: boolean } | null>(null)
@@ -86,6 +87,16 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     } catch (error) {
       onToast(error instanceof Error ? error.message : 'SoFlo could not wipe its local data.', 'error')
       setBusy(null)
+    }
+  }
+
+  const uninstallApp = async () => {
+    setBusy('uninstall')
+    try {
+      await api.launchUninstallerAndClose()
+    } catch (error) {
+      setBusy(null)
+      onToast(error instanceof Error ? error.message : 'SoFlo could not open its uninstaller.', 'error')
     }
   }
 
@@ -164,14 +175,16 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section danger-zone">
-      <SectionHeading icon={<AlertTriangle size={18} />} title="Danger zone" detail="Move or permanently remove your local SoFlo library." />
+      <SectionHeading icon={<AlertTriangle size={18} />} title="Danger zone" detail="Manage your local library or remove SoFlo from this computer." />
       <SettingRow title="Export SoFlo data" detail="Save your entire library as one portable .soflo file in Downloads."><button className="button button-soft button-small" disabled={busy !== null} onClick={() => void exportData()}><Download size={15} /> {busy === 'export' ? 'Exporting...' : 'Export data'}</button></SettingRow>
       <SettingRow title="Import SoFlo data" detail="Replace this computer's library with a .soflo file."><button className="button button-quiet button-small" disabled={busy !== null} onClick={() => void importData()}><Upload size={15} /> {busy === 'import' ? 'Importing...' : 'Import data'}</button></SettingRow>
       <SettingRow title="Wipe local data" detail="Permanently erase every class, paper, lecture, card, and setting from this computer."><button className="button button-danger button-small" disabled={busy !== null} onClick={() => setWipeConfirmOpen(true)}><AlertTriangle size={15} /> Wipe data</button></SettingRow>
+      <SettingRow title="Uninstall SoFlo" detail="Remove the app from this Windows account. Your library stays unless you choose to erase it in SoFlo’s uninstaller."><button className="button button-danger button-small" disabled={busy !== null} onClick={() => setUninstallConfirmOpen(true)}><AlertTriangle size={15} /> Uninstall app</button></SettingRow>
     </section>
 
     {clearTrashOpen && <ConfirmDialog title="Clear the entire trash?" copy="This permanently deletes every paper and flashcard set in Recently deleted. This cannot be undone." confirmLabel="Clear trash" onClose={() => setClearTrashOpen(false)} onConfirm={() => void api.emptyTrash().then(() => { setClearTrashOpen(false); onToast('Trash cleared.') }).catch(() => onToast('Trash could not be cleared.', 'error'))} />}
     {wipeConfirmOpen && <ConfirmDialog eyebrow="IRREVERSIBLE ACTION" title="Wipe all local data?" copy="This permanently removes every class, paper, lecture, flashcard, schedule, setting, and saved credential on this computer. Export a .soflo file first if you may need anything later." confirmLabel="Wipe everything" busy={busy === 'wipe'} onClose={() => setWipeConfirmOpen(false)} onConfirm={() => void wipeData()} />}
+    {uninstallConfirmOpen && <ConfirmDialog eyebrow="UNINSTALL SOFLO" title="Open SoFlo’s uninstaller?" copy="SoFlo will close, then open its own uninstaller. Your data is kept by default; the next screen lets you choose whether to erase it." confirmLabel="Continue" busy={busy === 'uninstall'} onClose={() => setUninstallConfirmOpen(false)} onConfirm={() => void uninstallApp()} />}
     {deleteModelsOpen && <ConfirmDialog eyebrow="LOCAL AI" title="Delete local AI models?" copy="This removes SoFlo's downloaded local models from this PC. AI actions stay disabled until you turn AI back on and download models again." confirmLabel="Delete models" onClose={() => setDeleteModelsOpen(false)} onConfirm={() => void deleteAiModels()} />}
     {securityDialog && <SecurityDialog security={security} type={securityDialog.type} remove={securityDialog.remove} onClose={() => setSecurityDialog(null)} onUpdated={(next) => { onSecurityChange(next); setSecurityDialog(null); onToast(next.configured ? 'Library security updated.' : 'Library encryption removed.') }} />}
     {aiInfoOpen && <AiInfoDialog modelPath={settings.aiModelPath} onClose={() => setAiInfoOpen(false)} />}

@@ -13,13 +13,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let data_directory: PathBuf = app
-                .path()
-                .app_data_dir()
-                .expect("could not determine app-data directory");
-            let database = Database::new(data_directory.join("soflo.sqlite3"))
-                .expect("could not initialize SoFlo database");
-            app.manage(database);
+            let setup_mode = std::env::args().any(|argument| argument == "--installer" || argument == "--uninstaller");
+            if !setup_mode {
+                let data_directory: PathBuf = app
+                    .path()
+                    .app_data_dir()
+                    .expect("could not determine app-data directory");
+                let database = Database::new(data_directory.join("soflo.sqlite3"))
+                    .expect("could not initialize SoFlo database");
+                app.manage(database);
+            }
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
                     window.minimize()?;
@@ -41,9 +44,12 @@ pub fn run() {
             commands::close_window,
             commands::force_close_window,
             commands::is_installer_launch,
+            commands::is_uninstaller_launch,
             commands::installer_version_info,
             commands::run_installer_worker,
             commands::launch_installed_soflo_and_close,
+            commands::run_uninstaller_worker,
+            commands::launch_uninstaller_and_close,
             commands::import_pdf_text,
             commands::import_syllabus_pdf_text,
             commands::import_word_text,
