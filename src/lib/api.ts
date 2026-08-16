@@ -124,6 +124,7 @@ export const api = {
   researchAndGradeText: (modelPath: string, text: string, paperContext: string) => call<string>('research_and_grade_text', { modelPath, text, paperContext }),
   defineWord: (modelPath: string, word: string, paperContext: string) => call<string>('define_word', { modelPath, word, paperContext }),
   aiThesaurus: (modelPath: string, word: string, paperContext: string) => call<string>('ai_thesaurus', { modelPath, word, paperContext }),
+  generalAiModelReady: () => call<boolean>('general_ai_model_ready'),
   wordAiModelReady: () => call<boolean>('word_ai_model_ready'),
   voiceAiModelReady: () => call<boolean>('voice_ai_model_ready'),
   prepareAiForSession: (generalModelPath: string, writingModelPath: string, mode: 'writing' | 'study') => call<void>('prepare_ai_for_session', { generalModelPath, writingModelPath, mode }),

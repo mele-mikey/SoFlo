@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     fs,
     io::{Cursor, Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -158,6 +159,7 @@ const AI_GPU_LAYERS: &str = "32";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+const DEFAULT_AI_MODEL_MINIMUM_BYTES: u64 = 2_000_000_000;
 const WORD_AI_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
 const WORD_AI_MINIMUM_BYTES: u64 = 1_000_000_000;
 const LEGACY_DEFAULT_AI_MODEL_NAME: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
@@ -204,6 +206,58 @@ fn managed_ai_model(role: &str, tier: &str) -> CommandResult<ManagedAiModel> {
 fn managed_models_dir(app: &tauri::AppHandle) -> CommandResult<std::path::PathBuf> {
     Ok(app.path().app_data_dir().map_err(|error| error.to_string())?.join("models"))
 }
+
+fn general_model_minimum_bytes(path: &Path) -> u64 {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) if name.eq_ignore_ascii_case(GENERAL_HIGH_MODEL_NAME) => 4_000_000_000,
+        Some(name) if name.eq_ignore_ascii_case(DEFAULT_AI_MODEL_NAME) => {
+            DEFAULT_AI_MODEL_MINIMUM_BYTES
+        }
+        _ => 1_000_000_000,
+    }
+}
+
+fn is_complete_general_ai_model(path: &Path) -> bool {
+    path.is_file()
+        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= general_model_minimum_bytes(path))
+}
+
+/// Desktop shortcuts do not always inherit the updated user PATH after llama.cpp
+/// is installed with WinGet. Resolve its normal locations explicitly so an
+/// installed SoFlo app has the same runtime access as a developer terminal.
+fn llama_server_executable() -> PathBuf {
+    let executable = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    if let Some(path) = env::var_os("PATH") {
+        for directory in env::split_paths(&path) {
+            let candidate = directory.join(executable);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local_data) = env::var_os("LOCALAPPDATA") {
+            let winget = PathBuf::from(&local_data).join("Microsoft").join("WinGet");
+            let link = winget.join("Links").join(executable);
+            if link.is_file() {
+                return link;
+            }
+            if let Ok(entries) = fs::read_dir(winget.join("Packages")) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().to_ascii_lowercase().starts_with("ggml.llamacpp_") {
+                        let candidate = entry.path().join(executable);
+                        if candidate.is_file() {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    PathBuf::from(executable)
+}
 struct AiServer {
     child: Child,
     model_path: String,
@@ -245,6 +299,9 @@ fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> Comman
     let size = fs::metadata(&model)
         .map_err(|_| "SoFlo could not read the local AI model.".to_string())?
         .len();
+    if size < general_model_minimum_bytes(&model) {
+        return Err("SoFlo's General AI model is incomplete. Download or update your models in Settings, then try again.".into());
+    }
     if size > 8_000_000_000 {
         return Err("Choose a compact local model (8B parameters or less).".into());
     }
@@ -291,6 +348,17 @@ pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>)
         managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME)
     } else { Path::new(&settings.ai_writing_model_path).to_path_buf() };
     Ok(is_complete_word_ai_model(&model))
+}
+
+#[tauri::command]
+pub fn general_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+    let settings = get_settings(&database.open()?, None)?;
+    let model = if settings.ai_model_path.trim().is_empty() {
+        managed_models_dir(&app)?.join(DEFAULT_AI_MODEL_NAME)
+    } else {
+        Path::new(&settings.ai_model_path).to_path_buf()
+    };
+    Ok(is_complete_general_ai_model(&model))
 }
 
 #[tauri::command]
@@ -1879,6 +1947,78 @@ fn shared_model_server_port(server_state: &'static OnceLock<Mutex<Option<AiServe
     Some(server.port)
 }
 
+fn start_llama_server(
+    model_path: &str,
+    port: u16,
+    context_size: &str,
+    reasoning: &str,
+    use_reasoning: bool,
+    gpu_layers: &str,
+) -> CommandResult<Child> {
+    let port = port.to_string();
+    let mut command = Command::new(llama_server_executable());
+    command.args([
+        "-m",
+        model_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--ctx-size",
+        context_size,
+        "--parallel",
+        AI_PARALLEL_REQUESTS,
+        "--gpu-layers",
+        gpu_layers,
+    ]);
+    if use_reasoning {
+        command.args(["--reasoning", reasoning, "--reasoning-budget", "1024"]);
+    }
+    command.arg("--no-webui");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command.spawn().map_err(|error| {
+        format!(
+            "SoFlo could not start llama.cpp ({error}). Install or update llama.cpp, then try again."
+        )
+    })
+}
+
+fn wait_for_model_server_start(
+    child: &mut Child,
+    port: u16,
+    app: &tauri::AppHandle,
+) -> CommandResult<()> {
+    let address: SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|_| "SoFlo could not start the local AI connection.".to_string())?;
+    let startup_started = Instant::now();
+    let startup_deadline = startup_started + Duration::from_secs(75);
+    while Instant::now() < startup_deadline {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err("SoFlo's local AI helper stopped while loading.".into());
+        }
+        if TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+            && ai_server_ready(port)
+        {
+            emit_ai_progress(app, 32, "Your local model is ready");
+            return Ok(());
+        }
+        if startup_started.elapsed() >= Duration::from_secs(30) {
+            emit_ai_progress(app, 28, "Still loading your private local model");
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+    Err("The local AI model took too long to start.".into())
+}
+
 fn ensure_model_server(
     server_state: &'static OnceLock<Mutex<Option<AiServer>>>,
     model_path: &str,
@@ -1910,85 +2050,52 @@ fn ensure_model_server(
         let _ = server.child.wait();
         *guard = None;
     }
-    let port_number = available_loopback_port()?;
-    let port = port_number.to_string();
-    let mut command = Command::new("llama-server");
-    command.args([
-        "-m",
-        model_path,
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &port,
-        "--ctx-size",
-        context_size,
-        "--parallel",
-        AI_PARALLEL_REQUESTS,
-        "--gpu-layers",
-        AI_GPU_LAYERS,
-        "--reasoning",
-        reasoning,
-        "--reasoning-budget",
-        "1024",
-        "--no-webui",
-    ]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let child = command.spawn().map_err(|_| {
-        "SoFlo could not start llama.cpp. Install llama.cpp to use local AI.".to_string()
-    })?;
-    *guard = Some(AiServer {
-        child,
-        model_path: model_path.to_string(),
-        context_size: context_size.to_string(),
-        reasoning: reasoning.to_string(),
-        port: port_number,
-        last_used: Instant::now(),
-    });
-    drop(guard);
-    let address: SocketAddr = format!("127.0.0.1:{}", port_number)
-        .parse()
-        .map_err(|_| "SoFlo could not start the local AI connection.".to_string())?;
-    // A cold 4B model can take well over 20 seconds to become ready on a
-    // laptop even though the helper process itself started correctly. Keep
-    // waiting for that owned child instead of treating a normal cold load as
-    // a failed review.
     emit_ai_progress(app, 22, "Loading your private local model");
-    let startup_started = Instant::now();
-    let startup_deadline = startup_started + Duration::from_secs(75);
-    while Instant::now() < startup_deadline {
-        if let Some(state) = server_state.get() {
-            let mut server = state
-                .lock()
-                .map_err(|_| "SoFlo's local AI state is unavailable.".to_string())?;
-            if let Some(active) = server.as_mut() {
-                if active
-                    .child
-                    .try_wait()
-                    .map_err(|error| error.to_string())?
-                    .is_some()
-                {
-                    *server = None;
-                    return Err("SoFlo's local AI helper stopped while loading.".into());
-                }
+    let profiles: &[(bool, &str)] = if reasoning.eq_ignore_ascii_case("on") {
+        &[(true, AI_GPU_LAYERS), (false, AI_GPU_LAYERS), (false, "0")]
+    } else {
+        &[(false, AI_GPU_LAYERS), (false, "0")]
+    };
+    let mut last_error = "SoFlo's local AI helper stopped while loading.".to_string();
+    for (use_reasoning, gpu_layers) in profiles {
+        let port = available_loopback_port()?;
+        let mut child = match start_llama_server(
+            model_path,
+            port,
+            context_size,
+            reasoning,
+            *use_reasoning,
+            gpu_layers,
+        ) {
+            Ok(child) => child,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        match wait_for_model_server_start(&mut child, port, app) {
+            Ok(()) => {
+                *guard = Some(AiServer {
+                    child,
+                    model_path: model_path.to_string(),
+                    context_size: context_size.to_string(),
+                    reasoning: reasoning.to_string(),
+                    port,
+                    last_used: Instant::now(),
+                });
+                return Ok(port);
+            }
+            Err(error) => {
+                last_error = error;
+                let _ = child.kill();
+                let _ = child.wait();
             }
         }
-        if TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
-            && ai_server_ready(port_number)
-        {
-            emit_ai_progress(app, 32, "Your local model is ready");
-            return Ok(port_number);
-        }
-        if startup_started.elapsed() >= Duration::from_secs(30) {
-            emit_ai_progress(app, 28, "Still loading your private local model");
-        }
-        thread::sleep(Duration::from_millis(400));
     }
-    stop_model_server(server_state);
-    Err("The local AI model took too long to start.".into())
+    *guard = None;
+    Err(format!(
+        "{last_error} SoFlo retried with compatibility and CPU modes. Restart SoFlo, then check Manage models."
+    ))
 }
 
 fn available_loopback_port() -> CommandResult<u16> {
@@ -2090,20 +2197,6 @@ pub async fn prepare_ai_for_session(
             return Err("Choose writing or study AI for this session.".into());
         }
 
-        AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
-        let general_model = match resolve_ai_model_path(&app, &general_model_path) {
-            Ok(path) => path,
-            Err(error) => {
-                AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
-                return Err(error);
-            }
-        };
-        emit_ai_progress(&app, 8, "Preparing your local AI for this session");
-        if let Err(error) = ensure_ai_server(&general_model, &app) {
-            AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
-            return Err(error);
-        }
-
         if mode == "writing" {
             WORD_AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
             let writing_model = match resolve_word_ai_model_path(&app, &writing_model_path) {
@@ -2116,6 +2209,20 @@ pub async fn prepare_ai_for_session(
             emit_ai_progress(&app, 48, "Preparing your writing AI");
             if let Err(error) = ensure_word_ai_server(&writing_model, &app) {
                 WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+                return Err(error);
+            }
+        } else {
+            AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
+            let general_model = match resolve_ai_model_path(&app, &general_model_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
+            emit_ai_progress(&app, 8, "Preparing your local study AI");
+            if let Err(error) = ensure_ai_server(&general_model, &app) {
+                AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
                 return Err(error);
             }
         }

@@ -64,6 +64,7 @@ pub fn run() {
             commands::research_and_grade_text,
             commands::define_word,
             commands::ai_thesaurus,
+            commands::general_ai_model_ready,
             commands::word_ai_model_ready,
             commands::voice_ai_model_ready,
             commands::prepare_ai_for_session,
