@@ -21,6 +21,9 @@ AutoCloseWindow true
 !ifndef APP_EXE
   !error "APP_EXE must point to the release SoFlo executable."
 !endif
+!ifndef LLAMA_DIR
+  !error "LLAMA_DIR must point to the llama.cpp runtime directory."
+!endif
 !ifndef APP_VERSION
   !error "APP_VERSION must be supplied (for example 1.0.29)."
 !endif
@@ -337,6 +340,9 @@ Section "Install SoFlo" InstallSection
   DetailPrint "Installing the SoFlo desktop app..."
   SetOverwrite on
   File /oname=SoFlo.exe "${APP_EXE}"
+  SetOutPath "$INSTDIR\llama"
+  File /r "${LLAMA_DIR}\*.*"
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateDirectory "${APP_DATA}"
@@ -497,6 +503,7 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\SoFlo\Uninstall SoFlo.lnk"
   RMDir "$SMPROGRAMS\SoFlo"
   Delete "$INSTDIR\SoFlo.exe"
+  RMDir /r "$INSTDIR\llama"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"

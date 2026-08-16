@@ -227,6 +227,14 @@ fn is_complete_general_ai_model(path: &Path) -> bool {
 /// installed SoFlo app has the same runtime access as a developer terminal.
 fn llama_server_executable() -> PathBuf {
     let executable = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(install_directory) = current_exe.parent() {
+            let bundled = install_directory.join("llama").join(executable);
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
     if let Some(path) = env::var_os("PATH") {
         for directory in env::split_paths(&path) {
             let candidate = directory.join(executable);
