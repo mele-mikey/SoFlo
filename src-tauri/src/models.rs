@@ -331,6 +331,8 @@ pub struct AppSettings {
     pub ai_grammar: bool,
     #[serde(default = "default_ask_for_ai_use")]
     pub ask_for_ai_use: bool,
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
     #[serde(default)]
     pub ai_model_path: String,
     #[serde(default)]
@@ -367,6 +369,9 @@ fn default_ai_grammar() -> bool {
 fn default_ask_for_ai_use() -> bool {
     true
 }
+fn default_check_for_updates() -> bool {
+    true
+}
 fn default_ai_model_tier() -> String {
     "medium".to_string()
 }
@@ -391,6 +396,7 @@ impl Default for AppSettings {
             ai_enabled: true,
             ai_grammar: true,
             ask_for_ai_use: true,
+            check_for_updates: true,
             ai_model_path: String::new(),
             ai_writing_model_path: String::new(),
             ai_general_model_tier: default_ai_model_tier(),

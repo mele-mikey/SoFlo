@@ -28,7 +28,7 @@ import { StudyView } from './features/study/StudyView'
 import { StudyWebView } from './features/study/StudyWebView'
 import { AiLaunchChooser, type AiLaunchMode } from './features/ai/AiLaunchChooser'
 
-type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
+type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'documentImport'; kind: 'paper' | 'syllabus' } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
 type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed' }
@@ -63,6 +63,30 @@ function todayMeeting(schedule: string | null) {
   const escapedDay = today.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const match = schedule.match(new RegExp(`\\b${escapedDay}\\s+(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))\\s*-\\s*(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))`, 'i'))
   return match ? { start: toTwentyFourHour(match[1]), end: toTwentyFourHour(match[2]) } : { start: null, end: null }
+}
+
+function parseFlashcardRows(text: string) {
+  const delimiter = text.includes('\t') ? '\t' : ','
+  const rows: string[][] = []
+  let row: string[] = []
+  let value = ''
+  let quoted = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') { value += '"'; index += 1 } else quoted = !quoted
+    } else if (character === delimiter && !quoted) { row.push(value); value = '' }
+    else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && text[index + 1] === '\n') index += 1
+      row.push(value); value = ''
+      if (row.some((cell) => cell.trim())) rows.push(row)
+      row = []
+    } else value += character
+  }
+  row.push(value)
+  if (row.some((cell) => cell.trim())) rows.push(row)
+  const usable = rows.filter((row) => row[0]?.trim() && row[1]?.trim())
+  return usable.filter((row, index) => !(index === 0 && /^(term|front|question)$/i.test(row[0].trim()) && /^(definition|back|answer)$/i.test(row[1].trim())))
 }
 
 function App() {
@@ -117,7 +141,10 @@ function App() {
   const [lectureToDelete, setLectureToDelete] = useState<LectureDetail | null>(null)
   const [walkthroughOpen, setWalkthroughOpen] = useState(false)
   const [aiLaunchChooserOpen, setAiLaunchChooserOpen] = useState(false)
+  const [availableUpdate, setAvailableUpdate] = useState<{ version: string; downloadUrl: string } | null>(null)
+  const [downloadingUpdate, setDownloadingUpdate] = useState(false)
   const closing = useRef(false)
+  const updateCheckStarted = useRef(false)
   const aiConsentResolver = useRef<((proceed: boolean) => void) | null>(null)
   const aiLaunchPromptEvaluated = useRef(false)
 
@@ -181,6 +208,12 @@ function App() {
     const settings = library.settings
     if (settings.onboardingCompleted && settings.aiEnabled && settings.askForAiUse && Boolean(settings.aiModelPath) && wordAiModelReady) setAiLaunchChooserOpen(true)
   }, [library, wordAiModelReady, wordAiModelStatusLoaded])
+  useEffect(() => {
+    const settings = library?.settings
+    if (!settings?.onboardingCompleted || !settings.checkForUpdates || updateCheckStarted.current) return
+    updateCheckStarted.current = true
+    void api.checkForAppUpdate().then((update) => { if (update) setAvailableUpdate(update) }).catch(() => undefined)
+  }, [library?.settings.onboardingCompleted, library?.settings.checkForUpdates])
   const classId = view.kind === 'class' || view.kind === 'document' || view.kind === 'lecture' || view.kind === 'flashcardSet' || view.kind === 'study' || view.kind === 'studyWeb' ? view.classId : null
   useEffect(() => { if (classId) void loadClassContent(classId) }, [classId, loadClassContent])
   useEffect(() => {
@@ -467,43 +500,47 @@ function App() {
     setSettings(settings)
     try { await api.updateSettings(settings) } catch { setSettings(library.settings); showToast('Settings could not be saved.', 'error') }
   }
-  const importPdfAsNewNote = async () => {
-    if (!classId) { showToast('Open a class before importing a PDF.', 'error'); return }
+  const importLocalDocument = async (documentKind: 'paper' | 'syllabus') => {
+    if (!classId) { showToast(`Open a class before importing a ${documentKind}.`, 'error'); return }
     const source = await open({ title: 'Import document as a new paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
     if (!source || Array.isArray(source)) return
     try {
-      const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importPdfText(source)
-      const imported = await formatImportedText(text, source, 'paper')
-      const created = await api.createDocument({ classId, title: imported.title })
-      const saved = await api.saveDocument({ id: created.id, title: imported.title, content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: created.isFavorite })
-      await loadClassContent(classId)
-      navigate({ kind: 'document', classId, documentId: saved.id })
-      showToast('Document imported as an editable paper.')
+      const isWord = source.toLowerCase().endsWith('.docx')
+      const text = isWord ? await api.importWordText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
+      await saveImportedDocument(text, source, documentKind, isWord)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That document could not be imported.', 'error') }
   }
-  const importSyllabus = async () => {
-    if (!classId) { showToast('Open a class before importing a syllabus.', 'error'); return }
-    const source = await open({ title: 'Import class syllabus', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
-    if (!source || Array.isArray(source)) return
+  const saveImportedDocument = async (text: string, source: string, documentKind: 'paper' | 'syllabus', sourceIsStructured = false) => {
+    if (!classId) return
     try {
-      const text = source.toLowerCase().endsWith('.docx') ? await api.importWordText(source) : await api.importSyllabusPdfText(source)
-      const imported = await formatImportedText(text, source, 'syllabus')
-      if (syllabus) await api.setDocumentDeleted(syllabus.id, true)
-      const created = await api.createDocument({ classId, title: imported.title || 'Class syllabus' })
-      await api.saveDocument({ id: created.id, title: imported.title || 'Class syllabus', content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: false })
-      const saved = await api.setDocumentSyllabus(created.id)
-      setSyllabus(saved)
-      await loadClassContent(classId)
-      showToast('Syllabus imported as a read-only paper.')
-    } catch (error) { showToast(error instanceof Error ? error.message : 'That syllabus could not be imported.', 'error') }
+      const imported = sourceIsStructured ? importAiFormattedNote(text, source, text) : await formatImportedText(text, source, documentKind)
+      if (documentKind === 'syllabus') {
+        if (syllabus) await api.setDocumentDeleted(syllabus.id, true)
+        const created = await api.createDocument({ classId, title: imported.title || 'Class syllabus' })
+        await api.saveDocument({ id: created.id, title: imported.title || 'Class syllabus', content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: false })
+        setSyllabus(await api.setDocumentSyllabus(created.id))
+        await loadClassContent(classId)
+        showToast('Syllabus imported as a read-only paper.')
+      } else {
+        const created = await api.createDocument({ classId, title: imported.title })
+        const saved = await api.saveDocument({ id: created.id, title: imported.title, content: JSON.stringify(imported.document), contentPlain: imported.plainText, isFavorite: created.isFavorite })
+        await loadClassContent(classId)
+        navigate({ kind: 'document', classId, documentId: saved.id })
+        showToast('Document imported as an editable paper.')
+      }
+    } catch (error) { showToast(error instanceof Error ? error.message : `That ${documentKind} could not be imported.`, 'error') }
+  }
+  const importGoogleDocument = async (documentKind: 'paper' | 'syllabus', url: string) => {
+    try { await saveImportedDocument(await api.importGoogleDoc(url), url, documentKind, true) }
+    catch (error) { showToast(error instanceof Error ? error.message : 'That Google Doc could not be imported.', 'error') }
   }
   const createSet = async () => {
     if (!classId) { showToast('Open a class before creating a flashcard set.', 'error'); return }
     try { const set = await api.createSet({ classId, title: 'Untitled set' }); await loadClassContent(classId); navigate({ kind: 'flashcardSet', classId, setId: set.id }) } catch { showToast('A new flashcard set could not be created.', 'error') }
   }
   const importSet = async (targetClassId: string, title: string, text: string) => {
-    const rows = text.split(/\r?\n/).map((line) => line.split('\t')).filter(([front, back]) => front?.trim() && back?.trim())
-    if (!rows.length) throw new Error('Add one tab-separated term and definition per line.')
+    const rows = parseFlashcardRows(text)
+    if (!rows.length) throw new Error('Add one term and definition per row. SoFlo accepts tab-separated, CSV, and TSV files.')
     const created = await api.createSet({ classId: targetClassId, title: title.trim() || 'Imported flashcards', description: 'Imported flashcards.' })
     await Promise.all(rows.map(([front, back], position) => api.saveCard({ setId: created.id, front: front.trim(), back: back.trim(), position, isStarred: false })))
     await loadClassContent(targetClassId)
@@ -521,7 +558,7 @@ function App() {
       const modelPath = await ensureAiModel()
       if (!modelPath) throw new Error('Turn on AI in Settings to create cards with AI.')
       setAiWorking(true); setAiProgress({ progress: 3, message: 'Preparing your study materials' })
-      const countInstruction = request.cardCount === 'auto' ? 'Cover every distinct fact or member of a finite list in the material, up to 40 cards. Do not stop at an arbitrary round number when more important material remains.' : `Make about ${request.cardCount} cards.`
+      const countInstruction = request.cardCount === 'auto' ? 'Cover every distinct fact or member of a finite list in the material, up to 100 cards. Do not stop at an arbitrary round number when more important material remains.' : `Make about ${request.cardCount} cards.`
       const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${request.depth} depth. ${request.guidance.trim()}`)
       const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
       const start = cleaned.indexOf('[')
@@ -529,7 +566,7 @@ function App() {
       if (start < 0 || end <= start) throw new Error('SoFlo could not read the flashcards the local model returned. Try a shorter prompt or add a little more context.')
       let generated: { front?: string; back?: string }[]
       try { generated = JSON.parse(cleaned.slice(start, end + 1)) as { front?: string; back?: string }[] } catch { throw new Error('SoFlo could not read the flashcards the local model returned. Try again with a little more context.') }
-      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, request.cardCount === 'auto' ? 40 : request.cardCount)
+      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, request.cardCount === 'auto' ? 100 : request.cardCount)
       if (!cards.length) throw new Error('The local AI model did not return usable flashcards.')
       const sourceKinds = [request.sources.length && 'uploaded material', request.pasted.trim() && 'pasted material', request.topic.trim() && 'a topic prompt'].filter(Boolean).join(', ')
       const set = await api.createSet({ classId: targetClassId, title: request.title.trim() || 'AI study set', description: `Created from ${sourceKinds || 'study material'}.` })
@@ -650,9 +687,9 @@ function App() {
     setSettings(settings)
     try { setSettings(await api.updateSettings(settings)) } catch { await loadLibrary(); showToast('Study Web settings could not be saved.', 'error') }
   }
-  const completeOnboarding = async (input: { name: string; themeColor: AppSettings['themeColor']; pin?: string; password?: string; path: 'guided' | 'explore' }) => {
+  const completeOnboarding = async (input: { name: string; themeColor: AppSettings['themeColor']; pin?: string; password?: string; path: 'guided' | 'explore'; checkForUpdates: boolean }) => {
     if (!library) return
-    const settings = { ...library.settings, userName: input.name, themeColor: input.themeColor, onboardingCompleted: true, walkthroughCompleted: false, walkthroughSkipped: input.path === 'explore', walkthroughStep: input.path === 'guided' ? 'library' : '', walkthroughExampleClassId: '', walkthroughExampleSemesterId: '' }
+    const settings = { ...library.settings, userName: input.name, themeColor: input.themeColor, checkForUpdates: input.checkForUpdates, onboardingCompleted: true, walkthroughCompleted: false, walkthroughSkipped: input.path === 'explore', walkthroughStep: input.path === 'guided' ? 'library' : '', walkthroughExampleClassId: '', walkthroughExampleSemesterId: '' }
     try {
       await api.updateSettings(settings)
       if (input.pin || input.password) setSecurity(await api.updateLibrarySecurity({ newPin: input.pin, newPassword: input.password, removePin: false, removePassword: false }))
@@ -776,7 +813,7 @@ function App() {
           course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus}
           aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} studyWebs={studyWebs}
           onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()}
-          onImportPdf={() => void importPdfAsNewNote()} onImportSyllabus={() => void importSyllabus()} onNewSet={() => void createSet()}
+          onImportPdf={() => setModal({ type: 'documentImport', kind: 'paper' })} onImportSyllabus={() => setModal({ type: 'documentImport', kind: 'syllabus' })} onNewSet={() => void createSet()}
           onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })}
           onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })}
           onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)}
@@ -800,8 +837,10 @@ function App() {
     <GlobalFind open={globalFindOpen} onClose={() => setGlobalFindOpen(false)} />
     {modal?.type === 'semester' && <CreateSemesterDialog onClose={() => setModal(null)} onCreate={createSemester} />}
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
+    {modal?.type === 'documentImport' && <DocumentImportDialog kind={modal.kind} onClose={() => setModal(null)} onChooseFile={() => { const kind = modal.kind; setModal(null); void importLocalDocument(kind) }} onGoogleDoc={(url) => { const kind = modal.kind; setModal(null); void importGoogleDocument(kind, url) }} />}
     {modal?.type === 'importSet' && <ImportSetDialog onClose={() => setModal(null)} onImport={(title, text) => importSet(modal.classId, title, text)} />}
     {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(request) => void generateAiSet(modal.classId, request)} />}
+    {availableUpdate && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="SoFlo update available"><header><div><p className="eyebrow">SOFLO UPDATE</p><h2>Version {availableUpdate.version} is ready</h2></div><button className="icon-button" onClick={() => setAvailableUpdate(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>SoFlo found a newer release on GitHub. Download it now and restart into the installer to upgrade this copy.</p><p className="subtle-copy">This check only runs because you enabled update notifications. It is SoFlo&apos;s only automatic network request.</p></div><footer><button className="button button-quiet" disabled={downloadingUpdate} onClick={() => setAvailableUpdate(null)}>Not now</button><button className="button button-primary" disabled={downloadingUpdate} onClick={() => { setDownloadingUpdate(true); void api.downloadAndLaunchAppUpdate(availableUpdate.version, availableUpdate.downloadUrl).catch((error) => { setDownloadingUpdate(false); showToast(error instanceof Error ? error.message : 'SoFlo could not download that update.', 'error') }) }}>{downloadingUpdate ? 'Downloading update...' : 'Download and restart'}</button></footer></section></div>}
     {studyWebRefreshPrompt && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog study-web-confirm" role="dialog" aria-modal="true" aria-label="New flashcards detected"><header><div><p className="eyebrow">STUDY WEB UPDATE</p><h2>New flashcards detected</h2></div><button className="icon-button" onClick={() => setStudyWebRefreshPrompt(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>There are new or changed flashcards in this web’s source material. Regenerate it to add them to the map, or open the current web as it is.</p></div><footer><button className="button button-quiet" onClick={() => { const web = studyWebRefreshPrompt; setStudyWebRefreshPrompt(null); void openStudyWeb(web, false, true) }}>Open current web</button>{library.settings.aiEnabled && <button className="button button-primary ai-action" onClick={() => { const web = studyWebRefreshPrompt; const sourceSets = sets.filter((set) => web.flashcardSetIds.includes(set.id)); setStudyWebRefreshPrompt(null); if (sourceSets.length) void createStudyWeb(sourceSets, web.id) }}><Sparkles size={15} /> Regenerate web</button>}</footer></section></div>}
     {modal?.type === 'archiveClass' && activeCourse && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Archive class"><header><div><p className="eyebrow">ARCHIVE CLASS</p><h2>Archive {activeCourse.name}?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>This removes the class from your active library but keeps its papers, lectures, flashcards, and study history safely in Archive. You can restore it whenever you need it.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => { setModal(null); void archiveActiveClass() }}>Archive class</button></footer></section></div>}
     {modal?.type === 'restartWalkthrough' && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Restart walkthrough"><header><div><p className="eyebrow">RESTART WALKTHROUGH</p><h2>Replace the old example class?</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>You kept the example class from the last walkthrough. Starting again will permanently remove that example and create a fresh one for this walkthrough. Your own classes and papers will not be changed.</p></div><footer><button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button><button className="button button-primary" onClick={() => void startWalkthrough(true)}>Start walkthrough</button></footer></section></div>}
@@ -853,9 +892,9 @@ function ImportSetDialog({ onClose, onImport }: { onClose: () => void; onImport:
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const choose = async () => {
-    const source = await open({ title: 'Import flashcards', multiple: false, directory: false, filters: [{ name: 'Text files', extensions: ['txt'] }] })
+    const source = await open({ title: 'Import flashcards', multiple: false, directory: false, filters: [{ name: 'Flashcard files', extensions: ['txt', 'tsv', 'csv'] }] })
     if (!source || Array.isArray(source)) return
-    try { setText(await api.readTextFile(source)); setError(''); const name = source.split(/[\\/]/).pop()?.replace(/\.txt$/i, '').trim(); if (name && title === 'Imported flashcards') setTitle(name) } catch { setError('That text file could not be opened. You can still paste your cards below.') }
+    try { setText(await api.readTextFile(source)); setError(''); const name = source.split(/[\\/]/).pop()?.replace(/\.(txt|tsv|csv)$/i, '').trim(); if (name && title === 'Imported flashcards') setTitle(name) } catch { setError('That flashcard file could not be opened. You can still paste your cards below.') }
   }
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -863,7 +902,7 @@ function ImportSetDialog({ onClose, onImport }: { onClose: () => void; onImport:
     setSaving(true)
     try { await onImport(title, text) } finally { setSaving(false) }
   }
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Import flashcards"><header><div><p className="eyebrow">FLASHCARDS</p><h2>Import a set</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={submit}><div className="paper-dialog-content"><p>Paste one tab-separated term and definition per line, or choose a .txt file exported by SoFlo.</p>{error && <p className="form-hint">{error}</p>}<label>Set name<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Cards<textarea rows={8} value={text} onChange={(event) => setText(event.target.value)} placeholder={'Mitosis\tCell division that produces two identical cells\nMeiosis\tCell division that produces reproductive cells'} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => void choose()}>Choose .txt file</button><span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!text.trim() || saving}>{saving ? 'Importing...' : 'Import set'}</button></footer></form></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Import flashcards"><header><div><p className="eyebrow">FLASHCARDS</p><h2>Import a set</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={submit}><div className="paper-dialog-content"><p>Paste one term and definition per row, or import a .txt, .tsv, or .csv file. Quizlet TSV and CSV exports work directly.</p>{error && <p className="form-hint">{error}</p>}<label>Set name<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Cards<textarea rows={8} value={text} onChange={(event) => setText(event.target.value)} placeholder={'Mitosis\tCell division that produces two identical cells\nMeiosis\tCell division that produces reproductive cells'} /></label></div><footer><button type="button" className="button button-quiet" onClick={() => void choose()}>Choose flashcard file</button><span /><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!text.trim() || saving}>{saving ? 'Importing...' : 'Import set'}</button></footer></form></section></div>
 }
 
 const walkthroughSteps = [
@@ -988,6 +1027,12 @@ function GuidedWalkthrough({ initialStep, hasExample, onStep, onCreateExample, o
   const showPrimary = Boolean(actionCopy[phase])
   const copy = phase === 'papers-tab' ? 'Click Papers in the highlighted class navigation.' : phase === 'papers-new' ? 'Use the highlighted New paper button. Import stays unavailable during the walkthrough.' : phase === 'paper-write' ? 'Type at least a few characters in the body, then double-click the top margin and add a header.' : phase === 'paper-back' ? 'Your paper is ready. Use the highlighted Papers button at the top-left to return to your class.' : phase === 'lectures-tab' ? 'Now open the highlighted Lectures tab.' : phase === 'lectures-new' ? 'Use Start your first lecture in the highlighted center panel.' : phase === 'flashcards-tab' ? 'Open the highlighted Flashcards tab.' : phase === 'set-new' ? 'Open the highlighted New set menu.' : phase === 'set-create' ? 'Choose Create — not Import or Create with AI.' : phase === 'basic-star' ? 'Star the highlighted first card so you know how to save a favorite for later.' : phase === 'card-flip' ? `Open card ${cardStep + 1} of 3 by clicking it.` : phase === 'card-next' ? 'Use the highlighted arrow to move to the next card.' : phase === 'card-response' ? 'Choose I know it or I don’t know it to mark this card.' : phase === 'review-complete' ? 'You have seen all three cards. Continue to finish the walkthrough.' : step.copy
   return <aside className="walkthrough-layer" aria-live="polite"><SpotlightShields rects={spotlights} /><section className="walkthrough-popover" role="dialog" aria-modal="true" aria-label="Guided walkthrough"><p className="eyebrow">SOFLO WALKTHROUGH</p><span className="walkthrough-count">{index + 1} of {walkthroughSteps.length}</span><h2>{step.title}</h2><p>{copy}</p>{index === 1 && paperReady && <small>Nice — your paper and header are both in place.</small>}{showPrimary && <button data-walkthrough-action className="button button-soft walkthrough-action" disabled={busy} onClick={() => void runPrimary()}>{busy ? 'Working...' : actionCopy[phase]}</button>}{isFinish && <div className="walkthrough-finish-actions" data-walkthrough-finish><button className="button button-quiet" disabled={busy || !hasExample} onClick={onFinish}>Keep example class</button><button className="button button-primary" disabled={busy} onClick={() => void removeAndFinish()}>{busy ? 'Removing...' : 'Remove example class'}</button></div>}</section><button className="walkthrough-skip" disabled={busy} onClick={onSkip}>Skip walkthrough</button></aside>
+}
+
+function DocumentImportDialog({ kind, onClose, onChooseFile, onGoogleDoc }: { kind: 'paper' | 'syllabus'; onClose: () => void; onChooseFile: () => void; onGoogleDoc: (url: string) => void }) {
+  const [url, setUrl] = useState('')
+  const label = kind === 'syllabus' ? 'syllabus' : 'paper'
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF or Word document</strong><span>Choose a .pdf or .docx from this computer. SoFlo keeps headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
 }
 
 function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (request: AiSetRequest) => void }) {

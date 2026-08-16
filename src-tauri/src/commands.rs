@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -471,6 +471,127 @@ pub fn import_syllabus_pdf_text(path: String) -> CommandResult<String> {
 pub fn import_word_text(path: String) -> CommandResult<String> {
     let file =
         fs::File::open(path).map_err(|_| "SoFlo could not read that Word document.".to_string())?;
+    word_document_to_markdown(file)
+}
+
+#[tauri::command]
+pub fn import_google_doc(url: String) -> CommandResult<String> {
+    let document_id = google_document_id(&url)?;
+    let export_url = format!("https://docs.google.com/document/d/{document_id}/export?format=docx");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("SoFlo/1.1 (Google Docs import)")
+        .build()
+        .map_err(|_| "SoFlo could not prepare the Google Docs import.".to_string())?;
+    let response = client.get(export_url).send().map_err(|_| "SoFlo could not reach Google Docs. Check your connection and try again.".to_string())?;
+    if !response.status().is_success() {
+        return Err("Google Docs could not download that document. Make sure the link allows viewing and downloading, or download it as a .docx first.".into());
+    }
+    let bytes = response.bytes().map_err(|_| "SoFlo could not download that Google Doc.".to_string())?;
+    word_document_to_markdown(Cursor::new(bytes))
+        .map_err(|_| "Google Docs did not return a downloadable .docx file. Make sure the document allows downloading, or download it as a .docx first.".to_string())
+}
+
+fn google_document_id(url: &str) -> CommandResult<String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("https://docs.google.com/") {
+        return Err("Paste a Google Docs link that starts with https://docs.google.com/.".into());
+    }
+    let marker = "/document/d/";
+    let tail = trimmed.find(marker).map(|index| &trimmed[index + marker.len()..]).ok_or_else(|| "That is not a Google Docs document link.".to_string())?;
+    let id = tail.split(['/', '?', '#']).next().unwrap_or_default();
+    if id.len() < 12 || !id.chars().all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_') {
+        return Err("That Google Docs link does not contain a valid document ID.".into());
+    }
+    Ok(id.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    pub version: String,
+    pub download_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let parse = |value: &str| value.trim_start_matches('v').split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let candidate = parse(candidate);
+    let current = parse(current);
+    for index in 0..candidate.len().max(current.len()) {
+        let left = *candidate.get(index).unwrap_or(&0);
+        let right = *current.get(index).unwrap_or(&0);
+        if left != right { return left > right; }
+    }
+    false
+}
+
+#[tauri::command]
+pub async fn check_for_app_update() -> CommandResult<Option<AppUpdateInfo>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("SoFlo update check")
+            .build()
+            .map_err(|_| "SoFlo could not prepare its update check.".to_string())?;
+        let response = client.get("https://api.github.com/repos/mele-mikey/SoFlo/releases/latest")
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .map_err(|_| "SoFlo could not check GitHub Releases right now.".to_string())?;
+        if !response.status().is_success() { return Ok(None); }
+        let release: GithubRelease = response.json().map_err(|_| "GitHub Releases returned an unreadable update response.".to_string())?;
+        let current = env!("CARGO_PKG_VERSION");
+        if !version_is_newer(&release.tag_name, current) { return Ok(None); }
+        let mut assets = release.assets.into_iter();
+        let asset = assets.find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.ends_with(".exe") && name.contains("setup")
+        }).or_else(|| assets.find(|asset| asset.name.to_ascii_lowercase().ends_with(".msi")));
+        Ok(asset.map(|asset| AppUpdateInfo { version: release.tag_name.trim_start_matches('v').to_string(), download_url: asset.browser_download_url }))
+    }).await.map_err(|_| "SoFlo's update check stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+pub async fn download_and_launch_app_update(app: tauri::AppHandle, version: String, download_url: String) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !download_url.starts_with("https://github.com/mele-mikey/SoFlo/releases/download/") {
+            return Err("SoFlo only installs updates downloaded from its official GitHub Releases page.".into());
+        }
+        if version.is_empty() || !version.chars().all(|character| character.is_ascii_digit() || character == '.') {
+            return Err("That update version is invalid.".into());
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .user_agent("SoFlo updater")
+            .build()
+            .map_err(|_| "SoFlo could not prepare the update download.".to_string())?;
+        let response = client.get(&download_url).send().map_err(|_| "SoFlo could not download that update.".to_string())?;
+        if !response.status().is_success() { return Err("GitHub Releases could not provide that update.".into()); }
+        let bytes = response.bytes().map_err(|_| "SoFlo could not finish downloading that update.".to_string())?;
+        let is_msi = download_url.to_ascii_lowercase().ends_with(".msi");
+        let valid = if is_msi { bytes.get(0..4) == Some(&[0xD0, 0xCF, 0x11, 0xE0]) } else { bytes.get(0..2) == Some(b"MZ") };
+        if bytes.len() < 1024 || !valid { return Err("The downloaded update is not a valid Windows installer.".into()); }
+        let destination = std::env::temp_dir().join(format!("SoFlo-Setup-{}.{}", version, if is_msi { "msi" } else { "exe" }));
+        fs::write(&destination, bytes).map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+        if is_msi { Command::new("msiexec.exe").arg("/i").arg(&destination).spawn() } else { Command::new(&destination).spawn() }
+            .map_err(|_| "SoFlo could not start the downloaded update installer.".to_string())?;
+        app.exit(0);
+        Ok(())
+    }).await.map_err(|_| "SoFlo's update download stopped unexpectedly.".to_string())?
+}
+
+fn word_document_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|_| "That file is not a supported .docx Word document.".to_string())?;
     let mut document = archive
@@ -480,7 +601,7 @@ pub fn import_word_text(path: String) -> CommandResult<String> {
     document
         .read_to_string(&mut xml)
         .map_err(|_| "SoFlo could not read the text in that Word document.".to_string())?;
-    let text = word_xml_to_text(&xml);
+    let text = word_xml_to_markdown(&xml);
     if text.trim().is_empty() {
         return Err("That Word document has no readable text to import.".into());
     }
@@ -508,7 +629,7 @@ fn refine_document_text_blocking(
     document_kind: String,
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
-    let source_text = text.chars().take(80_000).collect::<String>();
+    let source_text = text;
     let source_chunks = split_source_for_ai(&source_text, AI_SOURCE_CHUNK_CHARS);
     let is_syllabus = document_kind.eq_ignore_ascii_case("syllabus");
     let system = if is_syllabus {
@@ -1566,7 +1687,7 @@ fn generate_flashcards_text_blocking(
     };
     let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", ai_port)).json(&serde_json::json!({
         "messages": [
-          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of 12 to 40 objects, each with non-empty string keys front and back. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 40 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
+          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of useful objects with non-empty string keys front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 100 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
           {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
         ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 6144, "temperature": 0.2
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
@@ -2263,6 +2384,63 @@ fn word_xml_to_text(xml: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+fn word_xml_to_markdown(xml: &str) -> String {
+    let mut paragraphs = Vec::new();
+    let mut remainder = xml;
+    while let Some(start) = remainder.find("<w:p") {
+        let after_start = &remainder[start..];
+        let Some(open_end) = after_start.find('>') else { break };
+        let after_open = &after_start[open_end + 1..];
+        let Some(end) = after_open.find("</w:p>") else { break };
+        let paragraph = &after_open[..end];
+        remainder = &after_open[end + "</w:p>".len()..];
+        let content = word_paragraph_markdown(paragraph);
+        if content.trim().is_empty() { continue; }
+        let style = paragraph_style(paragraph);
+        let prefix = if style.eq_ignore_ascii_case("title") { "# " }
+            else if style.to_ascii_lowercase().starts_with("heading") {
+                let level = style.chars().filter_map(|character| character.to_digit(10)).next().unwrap_or(2).clamp(1, 3);
+                match level { 1 => "# ", 2 => "## ", _ => "### " }
+            } else if paragraph.contains("<w:numPr") { "- " } else { "" };
+        paragraphs.push(format!("{}{}", prefix, content.trim()));
+    }
+    if paragraphs.is_empty() { word_xml_to_text(xml) } else { paragraphs.join("\n\n") }
+}
+
+fn paragraph_style(paragraph: &str) -> String {
+    let Some(style_at) = paragraph.find("<w:pStyle") else { return String::new() };
+    let style = &paragraph[style_at..];
+    let Some(value_at) = style.find("w:val=") else { return String::new() };
+    let value = &style[value_at + "w:val=".len()..];
+    let quote = value.chars().next().unwrap_or_default();
+    if quote != '\"' && quote != '\'' { return String::new() }
+    value[1..].split(quote).next().unwrap_or_default().to_string()
+}
+
+fn word_paragraph_markdown(paragraph: &str) -> String {
+    let mut output = String::new();
+    let mut remainder = paragraph;
+    while let Some(start) = remainder.find("<w:r") {
+        let after_start = &remainder[start..];
+        let Some(open_end) = after_start.find('>') else { break };
+        let after_open = &after_start[open_end + 1..];
+        let Some(end) = after_open.find("</w:r>") else { break };
+        let run = &after_open[..end];
+        remainder = &after_open[end + "</w:r>".len()..];
+        let text = word_xml_to_text(run).replace('\n', "  \n");
+        if text.trim().is_empty() { continue; }
+        let bold = run.contains("<w:b") && !run.contains("<w:b w:val=\"0\"");
+        let italic = run.contains("<w:i") && !run.contains("<w:i w:val=\"0\"");
+        match (bold, italic) {
+            (true, true) => output.push_str(&format!("***{}***", text)),
+            (true, false) => output.push_str(&format!("**{}**", text)),
+            (false, true) => output.push_str(&format!("*{}*", text)),
+            (false, false) => output.push_str(&text),
+        }
+    }
+    if output.trim().is_empty() { word_xml_to_text(paragraph) } else { output }
 }
 
 fn read_semester(row: &Row<'_>) -> rusqlite::Result<Semester> {
@@ -3289,12 +3467,12 @@ fn decode_imported_audio_to_pcm<F>(
 where
     F: FnMut(i32) -> CommandResult<()>,
 {
-    let source_file = fs::File::open(source).map_err(|_| "SoFlo could not open that audio file.".to_string())?;
+    let source_file = fs::File::open(source).map_err(|_| "SoFlo could not open that media file.".to_string())?;
     let mut hint = Hint::new();
     if let Some(extension) = source.extension().and_then(|value| value.to_str()) { hint.with_extension(extension); }
     let stream = MediaSourceStream::new(Box::new(source_file), Default::default());
     let mut format = get_probe().probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
-        .map_err(|_| "SoFlo could not read that audio format. Try MP3, WAV, M4A, AAC, FLAC, or OGG.".to_string())?;
+        .map_err(|_| "SoFlo could not read that media format. Try MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM with a supported audio track.".to_string())?;
     let track = format.default_track(TrackType::Audio).ok_or_else(|| "That file has no playable audio track.".to_string())?;
     let track_id = track.id;
     let mut decoder = get_codecs().make_audio_decoder(
@@ -3315,13 +3493,13 @@ where
             Ok(None) => break,
             Err(SymphoniaError::IoError(_)) => break,
             Err(SymphoniaError::ResetRequired) => return Err("That audio stream changed format while it was being read.".into()),
-            Err(_) => return Err("SoFlo could not continue reading that audio file.".into()),
+            Err(_) => return Err("SoFlo could not continue reading that media file.".into()),
         };
         if packet.track_id != track_id { continue; }
         let decoded = match decoder.decode(&packet) {
             Ok(buffer) => buffer,
             Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
-            Err(_) => return Err("SoFlo could not decode that audio file.".into()),
+            Err(_) => return Err("SoFlo could not decode the audio track in that media file.".into()),
         };
         let channels = decoded.spec().channels().count().max(1);
         let sample_rate = decoded.spec().rate().max(1) as f64;
@@ -3365,8 +3543,8 @@ fn process_imported_lecture_audio(
     let model_path = resolve_voice_model_path(&app, &model_path)?;
     let source = PathBuf::from(source_path);
     let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg") { return Err("Choose an MP3, WAV, M4A, AAC, FLAC, or OGG audio file.".into()); }
-    if !source.is_file() { return Err("That audio file is no longer available.".into()); }
+    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm") { return Err("Choose a supported audio or video file (MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM).".into()); }
+    if !source.is_file() { return Err("That audio or video file is no longer available.".into()); }
     let connection = database.open()?;
     connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
     let directory = lecture_recordings_dir(&database, &lecture_id)?;
@@ -3380,7 +3558,7 @@ fn process_imported_lecture_audio(
     connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM lecture_analyses WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-    fs::copy(&source, &source_copy).map_err(|_| "SoFlo could not copy that audio file into your lecture.".to_string())?;
+    fs::copy(&source, &source_copy).map_err(|_| "SoFlo could not copy that media file into your lecture.".to_string())?;
     connection.execute(
         "INSERT INTO lecture_recordings (lecture_id, state, source_kind, audio_path, raw_audio_path, sample_rate, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at) VALUES (?1,'transcribing','import',?2,?3,16000,0,0,0,0,'Preparing imported audio…',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='transcribing', source_kind='import', audio_path=excluded.audio_path, raw_audio_path=excluded.raw_audio_path, duration_ms=0, captured_ms=0, transcribed_ms=0, pending_chunks=0, status_message=excluded.status_message, started_at=CURRENT_TIMESTAMP, stopped_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
         params![lecture_id, audio_path.to_string_lossy(), raw_path.to_string_lossy()],
@@ -3422,13 +3600,13 @@ pub fn import_lecture_audio(
     let model_path = resolve_voice_model_path(&app, &model_path)?;
     let source = PathBuf::from(source_path);
     let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg") {
-        return Err("Choose an MP3, WAV, M4A, AAC, FLAC, or OGG audio file.".into());
+    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm") {
+        return Err("Choose a supported audio or video file (MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM).".into());
     }
-    if !source.is_file() { return Err("That audio file is no longer available.".into()); }
+    if !source.is_file() { return Err("That audio or video file is no longer available.".into()); }
     let connection = database.open()?;
     connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
-    connection.execute("INSERT INTO lecture_recordings (lecture_id, state, source_kind, status_message, started_at, stopped_at) VALUES (?1,'importing','import','Importing audio in the background',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='importing', source_kind='import', status_message='Importing audio in the background', updated_at=CURRENT_TIMESTAMP", [&lecture_id]).map_err(|error| error.to_string())?;
+    connection.execute("INSERT INTO lecture_recordings (lecture_id, state, source_kind, status_message, started_at, stopped_at) VALUES (?1,'importing','import','Importing media in the background',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='importing', source_kind='import', status_message='Importing media in the background', updated_at=CURRENT_TIMESTAMP", [&lecture_id]).map_err(|error| error.to_string())?;
     let database_handle = database.inner().clone();
     let thread_app = app.clone();
     let thread_lecture_id = lecture_id.clone();

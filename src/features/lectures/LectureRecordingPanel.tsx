@@ -211,13 +211,13 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
 
   const importAudio = async () => {
     if (!aiEnabled || !voiceModelReady) { onToast('Download the Voice Transcription model in Settings before importing audio.', 'error'); return }
-    const path = await open({ title: 'Import lecture audio', multiple: false, directory: false, filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'] }] })
+    const path = await open({ title: 'Import lecture audio or video', multiple: false, directory: false, filters: [{ name: 'Audio and video', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'mp4', 'm4v', 'mov', 'mkv', 'webm'] }] })
     if (!path || Array.isArray(path)) return
     setBusy(true)
     setSettingsOpen(false)
     setRecording((current) => ({ ...current, state: 'importing', sourceKind: 'import', durationMs: 0, capturedMs: 0, transcribedMs: 0, pendingChunks: 0, statusMessage: 'Preparing imported audio…' }))
     try { await api.importLectureAudio(lectureId, path, voiceModelPath); void refresh() }
-    catch (error) { onToast(error instanceof Error ? error.message : 'That audio file could not be imported.', 'error') }
+    catch (error) { onToast(error instanceof Error ? error.message : 'That audio or video file could not be imported.', 'error') }
     finally { setBusy(false) }
   }
 

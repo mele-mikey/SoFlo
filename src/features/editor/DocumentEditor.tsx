@@ -30,7 +30,7 @@ import type { DocumentDetail, LectureNoteSuggestion, RevisionHistoryEntry } from
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../../lib/api'
-import { importPdfAsEditableNote } from './pdfImport'
+import { importAiFormattedNote, importPdfAsEditableNote } from './pdfImport'
 import { isolateMechanicalChange } from './grammar'
 
 interface DocumentEditorProps {
@@ -144,19 +144,32 @@ function changeSelectedIndent(editor: Editor, amount: 1 | -1) {
   if (editor.isActive('listItem')) return amount > 0 ? editor.commands.sinkListItem('listItem') : editor.commands.liftListItem('listItem')
   return changeSelectedBlockIndent(editor, amount)
 }
+function changeCurrentFirstLineIndent(editor: Editor, amount: 1 | -1) {
+  if (editor.isActive('listItem') || editor.isActive('table') || !editor.state.selection.empty) return false
+  const $from = editor.state.selection.$from
+  const node = $from.parent
+  if ((node.type.name !== 'paragraph' && node.type.name !== 'heading') || $from.parentOffset !== 0) return false
+  const current = typeof node.attrs.firstLineIndent === 'number' ? node.attrs.firstLineIndent : 0
+  const next = Math.max(0, Math.min(8, current + amount))
+  if (next === current) return false
+  const position = $from.before($from.depth)
+  editor.view.dispatch(editor.state.tr.setNodeMarkup(position, undefined, { ...node.attrs, firstLineIndent: next }))
+  return true
+}
 const PaperIndent = Extension.create({
   name: 'paperIndent',
   addGlobalAttributes() {
     return [{ types: ['paragraph', 'heading'], attributes: {
       indent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.indent ?? '0', 10) || 0, renderHTML: (attributes: { indent?: number }) => attributes.indent ? { 'data-indent': attributes.indent, style: `margin-left: ${attributes.indent * .5}in` } : {} },
-      firstLineIndent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.firstLineIndent ?? '0', 10) || 0, renderHTML: (attributes: { firstLineIndent?: number }) => attributes.firstLineIndent ? { 'data-first-line-indent': attributes.firstLineIndent } : {} },
+      firstLineIndent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.firstLineIndent ?? '0', 10) || 0, renderHTML: (attributes: { firstLineIndent?: number }) => attributes.firstLineIndent ? { 'data-first-line-indent': attributes.firstLineIndent, style: `text-indent: ${attributes.firstLineIndent * .5}in` } : {} },
       hangingIndent: { default: 0, parseHTML: (element: HTMLElement) => Number.parseInt(element.dataset.hangingIndent ?? '0', 10) || 0, renderHTML: (attributes: { hangingIndent?: number }) => attributes.hangingIndent ? { 'data-hanging-indent': attributes.hangingIndent } : {} },
     } }]
   },
   addKeyboardShortcuts() {
     return {
-      Tab: () => changeSelectedIndent(this.editor, 1),
-      'Shift-Tab': () => changeSelectedIndent(this.editor, -1),
+      Tab: () => changeCurrentFirstLineIndent(this.editor, 1) || changeSelectedIndent(this.editor, 1),
+      'Shift-Tab': () => changeCurrentFirstLineIndent(this.editor, -1) || changeSelectedIndent(this.editor, -1),
+      Backspace: () => changeCurrentFirstLineIndent(this.editor, -1),
     }
   },
 })
@@ -1195,12 +1208,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     try { globalThis.print() } catch { setPdfMessage('SoFlo could not open the PDF export dialog.') }
   }
   const importPdf = async () => {
-    const source = await open({ title: 'Import PDF into this paper', multiple: false, directory: false, filters: [{ name: 'PDF document', extensions: ['pdf'] }] })
+    const source = await open({ title: 'Import document into this paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
     if (!source || Array.isArray(source)) return
     setPdfMessage('Importing editable text…')
     try {
-      const extracted = await api.importPdfText(source)
-      const imported = importPdfAsEditableNote(extracted, source)
+      const isWord = source.toLowerCase().endsWith('.docx')
+      const extracted = isWord ? await api.importWordText(source) : await api.importPdfText(source)
+      const imported = isWord ? importAiFormattedNote(extracted, source, extracted) : importPdfAsEditableNote(extracted, source)
       editor.chain().focus().setTextSelection(editor.state.doc.content.size).insertContent(imported.document.content).run()
       setPdfMessage('Structured PDF content added to the end of this paper.')
     } catch (error) { setPdfMessage(error instanceof Error ? error.message : 'SoFlo could not import that PDF.') }
@@ -1574,7 +1588,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     }
     if (target.closest('.soflo-editor, .document-title, button, input, textarea, a, .paper-running-header, .paper-running-footer')) return
     event.preventDefault()
-    editor.chain().focus('end').run()
+    if (!editor.getText().trim()) editor.chain().focus('end').run()
   }
   const beginRunningEdit = (region: RunningRegion, page: number, element: HTMLElement, x: number, y: number) => {
     const value = runningTextForPage(region === 'header' ? headerPages : footerPages, region === 'header' ? headerText : footerText, region === 'header' ? repeatHeader : repeatFooter, page)
@@ -1672,7 +1686,7 @@ function ImageDialog({ source, onClose, onSourceChange, onInsert }: { source: st
     reader.onload = () => { if (typeof reader.result === 'string') onSourceChange(reader.result) }
     reader.readAsDataURL(file)
   }
-  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog" aria-label="Add image" onSubmit={(event) => { event.preventDefault(); onInsert(source) }}><header><div><p className="eyebrow">IMAGE</p><h2>Add an image</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close image dialog"><X size={18} /></button></header><div className="editor-dialog-content"><label>Image URL<input type="url" autoFocus value={source.startsWith('data:') ? '' : source} onChange={(event) => onSourceChange(event.target.value)} placeholder="https://example.com/image.png" inputMode="url" /></label><div className="image-file-picker"><span>or</span><label className="button button-quiet button-small"><ImagePlus size={15} /> Choose image file<input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={(event) => chooseFile(event.currentTarget.files?.[0])} /></label></div>{source && <div className="image-preview"><img src={source} alt="Selected image preview" /></div>}<p>Image files are saved inside this paper so they remain available on this PC.</p></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!source.trim()}>Insert image</button></footer></form></div>
+  return <div className="editor-dialog-backdrop" role="presentation"><form className="editor-dialog" aria-label="Add image" onSubmit={(event) => { event.preventDefault(); onInsert(source) }}><header><div><p className="eyebrow">IMAGE</p><h2>Add an image</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close image dialog"><X size={18} /></button></header><div className="editor-dialog-content"><label>Image URL<input type="url" autoFocus value={source.startsWith('data:') ? '' : source} onChange={(event) => onSourceChange(event.target.value)} placeholder="https://example.com/image.png" inputMode="url" /></label><div className="image-file-picker"><span>or</span><label className="button button-quiet button-small"><ImagePlus size={15} /> Choose image file<input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/avif,image/bmp,image/tiff,image/heic,image/heif" onChange={(event) => chooseFile(event.currentTarget.files?.[0])} /></label></div>{source && <div className="image-preview"><img src={source} alt="Selected image preview" /></div>}</div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={!source.trim()}>Insert image</button></footer></form></div>
 }
 
 function TableDialog({ table, onClose, onChange, onInsert }: { table: { rows: number; cols: number; withHeaderRow: boolean }; onClose: () => void; onChange: (table: { rows: number; cols: number; withHeaderRow: boolean }) => void; onInsert: (table: { rows: number; cols: number; withHeaderRow: boolean }) => void }) {
@@ -1689,7 +1703,7 @@ function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, gramma
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
-    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import PDF</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import document</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button onClick={onPaperContext}>AI Paper Context</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button><button onClick={onAiThesaurus}>AI Thesaurus</button></ToolbarMenu>
     <Divider />

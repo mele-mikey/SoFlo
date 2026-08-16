@@ -281,6 +281,7 @@ export interface AppSettings {
   aiEnabled: boolean
   aiGrammar: boolean
   askForAiUse: boolean
+  checkForUpdates: boolean
   aiModelPath: string
   aiWritingModelPath: string
   aiVoiceModelPath: string
