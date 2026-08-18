@@ -153,6 +153,10 @@ const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 // Flashcard creation needs room for both source material and a JSON answer.
 // 8k leaves too little input room once a 100-card response is requested.
 const AI_CONTEXT_SIZE: &str = "16384";
+// Flashcard packets can be substantially more token-dense than prose, especially
+// when they contain equations. Start the model with its full working context for
+// this one action, then the normal warm-window shutdown releases that memory.
+const FLASHCARD_AI_CONTEXT_SIZE: &str = "32768";
 const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
 // Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
@@ -1730,7 +1734,7 @@ fn generate_flashcards_text_blocking(
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
-    let ai_port = ensure_ai_server(&model_path, &app)?;
+    let ai_port = ensure_flashcard_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 42, "Reading your study materials");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
@@ -2024,6 +2028,16 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) { return Ok(port); }
     ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "on")
+}
+
+fn ensure_flashcard_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    ensure_model_server(
+        &AI_SERVER,
+        model_path,
+        app,
+        FLASHCARD_AI_CONTEXT_SIZE,
+        "on",
+    )
 }
 
 fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
