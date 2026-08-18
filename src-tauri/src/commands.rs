@@ -668,16 +668,13 @@ pub async fn download_and_launch_app_update(app: tauri::AppHandle, version: Stri
 }
 
 fn word_document_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|_| "That file is not a supported .docx Word document.".to_string())?;
-    let mut document = archive
-        .by_name("word/document.xml")
-        .map_err(|_| "That Word document does not contain readable text.".to_string())?;
-    let mut xml = String::new();
-    document
-        .read_to_string(&mut xml)
-        .map_err(|_| "SoFlo could not read the text in that Word document.".to_string())?;
-    let text = word_xml_to_markdown(&xml);
+    let mut bytes = Vec::new();
+    let mut file = file;
+    file.read_to_end(&mut bytes)
+        .map_err(|_| "SoFlo could not read that Word document.".to_string())?;
+    let text = rwml::Document::open(&bytes)
+        .map_err(|_| "That file is not a supported .doc or .docx Word document.".to_string())?
+        .to_markdown();
     if text.trim().is_empty() {
         return Err("That Word document has no readable text to import.".into());
     }
@@ -850,9 +847,11 @@ pub async fn generate_flashcards_text(
     model_path: String,
     materials: String,
     guidance: String,
+    math_mode: bool,
+    syllabus_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        generate_flashcards_text_blocking(app, model_path, materials, guidance)
+        generate_flashcards_text_blocking(app, model_path, materials, guidance, math_mode, syllabus_context)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -1726,6 +1725,8 @@ fn generate_flashcards_text_blocking(
     model_path: String,
     materials: String,
     guidance: String,
+    math_mode: bool,
+    syllabus_context: String,
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
@@ -1735,7 +1736,8 @@ fn generate_flashcards_text_blocking(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let source = materials.chars().take(120_000).collect::<String>();
+    let source = materials.chars().take(90_000).collect::<String>();
+    let syllabus = syllabus_context.chars().take(20_000).collect::<String>();
     if source.trim().is_empty() {
         return Err(
             "Add a topic, pasted study text, or an uploaded document before creating flashcards."
@@ -1761,10 +1763,16 @@ fn generate_flashcards_text_blocking(
     } else {
         "Use the supplied source material as the primary factual basis for the flashcards."
     };
+    let math_mode = math_mode || looks_like_math_material(&source);
+    let syllabus_section = if syllabus.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nCLASS SYLLABUS (supporting context only; use it to align scope and terminology, never invent answers or turn schedules and policies into cards unless the study material asks for them):\n{}", syllabus)
+    };
     let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", ai_port)).json(&serde_json::json!({
         "messages": [
-          {"role":"system","content":"You create concise college flashcards. Return only valid JSON: an array of useful objects with non-empty string keys front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 100 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."},
-          {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}", request_instruction, guidance, source)}
+          {"role":"system","content": flashcard_system_instruction(math_mode)},
+          {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}{}", request_instruction, guidance, source, syllabus_section)}
         ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 6144, "temperature": 0.2
     })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
@@ -1787,6 +1795,31 @@ fn generate_flashcards_text_blocking(
     }
     emit_ai_progress(&app, 100, "Finishing your flashcard set");
     Ok(output)
+}
+
+fn looks_like_math_material(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    let keyword_match = [
+        "equation", "inequality", "solve", "simplify", "evaluate", "factor", "quadratic",
+        "derivative", "integral", "function", "matrix", "polynomial", "logarithm", "geometry",
+        "trigonometry", "probability", "calculus", "algebra", "slope", "graph",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword));
+    let symbol_count = source
+        .chars()
+        .filter(|character| matches!(character, '=' | '+' | '-' | '*' | '/' | '^' | '√' | '∫' | '∑' | 'π' | '≤' | '≥' | '≠' | '×' | '÷'))
+        .count();
+    let digit_count = source.chars().filter(|character| character.is_ascii_digit()).count();
+    keyword_match || (symbol_count >= 4 && digit_count >= 2)
+}
+
+fn flashcard_system_instruction(math_mode: bool) -> &'static str {
+    if math_mode {
+        "You create concise college math flashcards. Return only valid JSON: an array of useful objects with non-empty string fields front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. Preserve each supplied problem's variables, values, signs, exponents, units, and answer exactly. Make problem-first cards: the front is one specific question or expression, and the back begins with its direct answer followed by one to four concise work steps only when the source provides or clearly supports them. When an answer key gives only an answer, do not invent work. Keep equations readable with plain Unicode notation such as x², √, π, ≤, ≥, ≠, →, ×, ÷, and a/b. Never use Markdown, LaTex delimiters, code fences, or commentary. Do not collapse many distinct practice questions into one generic rule card. Include useful concept and rule cards too, but retain the individual practice problems and their answers. If the material or request contains a finite enumerated set, include every distinct member up to 100 cards."
+    } else {
+        "You create concise college flashcards. Return only valid JSON: an array of useful objects with non-empty string fields front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 100 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."
+    }
 }
 
 fn json_array_from_response(output: &str) -> Option<String> {
@@ -2474,88 +2507,6 @@ pub fn delete_local_ai_models(
     let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn word_xml_to_text(xml: &str) -> String {
-    let with_breaks = xml
-        .replace("</w:p>", "\n")
-        .replace("</w:tr>", "\n")
-        .replace("<w:tab/>", "\t")
-        .replace("<w:br/>", "\n")
-        .replace("<w:br />", "\n");
-    let mut output = String::new();
-    let mut inside_tag = false;
-    for character in with_breaks.chars() {
-        match character {
-            '<' => inside_tag = true,
-            '>' => inside_tag = false,
-            _ if !inside_tag => output.push(character),
-            _ => {}
-        }
-    }
-    output
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-}
-
-fn word_xml_to_markdown(xml: &str) -> String {
-    let mut paragraphs = Vec::new();
-    let mut remainder = xml;
-    while let Some(start) = remainder.find("<w:p") {
-        let after_start = &remainder[start..];
-        let Some(open_end) = after_start.find('>') else { break };
-        let after_open = &after_start[open_end + 1..];
-        let Some(end) = after_open.find("</w:p>") else { break };
-        let paragraph = &after_open[..end];
-        remainder = &after_open[end + "</w:p>".len()..];
-        let content = word_paragraph_markdown(paragraph);
-        if content.trim().is_empty() { continue; }
-        let style = paragraph_style(paragraph);
-        let prefix = if style.eq_ignore_ascii_case("title") { "# " }
-            else if style.to_ascii_lowercase().starts_with("heading") {
-                let level = style.chars().filter_map(|character| character.to_digit(10)).next().unwrap_or(2).clamp(1, 3);
-                match level { 1 => "# ", 2 => "## ", _ => "### " }
-            } else if paragraph.contains("<w:numPr") { "- " } else { "" };
-        paragraphs.push(format!("{}{}", prefix, content.trim()));
-    }
-    if paragraphs.is_empty() { word_xml_to_text(xml) } else { paragraphs.join("\n\n") }
-}
-
-fn paragraph_style(paragraph: &str) -> String {
-    let Some(style_at) = paragraph.find("<w:pStyle") else { return String::new() };
-    let style = &paragraph[style_at..];
-    let Some(value_at) = style.find("w:val=") else { return String::new() };
-    let value = &style[value_at + "w:val=".len()..];
-    let quote = value.chars().next().unwrap_or_default();
-    if quote != '\"' && quote != '\'' { return String::new() }
-    value[1..].split(quote).next().unwrap_or_default().to_string()
-}
-
-fn word_paragraph_markdown(paragraph: &str) -> String {
-    let mut output = String::new();
-    let mut remainder = paragraph;
-    while let Some(start) = remainder.find("<w:r") {
-        let after_start = &remainder[start..];
-        let Some(open_end) = after_start.find('>') else { break };
-        let after_open = &after_start[open_end + 1..];
-        let Some(end) = after_open.find("</w:r>") else { break };
-        let run = &after_open[..end];
-        remainder = &after_open[end + "</w:r>".len()..];
-        let text = word_xml_to_text(run).replace('\n', "  \n");
-        if text.trim().is_empty() { continue; }
-        let bold = run.contains("<w:b") && !run.contains("<w:b w:val=\"0\"");
-        let italic = run.contains("<w:i") && !run.contains("<w:i w:val=\"0\"");
-        match (bold, italic) {
-            (true, true) => output.push_str(&format!("***{}***", text)),
-            (true, false) => output.push_str(&format!("**{}**", text)),
-            (false, true) => output.push_str(&format!("*{}*", text)),
-            (false, false) => output.push_str(&text),
-        }
-    }
-    if output.trim().is_empty() { word_xml_to_text(paragraph) } else { output }
 }
 
 fn read_semester(row: &Row<'_>) -> rusqlite::Result<Semester> {
@@ -7697,7 +7648,8 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        available_loopback_port, fallback_study_web_plan, is_visual_line_echo,
+        available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
+        is_visual_line_echo, looks_like_math_material,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         usable_lecture_notes,
@@ -7743,6 +7695,16 @@ mod tests {
             json_array_from_response(response).as_deref(),
             Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]")
         );
+    }
+
+    #[test]
+    fn identifies_math_material_and_uses_problem_first_instructions() {
+        assert!(looks_like_math_material("Solve 3x² - 12 = 0 and show the work."));
+        assert!(looks_like_math_material("f(x) = 2x + 7; evaluate f(4)."));
+        assert!(!looks_like_math_material("Explain the historical causes of the Boston Tea Party."));
+        let instruction = flashcard_system_instruction(true);
+        assert!(instruction.contains("problem-first cards"));
+        assert!(instruction.contains("do not invent work"));
     }
 
     #[test]

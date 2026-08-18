@@ -1,6 +1,6 @@
 [package]
 name = "soflo"
-version = "1.1.28"
+version = "1.1.29"
 description = "A local-first notes and study workspace"
 authors = ["Mikey M."]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -36,3 +36,4 @@ zip = "2.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 base64 = "0.22"
 symphonia = { version = "0.6", features = ["all"] }
+rwml = "0.1.1"

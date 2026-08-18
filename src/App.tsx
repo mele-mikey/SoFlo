@@ -31,7 +31,7 @@ import { AiLaunchChooser, type AiLaunchMode } from './features/ai/AiLaunchChoose
 type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'documentImport'; kind: 'paper' | 'syllabus' } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
-type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed' }
+type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed'; mathMode: boolean }
 type AiProgress = { progress: number; message: string }
 
 const LEGACY_DEFAULT_AI_MODEL = 'qwen2.5-3b-instruct-q4_k_m.gguf'
@@ -504,10 +504,10 @@ function App() {
   }
   const importLocalDocument = async (documentKind: 'paper' | 'syllabus') => {
     if (!classId) { showToast(`Open a class before importing a ${documentKind}.`, 'error'); return }
-    const source = await open({ title: 'Import document as a new paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
+    const source = await open({ title: 'Import document as a new paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx'] }] })
     if (!source || Array.isArray(source)) return
     try {
-      const isWord = source.toLowerCase().endsWith('.docx')
+      const isWord = /\.docx?$/i.test(source)
       const text = isWord ? await api.importWordText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
       await saveImportedDocument(text, source, documentKind, isWord)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That document could not be imported.', 'error') }
@@ -552,7 +552,8 @@ function App() {
   }
   const generateAiSet = async (targetClassId: string, request: AiSetRequest) => {
     try {
-      const imported = await Promise.all(request.sources.map((source) => source.toLowerCase().endsWith('.docx') ? api.importWordText(source) : api.importPdfText(source)))
+      const imported = await Promise.all(request.sources.map((source) => /\.docx?$/i.test(source) ? api.importWordText(source) : api.importPdfText(source)))
+      const syllabusContext = await api.getSyllabus(targetClassId).then((document) => document?.contentPlain.trim().slice(0, 20_000) ?? '').catch(() => '')
       const manual = request.pasted.trim()
       const textOnly = !request.sources.length && Boolean(manual)
       const materials = [request.topic.trim() && `TOPIC OR PROMPT:\n${request.topic.trim()}`, manual && `${textOnly ? 'TEXT OR TOPIC' : 'PASTED MATERIAL'}:\n${manual}`, ...imported.map((text, index) => `UPLOADED MATERIAL ${index + 1}:\n${text}`)].filter(Boolean).join('\n\n--- NEXT SOURCE ---\n\n')
@@ -561,7 +562,7 @@ function App() {
       if (modelPath === null) throw new Error('Turn on AI in Settings to create cards with AI.')
       setAiWorking(true); setAiProgress({ progress: 3, message: 'Preparing your study materials' })
       const countInstruction = request.cardCount === 'auto' ? 'Cover every distinct fact or member of a finite list in the material, up to 100 cards. Do not stop at an arbitrary round number when more important material remains.' : `Make about ${request.cardCount} cards.`
-      const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${request.depth} depth. ${request.guidance.trim()}`)
+      const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${request.depth} depth. ${request.guidance.trim()}`, request.mathMode, syllabusContext)
       const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
       const start = cleaned.indexOf('[')
       const end = cleaned.lastIndexOf(']')
@@ -1034,16 +1035,21 @@ function GuidedWalkthrough({ initialStep, hasExample, onStep, onCreateExample, o
 function DocumentImportDialog({ kind, onClose, onChooseFile, onGoogleDoc }: { kind: 'paper' | 'syllabus'; onClose: () => void; onChooseFile: () => void; onGoogleDoc: (url: string) => void }) {
   const [url, setUrl] = useState('')
   const label = kind === 'syllabus' ? 'syllabus' : 'paper'
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF or Word document</strong><span>Choose a .pdf or .docx from this computer. SoFlo keeps headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF or Word document</strong><span>Choose a .pdf, .doc, or .docx from this computer. SoFlo keeps headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
 }
 
 function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (request: AiSetRequest) => void }) {
   const [sources, setSources] = useState<string[]>([])
   const [pasted, setPasted] = useState('')
   const [title, setTitle] = useState('AI study set')
-  const choose = async () => { const picked = await open({ title: 'Choose up to five study documents', multiple: true, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] }); if (!picked) return; const next = (Array.isArray(picked) ? picked : [picked]).slice(0, 5); setSources(next) }
+  const [mathMode, setMathMode] = useState(false)
+  const choose = async () => {
+    const picked = await open({ title: 'Choose up to five study documents', multiple: true, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx'] }] })
+    if (!picked) return
+    setSources((Array.isArray(picked) ? picked : [picked]).slice(0, 5))
+  }
   const hasMaterial = Boolean(sources.length || pasted.trim())
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog ai-set-dialog-simple" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (hasMaterial) onCreate({ sources, pasted, topic: '', guidance: '', title, cardCount: 'auto', depth: 'standard' }) }}><div className="paper-dialog-content"><p>Paste notes, a study guide, or simply describe a topic. Adding files is optional.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>What do you want to study?<textarea autoFocus rows={7} value={pasted} onChange={(event) => setPasted(event.target.value)} placeholder="Paste notes here, or write something like: Create cards for introductory Java inheritance." /></label><section className="ai-source-section"><strong>Have files instead?</strong><span>Optionally add up to five PDFs or Word documents.</span><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Add files ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}</section></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!hasMaterial}>Create flashcards</button></footer></form></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog ai-set-dialog-simple" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (hasMaterial) onCreate({ sources, pasted, topic: '', guidance: '', title, cardCount: 'auto', depth: 'standard', mathMode }) }}><div className="paper-dialog-content"><p>Paste notes, a study guide, or simply describe a topic. Adding files is optional. Your class syllabus is included as supporting context when one is available.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>What do you want to study?<textarea autoFocus rows={7} value={pasted} onChange={(event) => setPasted(event.target.value)} placeholder="Paste notes here, or write something like: Create cards for introductory Java inheritance." /></label><label className="ai-set-math-toggle"><input type="checkbox" checked={mathMode} onChange={(event) => setMathMode(event.target.checked)} /><span><strong>Math problem cards</strong><small>Keep equations intact and pair each problem with its answer and concise work.</small></span></label><section className="ai-source-section"><strong>Have files instead?</strong><span>Optionally add up to five PDFs or Word documents (.doc or .docx).</span><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Add files ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}</section></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!hasMaterial}>Create flashcards</button></footer></form></section></div>
 }
 
 export default App
