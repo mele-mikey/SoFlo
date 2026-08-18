@@ -117,7 +117,7 @@ export const api = {
   checkForAppUpdate: () => call<{ version: string; downloadUrl: string } | null>('check_for_app_update'),
   downloadAndLaunchAppUpdate: (version: string, downloadUrl: string) => call<void>('download_and_launch_app_update', { version, downloadUrl }),
   refineDocumentText: (modelPath: string, text: string, documentKind: 'paper' | 'syllabus') => call<string>('refine_document_text', { modelPath, text, documentKind }),
-  generateFlashcardsText: (modelPath: string, materials: string, guidance: string, mathMode = false, syllabusContext = '') => call<string>('generate_flashcards_text', { modelPath, materials, guidance, mathMode, syllabusContext }),
+  generateFlashcardsText: (modelPath: string, materials: string, guidance: string, syllabusContext = '') => call<string>('generate_flashcards_text', { modelPath, materials, guidance, syllabusContext }),
   generateTeachItBackQuestion: (modelPath: string, front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => call<string>('generate_teach_it_back_question', { modelPath, front, back, shownSide, difficulty }),
   gradeTeachItBackAnswer: (modelPath: string, front: string, back: string, question: string, target: string, answer: string) => call<string>('grade_teach_it_back_answer', { modelPath, front, back, question, target, answer }),
   reviewGrammarText: (modelPath: string, text: string, quick: boolean, paperContext: string) => call<string>('review_grammar_text', { modelPath, text, quick, paperContext }),

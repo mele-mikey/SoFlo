@@ -847,11 +847,10 @@ pub async fn generate_flashcards_text(
     model_path: String,
     materials: String,
     guidance: String,
-    math_mode: bool,
     syllabus_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        generate_flashcards_text_blocking(app, model_path, materials, guidance, math_mode, syllabus_context)
+        generate_flashcards_text_blocking(app, model_path, materials, guidance, syllabus_context)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -1725,7 +1724,6 @@ fn generate_flashcards_text_blocking(
     model_path: String,
     materials: String,
     guidance: String,
-    math_mode: bool,
     syllabus_context: String,
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
@@ -1736,8 +1734,10 @@ fn generate_flashcards_text_blocking(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let source = materials.chars().take(90_000).collect::<String>();
-    let syllabus = syllabus_context.chars().take(20_000).collect::<String>();
+    // Reserve enough room for a useful JSON answer. Large PDFs can otherwise make
+    // llama.cpp reject the request before it starts generating.
+    let source = materials.chars().take(40_000).collect::<String>();
+    let syllabus = syllabus_context.chars().take(7_000).collect::<String>();
     if source.trim().is_empty() {
         return Err(
             "Add a topic, pasted study text, or an uploaded document before creating flashcards."
@@ -1763,7 +1763,7 @@ fn generate_flashcards_text_blocking(
     } else {
         "Use the supplied source material as the primary factual basis for the flashcards."
     };
-    let math_mode = math_mode || looks_like_math_material(&source);
+    let math_mode = looks_like_math_material(&source);
     let syllabus_section = if syllabus.trim().is_empty() {
         String::new()
     } else {
