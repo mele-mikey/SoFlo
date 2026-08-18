@@ -150,7 +150,9 @@ fn purge_expired_trash(connection: &Connection) -> CommandResult<()> {
 }
 
 const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
-const AI_CONTEXT_SIZE: &str = "8192";
+// Flashcard creation needs room for both source material and a JSON answer.
+// 8k leaves too little input room once a 100-card response is requested.
+const AI_CONTEXT_SIZE: &str = "16384";
 const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
 // Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
@@ -1734,10 +1736,11 @@ fn generate_flashcards_text_blocking(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    // Reserve enough room for a useful JSON answer. Large PDFs can otherwise make
-    // llama.cpp reject the request before it starts generating.
-    let source = materials.chars().take(40_000).collect::<String>();
-    let syllabus = syllabus_context.chars().take(7_000).collect::<String>();
+    // Keep the request below the shared 16k-token context, including a useful
+    // JSON response. Math-heavy PDF text can tokenize much more densely than
+    // ordinary prose, so character limits need to stay conservative.
+    let source = materials.chars().take(16_000).collect::<String>();
+    let syllabus = syllabus_context.chars().take(3_000).collect::<String>();
     if source.trim().is_empty() {
         return Err(
             "Add a topic, pasted study text, or an uploaded document before creating flashcards."
@@ -1764,30 +1767,24 @@ fn generate_flashcards_text_blocking(
         "Use the supplied source material as the primary factual basis for the flashcards."
     };
     let math_mode = looks_like_math_material(&source);
-    let syllabus_section = if syllabus.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\n\nCLASS SYLLABUS (supporting context only; use it to align scope and terminology, never invent answers or turn schedules and policies into cards unless the study material asks for them):\n{}", syllabus)
+    let prompt = flashcard_generation_prompt(request_instruction, &guidance, &source, &syllabus);
+    let system = flashcard_system_instruction(math_mode);
+    let output = match flashcard_completion(&client, ai_port, system, &prompt, 6_144, true) {
+        Ok(output) => output,
+        Err(primary_error) => {
+            // Some llama.cpp builds reject chat_template_kwargs, while lower
+            // context configurations can reject large requests. Retry once
+            // with only standard OpenAI fields and a compact prompt.
+            eprintln!("[SoFlo AI] flashcard request retrying after: {primary_error}");
+            emit_ai_progress(&app, 58, "Adjusting the flashcard request");
+            let compact_source = source.chars().take(8_000).collect::<String>();
+            let compact_syllabus = syllabus.chars().take(1_500).collect::<String>();
+            let compact_prompt = flashcard_generation_prompt(request_instruction, &guidance, &compact_source, &compact_syllabus);
+            flashcard_completion(&client, ai_port, system, &compact_prompt, 4_096, false)
+                .map_err(|retry_error| format!("SoFlo could not create flashcards after a compatibility retry: {retry_error}"))?
+        }
     };
-    let response = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", ai_port)).json(&serde_json::json!({
-        "messages": [
-          {"role":"system","content": flashcard_system_instruction(math_mode)},
-          {"role":"user","content": format!("{} Create the most useful flashcards. Extra study guidance: {}\n\nINPUT:\n{}{}", request_instruction, guidance, source, syllabus_section)}
-        ], "chat_template_kwargs": { "enable_thinking": false }, "max_tokens": 6144, "temperature": 0.2
-    })).send().map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?.error_for_status().map_err(|error| format!("SoFlo's local AI model could not create flashcards: {}", error))?;
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
-    let body: serde_json::Value = response
-        .json()
-        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    let output = body
-        .get("choices")
-        .and_then(|value| value.get(0))
-        .and_then(|value| value.get("message"))
-        .and_then(|value| value.get("content"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
     let output = json_array_from_response(&output).unwrap_or_default();
     touch_ai_server();
     if output.is_empty() {
@@ -1795,6 +1792,74 @@ fn generate_flashcards_text_blocking(
     }
     emit_ai_progress(&app, 100, "Finishing your flashcard set");
     Ok(output)
+}
+
+fn flashcard_generation_prompt(
+    request_instruction: &str,
+    guidance: &str,
+    source: &str,
+    syllabus: &str,
+) -> String {
+    let syllabus_section = if syllabus.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nCLASS SYLLABUS (supporting context only; use it to align scope and terminology, never invent answers or turn schedules and policies into cards unless the study material asks for them):\n{syllabus}")
+    };
+    format!("{request_instruction} Create the most useful flashcards. Extra study guidance: {guidance}\n\nINPUT:\n{source}{syllabus_section}")
+}
+
+fn flashcard_completion(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    system: &str,
+    prompt: &str,
+    max_tokens: u16,
+    include_template_kwargs: bool,
+) -> CommandResult<String> {
+    let mut payload = serde_json::json!({
+        "messages": [
+            {"role":"system","content": system},
+            {"role":"user","content": prompt}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.2
+    });
+    if include_template_kwargs {
+        payload["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&payload)
+        .send()
+        .map_err(|error| format!("SoFlo's local AI model did not respond: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("error").cloned().or_else(|| value.get("message").cloned()))
+            .and_then(|value| value.get("message").cloned().or(Some(value)))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or(body)
+            .split_whitespace()
+            .take(30)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(format!("local model returned HTTP {status}: {detail}"));
+    }
+    let body: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    Ok(body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
 }
 
 fn looks_like_math_material(source: &str) -> bool {
