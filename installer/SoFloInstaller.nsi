@@ -8,7 +8,7 @@ SetCompressor /SOLID lzma
 SetDatablockOptimize on
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
-SilentInstall silent
+SilentInstall normal
 AutoCloseWindow true
 
 !include "MUI2.nsh"
@@ -102,17 +102,13 @@ UninstPage custom un.ConfirmPage un.ConfirmLeave
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
-  ; The visible experience is SoFlo's own Tauri installer. NSIS only performs
-  ; the file and registry work silently after that window asks it to continue.
   StrCpy $WorkerMode 0
   ${GetParameters} $0
   ${GetOptions} $0 "--perform-silent-install=" $1
-  ${If} $1 != "1"
+  ${If} $1 == "1"
+    StrCpy $WorkerMode 1
     SetSilent silent
-    Return
   ${EndIf}
-  StrCpy $WorkerMode 1
-  SetSilent silent
 
   ; SoFlo installers are forward-only. The visible setup UI also checks this,
   ; but the worker enforces it so command-line use cannot replace a newer app.
@@ -326,15 +322,6 @@ Function InstallProgressShow
 FunctionEnd
 
 Section "Install SoFlo" InstallSection
-  ${If} $WorkerMode == 0
-    InitPluginsDir
-    SetOutPath "$PLUGINSDIR"
-    File /oname=SoFlo-SetupUI.exe "${APP_EXE}"
-    ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
-    Exec '"$PLUGINSDIR\SoFlo-SetupUI.exe" --installer --setup-exe="$EXEPATH" --current-version="$0" --target-version="${APP_VERSION}"'
-    Quit
-  ${EndIf}
-
   SetOutPath "$INSTDIR"
   Call EnsureWebView2
   DetailPrint "Installing the SoFlo desktop app..."
