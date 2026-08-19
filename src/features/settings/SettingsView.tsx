@@ -169,7 +169,7 @@ export function SettingsView({ settings, dataLocation, security, wordAiModelRead
     </section>
 
     <section className="settings-section about-section">
-      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.40" />
+      <SectionHeading icon={<Info size={18} />} title="About SoFlo" detail="Version 1.1.41" />
       <SettingRow title="Update notifications" detail="Check GitHub Releases when SoFlo opens. This is the only automatic network request SoFlo makes."><Toggle checked={settings.checkForUpdates} onChange={(checkForUpdates) => void update({ checkForUpdates })} /></SettingRow>
       <SettingRow title="Credits" detail="Created by Mikey M. · me@mikeymele.com" />
       <SettingRow title="Copyright & license" detail="© 2026 Mikey M. · PolyForm Noncommercial 1.0.0. Non-commercial sharing and modifications are welcome with credit; commercial use requires permission." />

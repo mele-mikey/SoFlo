@@ -636,6 +636,16 @@ pub struct AppUpdateInfo {
     pub download_url: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateDownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u8>,
+    attempt: u8,
+    message: String,
+}
+
 #[derive(serde::Deserialize)]
 struct GithubReleaseAsset {
     name: String,
@@ -695,18 +705,52 @@ pub async fn download_and_launch_app_update(app: tauri::AppHandle, version: Stri
             return Err("That update version is invalid.".into());
         }
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(45))
+            // A release download should survive slow but active Wi-Fi. This is
+            // deliberately much longer than the lightweight update check.
+            .timeout(Duration::from_secs(60 * 60))
             .user_agent("SoFlo updater")
             .build()
             .map_err(|_| "SoFlo could not prepare the update download.".to_string())?;
-        let response = client.get(&download_url).send().map_err(|_| "SoFlo could not download that update.".to_string())?;
-        if !response.status().is_success() { return Err("GitHub Releases could not provide that update.".into()); }
-        let bytes = response.bytes().map_err(|_| "SoFlo could not finish downloading that update.".to_string())?;
         let is_msi = download_url.to_ascii_lowercase().ends_with(".msi");
-        let valid = if is_msi { bytes.get(0..4) == Some(&[0xD0, 0xCF, 0x11, 0xE0]) } else { bytes.get(0..2) == Some(b"MZ") };
-        if bytes.len() < 1024 || !valid { return Err("The downloaded update is not a valid Windows installer.".into()); }
         let destination = std::env::temp_dir().join(format!("SoFlo-Setup-{}.{}", version, if is_msi { "msi" } else { "exe" }));
-        fs::write(&destination, bytes).map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+        let partial = destination.with_extension(format!("{}.partial", if is_msi { "msi" } else { "exe" }));
+        let mut final_error = None;
+        for attempt in 1..=3u8 {
+            let existing = fs::metadata(&partial).map(|metadata| metadata.len()).unwrap_or(0);
+            let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: existing, total_bytes: None, percent: None, attempt, message: if existing > 0 { "Resuming update download…".into() } else { "Starting update download…".into() } });
+            let mut request = client.get(&download_url);
+            if existing > 0 { request = request.header(reqwest::header::RANGE, format!("bytes={existing}-")); }
+            let result = (|| -> CommandResult<()> {
+                let mut response = request.send().map_err(|_| "The update download was interrupted.".to_string())?;
+                if !(response.status().is_success() || response.status() == reqwest::StatusCode::PARTIAL_CONTENT) { return Err("GitHub Releases could not provide that update.".into()); }
+                let append = existing > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+                let offset = if append { existing } else { 0 };
+                let total = response.content_length().map(|length| length.saturating_add(offset));
+                let mut output = if append { fs::OpenOptions::new().create(true).append(true).open(&partial) } else { fs::File::create(&partial) }.map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                let mut downloaded = offset;
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let count = response.read(&mut buffer).map_err(|_| "The update download was interrupted.".to_string())?;
+                    if count == 0 { break; }
+                    output.write_all(&buffer[..count]).map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                    downloaded = downloaded.saturating_add(count as u64);
+                    let percent = total.filter(|size| *size > 0).map(|size| ((downloaded.saturating_mul(100) / size).min(100)) as u8);
+                    let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: downloaded, total_bytes: total, percent, attempt, message: "Downloading update…".into() });
+                }
+                output.flush().map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                if let Some(total) = total { if downloaded < total { return Err("The update download ended before the complete installer arrived.".into()); } }
+                Ok(())
+            })();
+            match result { Ok(()) => { final_error = None; break; }, Err(error) => { final_error = Some(error); if attempt < 3 { thread::sleep(Duration::from_secs(u64::from(attempt) * 2)); } } }
+        }
+        if let Some(error) = final_error { return Err(format!("{error} Your partial download was kept so SoFlo can resume it when you try again.")); }
+        let bytes = fs::read(&partial).map_err(|_| "SoFlo could not verify the downloaded installer.".to_string())?;
+        let valid = if is_msi { bytes.get(0..4) == Some(&[0xD0, 0xCF, 0x11, 0xE0]) } else { bytes.get(0..2) == Some(b"MZ") };
+        if bytes.len() < 1024 || !valid { return Err("The downloaded update is not a valid Windows installer. Please try again.".into()); }
+        let _ = fs::remove_file(&destination);
+        fs::rename(&partial, &destination).map_err(|_| "SoFlo could not finalize the downloaded installer.".to_string())?;
+        let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: bytes.len() as u64, total_bytes: Some(bytes.len() as u64), percent: Some(100), attempt: 1, message: "Opening the installer…".into() });
         if is_msi { Command::new("msiexec.exe").arg("/i").arg(&destination).spawn() } else { Command::new(&destination).spawn() }
             .map_err(|_| "SoFlo could not start the downloaded update installer.".to_string())?;
         app.exit(0);
