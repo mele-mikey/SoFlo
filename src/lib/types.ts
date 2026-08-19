@@ -280,7 +280,6 @@ export interface AppSettings {
   hideOverviewBanner: boolean
   aiEnabled: boolean
   aiGrammar: boolean
-  fastAiResponses: boolean
   askForAiUse: boolean
   checkForUpdates: boolean
   aiModelPath: string

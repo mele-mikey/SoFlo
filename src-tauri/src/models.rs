@@ -329,8 +329,6 @@ pub struct AppSettings {
     pub ai_enabled: bool,
     #[serde(default = "default_ai_grammar")]
     pub ai_grammar: bool,
-    #[serde(default)]
-    pub fast_ai_responses: bool,
     #[serde(default = "default_ask_for_ai_use")]
     pub ask_for_ai_use: bool,
     #[serde(default = "default_check_for_updates")]
@@ -397,7 +395,6 @@ impl Default for AppSettings {
             hide_overview_banner: false,
             ai_enabled: true,
             ai_grammar: true,
-            fast_ai_responses: false,
             ask_for_ai_use: true,
             check_for_updates: true,
             ai_model_path: String::new(),

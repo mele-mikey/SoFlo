@@ -895,7 +895,6 @@ pub async fn generate_flashcards_text(
     materials: String,
     guidance: String,
     syllabus_context: String,
-    max_cards: Option<usize>,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         generate_flashcards_text_blocking(
@@ -904,7 +903,6 @@ pub async fn generate_flashcards_text(
             materials,
             guidance,
             syllabus_context,
-            max_cards.unwrap_or(100),
         )
     })
     .await
@@ -1780,7 +1778,6 @@ fn generate_flashcards_text_blocking(
     materials: String,
     guidance: String,
     syllabus_context: String,
-    max_cards: usize,
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
@@ -1829,7 +1826,7 @@ fn generate_flashcards_text_blocking(
     let system = flashcard_system_instruction(math_mode);
     let chunks = split_source_for_ai(&source, FLASHCARD_SOURCE_CHUNK_CHARS);
     let total_chunks = chunks.len().max(1);
-    let card_budget = max_cards.clamp(1, 100);
+    let card_budget = 100;
     let mut cards = Vec::<serde_json::Value>::new();
     let mut seen = HashSet::<String>::new();
     let mut cpu_retry_used = false;
@@ -2828,7 +2825,6 @@ pub fn delete_local_ai_models(
     settings.ai_writing_model_tier = "medium".to_string();
     settings.ai_voice_model_tier = "medium".to_string();
     settings.ai_grammar = false;
-    settings.fast_ai_responses = false;
     let serialized = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     connection.execute("INSERT INTO app_settings (key, value, updated_at) VALUES ('settings', ?1, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [&serialized]).map_err(|error| error.to_string())?;
     Ok(())
@@ -4595,12 +4591,7 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     if !settings.ai_enabled || settings.ai_model_path.trim().is_empty() {
         return Err("Enable General AI to create the lecture analysis.".into());
     }
-    let selected_model = if settings.fast_ai_responses {
-        &settings.ai_writing_model_path
-    } else {
-        &settings.ai_model_path
-    };
-    let model_path = resolve_ai_model_path(app, selected_model)?;
+    let model_path = resolve_ai_model_path(app, &settings.ai_model_path)?;
     let (raw_transcript, cleaned_transcript) = stored_lecture_transcripts(&connection, lecture_id)?;
     let lecture_context = lecture_analysis_context(&connection, lecture_id)?;
     let prior_detailed_notes: Option<String> = connection
@@ -7830,7 +7821,6 @@ pub fn update_settings(
 ) -> CommandResult<AppSettings> {
     if !input.settings.ai_enabled {
         input.settings.ai_grammar = false;
-        input.settings.fast_ai_responses = false;
     }
     let connection = database.open()?;
     let serialized = serde_json::to_string(&input.settings).map_err(|error| error.to_string())?;

@@ -52,7 +52,7 @@ export function LocalModelManager({ settings, onClose, onSettingsChange, onModel
     setWorking('cleanup')
     try {
       await api.deleteLocalAiModels()
-      onSettingsChange({ ...settings, aiModelPath: '', aiWritingModelPath: '', aiVoiceModelPath: '', aiGrammar: false, fastAiResponses: false, aiGeneralModelTier: 'medium', aiWritingModelTier: 'medium', aiVoiceModelTier: 'medium' })
+      onSettingsChange({ ...settings, aiModelPath: '', aiWritingModelPath: '', aiVoiceModelPath: '', aiGrammar: false, aiGeneralModelTier: 'medium', aiWritingModelTier: 'medium', aiVoiceModelTier: 'medium' })
       onModelsUpdated()
       onToast('All local AI models were removed from this PC.')
       onClose()
