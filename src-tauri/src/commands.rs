@@ -159,9 +159,9 @@ const AI_CONTEXT_SIZE: &str = "16384";
 const FLASHCARD_AI_CONTEXT_SIZE: &str = "32768";
 const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
-// Keep a few layers on the CPU so SoFlo remains responsive, while avoiding
-// the very slow half-CPU/half-GPU split that made generation drag on.
-const AI_GPU_LAYERS: &str = "32";
+// Let llama.cpp offload every layer that fits on the detected accelerator.
+// It automatically falls back to CPU when a machine has no supported backend.
+const AI_GPU_LAYERS: &str = "-1";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
@@ -271,6 +271,31 @@ fn llama_server_executable() -> PathBuf {
         }
     }
     PathBuf::from(executable)
+}
+
+/// Ask the bundled llama.cpp runtime which accelerator it can actually use.
+/// Radeon drivers alone are not enough; this only returns a device when the
+/// shipped llama-server has a compatible Vulkan/CUDA/Metal backend too.
+fn llama_acceleration_device() -> Option<String> {
+    let mut command = Command::new(llama_server_executable());
+    command.arg("--list-devices");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().split_once(':').map(|(device, _)| device.trim()))
+        .find(|device| {
+            let lower = device.to_ascii_lowercase();
+            lower.starts_with("vulkan") || lower.starts_with("cuda") || lower.starts_with("metal")
+        })
+        .map(str::to_owned)
 }
 struct AiServer {
     child: Child,
@@ -2161,6 +2186,7 @@ fn start_llama_server(
     reasoning: &str,
     use_reasoning: bool,
     gpu_layers: &str,
+    gpu_device: Option<&str>,
 ) -> CommandResult<Child> {
     let port = port.to_string();
     let mut command = Command::new(llama_server_executable());
@@ -2178,6 +2204,9 @@ fn start_llama_server(
         "--gpu-layers",
         gpu_layers,
     ]);
+    if let Some(device) = gpu_device {
+        command.args(["--device", device]);
+    }
     if use_reasoning {
         command.args(["--reasoning", reasoning, "--reasoning-budget", "1024"]);
     }
@@ -2269,7 +2298,8 @@ fn ensure_model_server_with_profiles(
         *guard = None;
     }
     emit_ai_progress(app, 22, "Loading your private local model");
-    let profiles: &[(bool, &str)] = if force_cpu {
+    let gpu_device = if force_cpu { None } else { llama_acceleration_device() };
+    let profiles: &[(bool, &str)] = if force_cpu || gpu_device.is_none() {
         &[(false, "0")]
     } else if reasoning.eq_ignore_ascii_case("on") {
         &[(true, AI_GPU_LAYERS), (false, AI_GPU_LAYERS), (false, "0")]
@@ -2286,6 +2316,7 @@ fn ensure_model_server_with_profiles(
             reasoning,
             *use_reasoning,
             gpu_layers,
+            if *gpu_layers == "0" { None } else { gpu_device.as_deref() },
         ) {
             Ok(child) => child,
             Err(error) => {
