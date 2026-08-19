@@ -394,7 +394,22 @@ function App() {
   const closeAiConsent = (proceed: boolean) => { setAiConsentOpen(false); aiConsentResolver.current?.(proceed); aiConsentResolver.current = null }
   const ensureAiModel = async () => {
     if (!library?.settings.aiEnabled) return null
-    if (!needsDefaultAiModelUpgrade(library.settings.aiModelPath) && await api.generalAiModelReady()) return library.settings.aiModelPath
+    const fast = library.settings.fastAiResponses
+    if (fast) {
+      const inventory = await api.getAiModelInventory()
+      if (!inventory.general.low && !await requestAiConsent()) throw new Error('AI import was cancelled.')
+      setAiDownloadProgress(inventory.general.low ? null : 0)
+      try {
+        // Fast mode is deliberately pinned to the compact general model, even
+        // when the user has selected a larger Writing model for accuracy.
+        return await api.installAiModel('general', 'low')
+      } finally {
+        setAiDownloadProgress(null)
+      }
+    }
+    const currentPath = library.settings.aiModelPath
+    const ready = await api.generalAiModelReady()
+    if (!needsDefaultAiModelUpgrade(library.settings.aiModelPath) && ready) return currentPath
     if (!await requestAiConsent()) throw new Error('AI import was cancelled.')
     setAiDownloadProgress(0)
     try {
@@ -486,7 +501,9 @@ function App() {
     setAiWorking(true)
     setAiProgress({ progress: 4, message: mode === 'writing' ? 'Loading your local writing and general AI.' : 'Loading your local study AI.' })
     try {
-      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiWritingModelPath, mode)
+      const generalModelPath = library.settings.fastAiResponses ? await ensureAiModel() : library.settings.aiModelPath
+      if (generalModelPath === null) return
+      await api.prepareAiForSession(generalModelPath, library.settings.aiWritingModelPath, mode)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'SoFlo could not prepare local AI for this session.', 'error')
     } finally {
@@ -561,15 +578,22 @@ function App() {
       const modelPath = await ensureAiModel()
       if (modelPath === null) throw new Error('Turn on AI in Settings to create cards with AI.')
       setAiWorking(true); setAiProgress({ progress: 3, message: 'Preparing your study materials' })
-      const countInstruction = request.cardCount === 'auto' ? 'Cover every distinct fact or member of a finite list in the material, up to 100 cards. Do not stop at an arbitrary round number when more important material remains.' : `Make about ${request.cardCount} cards.`
-      const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${request.depth} depth. ${request.guidance.trim()}`, syllabusContext)
+      const fast = library?.settings.fastAiResponses === true
+      const maxCards = request.cardCount === 'auto' ? (fast ? 60 : 100) : request.cardCount
+      const countInstruction = request.cardCount === 'auto'
+        ? fast
+          ? 'Prioritize the most testable facts and representative practice problems. Make a focused set of up to 60 cards instead of trying to cover every minor detail.'
+          : 'Cover every distinct fact or member of a finite list in the material, up to 100 cards. Do not stop at an arbitrary round number when more important material remains.'
+        : `Make about ${request.cardCount} cards.`
+      const depth = fast ? 'quick' : request.depth
+      const raw = await api.generateFlashcardsText(modelPath, materials, `${countInstruction} Use ${depth} depth. ${request.guidance.trim()}`, syllabusContext, maxCards)
       const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
       const start = cleaned.indexOf('[')
       const end = cleaned.lastIndexOf(']')
       if (start < 0 || end <= start) throw new Error('SoFlo could not read the flashcards the local model returned. Try a shorter prompt or add a little more context.')
       let generated: { front?: string; back?: string }[]
       try { generated = JSON.parse(cleaned.slice(start, end + 1)) as { front?: string; back?: string }[] } catch { throw new Error('SoFlo could not read the flashcards the local model returned. Try again with a little more context.') }
-      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, request.cardCount === 'auto' ? 100 : request.cardCount)
+      const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, maxCards)
       if (!cards.length) throw new Error('The local AI model did not return usable flashcards.')
       const sourceKinds = [request.sources.length && 'uploaded material', request.pasted.trim() && 'pasted material', request.topic.trim() && 'a topic prompt'].filter(Boolean).join(', ')
       const set = await api.createSet({ classId: targetClassId, title: request.title.trim() || 'AI study set', description: `Created from ${sourceKinds || 'study material'}.` })
