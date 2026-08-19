@@ -153,10 +153,11 @@ const AI_WARM_WINDOW: Duration = Duration::from_secs(30);
 // Flashcard creation needs room for both source material and a JSON answer.
 // 8k leaves too little input room once a 100-card response is requested.
 const AI_CONTEXT_SIZE: &str = "16384";
-// Flashcard packets can be substantially more token-dense than prose, especially
-// when they contain equations. Start the model with its full working context for
-// this one action, then the normal warm-window shutdown releases that memory.
-const FLASHCARD_AI_CONTEXT_SIZE: &str = "32768";
+// Flashcard generation is deliberately split into compact source batches. An
+// 8k context leaves room for the densest math batch and its closed JSON answer
+// while avoiding a 32k KV cache that can push a 4B model out of an integrated
+// GPU's shared memory and make every section dramatically slower.
+const FLASHCARD_AI_CONTEXT_SIZE: &str = "8192";
 const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
 // Use llama.cpp's documented GPU profiles. `all` is the fast path, `auto`
