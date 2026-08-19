@@ -581,7 +581,7 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 20 {
+        if version >= 21 {
             return Ok(());
         }
         if version < 1 {
@@ -914,6 +914,37 @@ impl Database {
             }
             connection.execute_batch("PRAGMA user_version = 20;").map_err(|error| error.to_string())?;
         }
+        if version < 21 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS course_calendar_sources (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    content_plain TEXT NOT NULL,
+                    source_path TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS course_calendar_items (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    source_id TEXT NOT NULL REFERENCES course_calendar_sources(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    due_date TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    urgency TEXT NOT NULL DEFAULT 'upcoming',
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    source_excerpt TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS course_calendar_plans (
+                    class_id TEXT PRIMARY KEY NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    game_plan TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_course_calendar_items_class_due ON course_calendar_items(class_id, due_date);
+                PRAGMA user_version = 21;
+            "#).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }
@@ -1108,7 +1139,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         let set_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
             statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
@@ -1134,6 +1165,10 @@ mod tests {
         }
         for table in ["study_webs", "study_web_sources", "study_web_groups", "study_web_nodes", "study_web_group_members", "study_web_relationships"] {
             let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("study web table lookup");
+            assert_eq!(exists, 1, "missing {table}");
+        }
+        for table in ["course_calendar_sources", "course_calendar_items", "course_calendar_plans"] {
+            let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("course calendar table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
         drop(connection);
@@ -1174,7 +1209,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>().expect("analysis column names");
         assert!(columns.contains(&"note_suggestions_json".to_string()));
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         drop(connection);
         drop(repaired);
         let _ = fs::remove_dir_all(directory);
@@ -1193,7 +1228,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);

@@ -5184,6 +5184,85 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
         .map_err(|_| "SoFlo could not read that text file.".into())
 }
 
+fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
+    let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
+    let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut items = connection.prepare("SELECT id, class_id, source_id, title, due_date, description, urgency, completed, source_excerpt FROM course_calendar_items WHERE class_id=?1 ORDER BY due_date, completed, title").map_err(|error| error.to_string())?;
+    let items = items.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: row.get(2)?, title: row.get(3)?, due_date: row.get(4)?, description: row.get(5)?, urgency: row.get(6)?, completed: row.get::<_, i64>(7)? != 0, source_excerpt: row.get(8)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let plan = connection.query_row("SELECT game_plan, updated_at FROM course_calendar_plans WHERE class_id=?1", [class_id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| error.to_string())?;
+    Ok(CourseCalendarDetail { class_id: class_id.to_string(), sources, items, game_plan: plan.as_ref().map(|entry: &(String, String)| entry.0.clone()).unwrap_or_default(), updated_at: plan.map(|entry| entry.1) })
+}
+
+#[tauri::command]
+pub fn get_course_calendar(database: State<'_, Database>, class_id: String) -> CommandResult<CourseCalendarDetail> {
+    read_course_calendar_detail(&database.open()?, &class_id)
+}
+
+#[tauri::command]
+pub fn add_course_calendar_source(database: State<'_, Database>, input: AddCourseCalendarSourceInput) -> CommandResult<CourseCalendarDetail> {
+    let title = input.title.trim().chars().take(180).collect::<String>();
+    let content = input.content_plain.trim().chars().take(250_000).collect::<String>();
+    if title.is_empty() || content.is_empty() { return Err("That course document has no readable text.".into()); }
+    let connection = database.open()?;
+    let count: i64 = connection.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&input.class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if count >= 10 { return Err("A Course Calendar can keep up to 10 source documents. Remove one before adding another.".into()); }
+    connection.execute("INSERT INTO course_calendar_sources (id, class_id, title, content_plain, source_path) VALUES (?1,?2,?3,?4,?5)", params![Uuid::new_v4().to_string(), input.class_id, title, content, input.source_path]).map_err(|error| error.to_string())?;
+    read_course_calendar_detail(&connection, &input.class_id)
+}
+
+#[tauri::command]
+pub fn remove_course_calendar_source(database: State<'_, Database>, id: String) -> CommandResult<()> {
+    let connection = database.open()?;
+    connection.execute("DELETE FROM course_calendar_sources WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_course_calendar_item_completed(database: State<'_, Database>, id: String, completed: bool) -> CommandResult<()> {
+    let connection = database.open()?;
+    connection.execute("UPDATE course_calendar_items SET completed=?1 WHERE id=?2", params![completed as i32, id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct CourseCalendarAiPlan { #[serde(default)] items: Vec<CourseCalendarAiItem>, #[serde(default)] game_plan: String }
+#[derive(serde::Deserialize)]
+struct CourseCalendarAiItem { source_title: String, title: String, due_date: String, #[serde(default)] description: String, #[serde(default)] urgency: String, #[serde(default)] source_excerpt: String }
+
+#[tauri::command]
+pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, Database>, class_id: String, model_path: String) -> CommandResult<CourseCalendarDetail> {
+    let database = database.inner().clone(); let app_for_ai = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = database.open()?;
+        let detail = read_course_calendar_detail(&connection, &class_id)?;
+        if detail.sources.is_empty() { return Err("Add one or more course documents first.".into()); }
+        let settings = get_settings(&connection, None)?;
+        if !settings.ai_enabled { return Err("Enable General AI to build the Course Calendar.".into()); }
+        let resolved = resolve_ai_model_path(&app_for_ai, &model_path)?;
+        let source_text = detail.sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(10_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
+        let today = chrono::Local::now().date_naive().to_string();
+        let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Color urgency as critical, high, upcoming, or later based on time remaining and workload. When deadlines overlap, sequence them explicitly in the game plan. Return JSON only: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"supporting text\"}}],\"game_plan\":\"a concise ordered plan for this week\"}}. Omit uncertain dates.\n\n{source_text}");
+        let port = ensure_ai_server(&resolved, &app_for_ai)?;
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let raw = local_chat_text(&client, port, "You extract course calendars faithfully. Never invent dates. Output JSON only.", &prompt, 1800)?;
+        let json = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+        let plan: CourseCalendarAiPlan = serde_json::from_str(json).map_err(|_| "SoFlo could not read the calendar plan returned by the local AI.".to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+        for item in plan.items.into_iter().take(250) {
+            if !item.due_date.chars().take(10).collect::<String>().chars().all(|character| character.is_ascii_digit() || character == '-') || item.due_date.len() < 10 { continue; }
+            let source_id = detail.sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())).or_else(|| detail.sources.first()).map(|source| source.id.clone()).unwrap_or_default();
+            let title = item.title.trim().chars().take(180).collect::<String>(); if title.is_empty() || source_id.is_empty() { continue; }
+            let due_date = item.due_date.chars().take(10).collect::<String>(); let completed = due_date.as_str() < today.as_str();
+            let urgency = match item.urgency.trim().to_lowercase().as_str() { "critical" | "high" | "upcoming" | "later" => item.urgency.trim().to_lowercase(), _ => "upcoming".to_string() };
+            transaction.execute("INSERT INTO course_calendar_items (id,class_id,source_id,title,due_date,description,urgency,completed,source_excerpt) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![Uuid::new_v4().to_string(), class_id, source_id, title, due_date, item.description.trim().chars().take(1200).collect::<String>(), urgency, completed as i32, item.source_excerpt.trim().chars().take(1200).collect::<String>()]).map_err(|error| error.to_string())?;
+        }
+        transaction.execute("INSERT INTO course_calendar_plans (class_id,game_plan,updated_at) VALUES (?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(class_id) DO UPDATE SET game_plan=excluded.game_plan,updated_at=CURRENT_TIMESTAMP", params![class_id, plan.game_plan.trim().chars().take(4000).collect::<String>()]).map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        read_course_calendar_detail(&connection, &class_id)
+    }).await.map_err(|_| "SoFlo's Course Calendar task stopped unexpectedly.".to_string())?
+}
+
 #[tauri::command]
 pub fn duplicate_flashcard_set(
     database: State<'_, Database>,

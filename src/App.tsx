@@ -846,7 +846,7 @@ function App() {
           course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus}
           aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} studyWebs={studyWebs}
           onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()}
-          onImportPdf={() => setModal({ type: 'documentImport', kind: 'paper' })} onImportSyllabus={() => void importLocalDocument('syllabus')} onImportSyllabusWithAi={() => void importLocalDocument('syllabus', true)} onNewSet={() => void createSet()}
+          onImportPdf={() => setModal({ type: 'documentImport', kind: 'paper' })} onImportSyllabus={() => void importLocalDocument('syllabus')} onImportSyllabusWithAi={() => void importLocalDocument('syllabus', true)} onEnsureAiModel={ensureAiModel} onNewSet={() => void createSet()}
           onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })}
           onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })}
           onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)}

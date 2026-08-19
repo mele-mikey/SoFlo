@@ -44,6 +44,35 @@ export interface DocumentFolder {
   title: string
 }
 
+export interface CourseCalendarSource {
+  id: string
+  classId: string
+  title: string
+  contentPlain: string
+  sourcePath: string | null
+  createdAt: string
+}
+
+export interface CourseCalendarItem {
+  id: string
+  classId: string
+  sourceId: string
+  title: string
+  dueDate: string
+  description: string
+  urgency: 'critical' | 'high' | 'upcoming' | 'later' | string
+  completed: boolean
+  sourceExcerpt: string
+}
+
+export interface CourseCalendarDetail {
+  classId: string
+  sources: CourseCalendarSource[]
+  items: CourseCalendarItem[]
+  gamePlan: string
+  updatedAt: string | null
+}
+
 export interface DocumentDetail extends DocumentSummary {
   content: string
   contentPlain: string
@@ -329,7 +358,7 @@ export interface TestAttemptSummary {
 export type AppView =
   | { kind: 'home' }
   | { kind: 'calendar' }
-  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'lectures' | 'syllabus' | 'flashcards' | 'studyWeb' | 'trash' }
+  | { kind: 'class'; classId: string; tab: 'overview' | 'notes' | 'lectures' | 'syllabus' | 'courseCalendar' | 'flashcards' | 'studyWeb' | 'trash' }
   | { kind: 'document'; classId: string; documentId: string }
   | { kind: 'lecture'; classId: string; lectureId: string }
   | { kind: 'flashcardSet'; classId: string; setId: string }

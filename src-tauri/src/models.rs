@@ -85,6 +85,50 @@ pub struct DocumentFolder {
     pub title: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseCalendarSource {
+    pub id: String,
+    pub class_id: String,
+    pub title: String,
+    pub content_plain: String,
+    pub source_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseCalendarItem {
+    pub id: String,
+    pub class_id: String,
+    pub source_id: String,
+    pub title: String,
+    pub due_date: String,
+    pub description: String,
+    pub urgency: String,
+    pub completed: bool,
+    pub source_excerpt: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseCalendarDetail {
+    pub class_id: String,
+    pub sources: Vec<CourseCalendarSource>,
+    pub items: Vec<CourseCalendarItem>,
+    pub game_plan: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddCourseCalendarSourceInput {
+    pub class_id: String,
+    pub title: String,
+    pub content_plain: String,
+    pub source_path: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LectureSummary {

@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
-  AppSettings, BootstrapData, CardProgress, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureAnalysis, LectureDetail, LectureRecording, LectureSummary, LectureTranscriptSegment, RevisionHistoryEntry,
+  AppSettings, BootstrapData, CardProgress, CourseCalendarDetail, CourseClass, DocumentDetail, DocumentFolder, DocumentSummary, LectureAnalysis, LectureDetail, LectureRecording, LectureSummary, LectureTranscriptSegment, RevisionHistoryEntry,
   Flashcard, FlashcardSetDetail, FlashcardSetSummary, SearchResult, SecurityStatus, Semester, StudyInsights, StudySessionSummary, StudyWebDetail, StudyWebRelationship, StudyWebSummary, TestAttemptSummary,
 } from './types'
 
-const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'start_lecture_recording', 'append_lecture_audio_chunk', 'import_lecture_audio', 'finish_lecture_recording', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'create_empty_study_web', 'import_study_web_json', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'update_study_web_group_membership', 'create_study_web_group', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'delete_local_ai_models', 'empty_trash', 'update_library_security', 'restore_library'])
+const mutatingCommands = new Set(['create_semester', 'update_semester', 'delete_semester', 'create_class', 'update_class', 'delete_class', 'create_document', 'save_document', 'name_document_revision', 'restore_document_revision', 'create_lecture', 'save_lecture', 'name_lecture_revision', 'restore_lecture_revision', 'delete_lecture', 'start_lecture_recording', 'append_lecture_audio_chunk', 'import_lecture_audio', 'finish_lecture_recording', 'set_document_syllabus', 'set_document_deleted', 'duplicate_document', 'rename_documents', 'rename_document_folder', 'group_documents', 'remove_document_from_folder', 'move_document', 'add_course_calendar_source', 'remove_course_calendar_source', 'set_course_calendar_item_completed', 'refresh_course_calendar', 'create_flashcard_set', 'save_flashcard_set', 'set_flashcard_set_deleted', 'duplicate_flashcard_set', 'save_flashcard', 'delete_flashcard', 'create_empty_study_web', 'import_study_web_json', 'generate_study_web', 'set_study_web_deleted', 'save_study_web_node_position', 'toggle_study_web_relationship', 'update_study_web_group_membership', 'create_study_web_group', 'record_card_response', 'start_study_session', 'complete_study_session', 'save_test_attempt', 'save_match_time', 'update_settings', 'delete_local_ai_models', 'empty_trash', 'update_library_security', 'restore_library'])
 const call = async <T>(command: string, arguments_?: Record<string, unknown>) => {
   const result = await invoke<T>(command, arguments_)
   if (mutatingCommands.has(command)) await invoke('sync_encrypted_library')
@@ -66,6 +66,11 @@ export const api = {
   groupDocuments: (id: string, targetId: string) => call<void>('group_documents', { id, targetId }),
   removeDocumentFromFolder: (id: string) => call<void>('remove_document_from_folder', { id }),
   moveDocument: (id: string, classId: string) => call<void>('move_document', { id, classId }),
+  getCourseCalendar: (classId: string) => call<CourseCalendarDetail>('get_course_calendar', { classId }),
+  addCourseCalendarSource: (input: { classId: string; title: string; contentPlain: string; sourcePath?: string | null }) => call<CourseCalendarDetail>('add_course_calendar_source', { input }),
+  removeCourseCalendarSource: (id: string) => call<void>('remove_course_calendar_source', { id }),
+  setCourseCalendarItemCompleted: (id: string, completed: boolean) => call<void>('set_course_calendar_item_completed', { id, completed }),
+  refreshCourseCalendar: (classId: string, modelPath: string) => call<CourseCalendarDetail>('refresh_course_calendar', { classId, modelPath }),
   listSets: (classId: string, includeDeleted = false) => call<FlashcardSetSummary[]>('list_flashcard_sets', { classId, includeDeleted }),
   createSet: (input: { classId: string; title: string; description?: string }) => call<FlashcardSetDetail>('create_flashcard_set', { input }),
   getSet: (id: string) => call<FlashcardSetDetail>('get_flashcard_set', { id }),
