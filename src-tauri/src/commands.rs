@@ -2089,7 +2089,11 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) { return Ok(port); }
-    ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "on")
+    // Qwen 3 can spend a completion entirely in its reasoning channel, which
+    // leaves message.content empty for JSON- and text-based SoFlo features.
+    // Keep reasoning disabled at the server level so every general AI action
+    // returns usable content while the prompt still guides its analysis.
+    ensure_model_server(&AI_SERVER, model_path, app, AI_CONTEXT_SIZE, "off")
 }
 
 fn ensure_flashcard_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
@@ -2098,7 +2102,7 @@ fn ensure_flashcard_ai_server(model_path: &str, app: &tauri::AppHandle) -> Comma
         model_path,
         app,
         FLASHCARD_AI_CONTEXT_SIZE,
-        "on",
+        "off",
     )
 }
 
@@ -2124,7 +2128,7 @@ fn ensure_flashcard_compat_ai_server(model_path: &str, app: &tauri::AppHandle) -
 }
 
 fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
-    ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "on")
+    ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "off")
 }
 
 fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
