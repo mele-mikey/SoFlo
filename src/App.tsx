@@ -28,7 +28,7 @@ import { StudyView } from './features/study/StudyView'
 import { StudyWebView } from './features/study/StudyWebView'
 import { AiLaunchChooser, type AiLaunchMode } from './features/ai/AiLaunchChooser'
 
-type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'documentImport'; kind: 'paper' | 'syllabus' } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
+type ModalState = { type: 'semester' } | { type: 'class'; semesterId?: string } | { type: 'aiSet'; classId: string } | { type: 'importSet'; classId: string } | { type: 'documentImport'; kind: 'paper' | 'syllabus' } | { type: 'documentImportFallback'; kind: 'paper' | 'syllabus'; source: string } | { type: 'restartWalkthrough' } | { type: 'archiveClass' } | null
 type ToastKind = 'success' | 'error'
 type Toast = { message: string; type: ToastKind } | null
 type AiSetRequest = { sources: string[]; pasted: string; topic: string; guidance: string; title: string; cardCount: 'auto' | 10 | 20 | 30; depth: 'quick' | 'standard' | 'detailed' }
@@ -203,7 +203,7 @@ function App() {
       setVoiceAiModelReady(voiceReady)
     } catch { setGeneralAiModelReady(false); setWordAiModelReady(false); setVoiceAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
-  useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, library?.settings.aiWritingModelPath, refreshWordAiModelStatus])
+  useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, library?.settings.aiWritingModelPath, library?.settings.aiVoiceModelPath, refreshWordAiModelStatus])
   useEffect(() => {
     if (aiLaunchPromptEvaluated.current || !library || !wordAiModelStatusLoaded) return
     aiLaunchPromptEvaluated.current = true
@@ -504,20 +504,45 @@ function App() {
     setSettings(settings)
     try { await api.updateSettings(settings) } catch { setSettings(library.settings); showToast('Settings could not be saved.', 'error') }
   }
-  const importLocalDocument = async (documentKind: 'paper' | 'syllabus') => {
+  const supportedImport = (source: string) => /\.(?:pdf|doc|docx)$/i.test(source)
+  const importLocalDocument = async (documentKind: 'paper' | 'syllabus', useAi = false, selectedSource?: string) => {
     if (!classId) { showToast(`Open a class before importing a ${documentKind}.`, 'error'); return }
-    const source = await open({ title: 'Import document as a new paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx'] }] })
+    const source = selectedSource ?? await open({ title: `Import ${documentKind}`, multiple: false, directory: false, filters: [{ name: 'Supported documents', extensions: ['pdf', 'doc', 'docx'] }, { name: 'All files', extensions: ['*'] }] })
     if (!source || Array.isArray(source)) return
+    if (!supportedImport(source)) {
+      if (!useAi && library?.settings.aiEnabled) { setModal({ type: 'documentImportFallback', kind: documentKind, source }); return }
+      showToast('That file could not be imported because it is not a supported document.', 'error')
+      return
+    }
     try {
       const isWord = /\.docx?$/i.test(source)
       const text = isWord ? await api.importWordText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
-      await saveImportedDocument(text, source, documentKind, isWord)
+      await saveImportedDocument(text, source, documentKind, isWord, useAi)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That document could not be imported.', 'error') }
   }
-  const saveImportedDocument = async (text: string, source: string, documentKind: 'paper' | 'syllabus', sourceIsStructured = false) => {
+  const ensureVoiceTranscription = async () => {
+    if (!library) return null
+    if (await api.voiceAiModelReady()) return library.settings.aiVoiceModelPath
+    setAiDownloadProgress(0)
+    try {
+      const aiVoiceModelPath = await api.installAiModel('voice', library.settings.aiVoiceModelTier || 'medium')
+      const settings = { ...library.settings, aiVoiceModelPath }
+      await api.updateSettings(settings)
+      setLibrary((current) => current ? { ...current, settings } : current)
+      setVoiceAiModelReady(true)
+      showToast('Voice Transcription is ready.')
+      return aiVoiceModelPath
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Voice Transcription could not be installed.', 'error')
+      return null
+    } finally { setAiDownloadProgress(null) }
+  }
+  const saveImportedDocument = async (text: string, source: string, documentKind: 'paper' | 'syllabus', sourceIsStructured = false, useAi = false) => {
     if (!classId) return
     try {
-      const imported = sourceIsStructured ? importAiFormattedNote(text, source, text) : await formatImportedText(text, source, documentKind)
+      const imported = useAi
+        ? await formatImportedText(text, source, documentKind)
+        : sourceIsStructured ? importAiFormattedNote(text, source, text) : importPdfAsEditableNote(text, source)
       if (documentKind === 'syllabus') {
         if (syllabus) await api.setDocumentDeleted(syllabus.id, true)
         const created = await api.createDocument({ classId, title: imported.title || 'Class syllabus' })
@@ -821,7 +846,7 @@ function App() {
           course={activeCourse} tab={view.tab} documentCount={documents.length} documents={documents} folders={documentFolders} lectures={lectures} syllabus={syllabus}
           aiEnabled={Boolean(library.settings.aiEnabled)} trashedDocuments={trashedDocuments} sets={sets} trashedSets={trashedSets} allCards={allCards} studyWebs={studyWebs}
           onTab={(tab) => navigate({ kind: 'class', classId: activeCourse.id, tab })} onNewDocument={() => void createDocument()} onNewLecture={() => void createLecture()}
-          onImportPdf={() => setModal({ type: 'documentImport', kind: 'paper' })} onImportSyllabus={() => setModal({ type: 'documentImport', kind: 'syllabus' })} onNewSet={() => void createSet()}
+          onImportPdf={() => setModal({ type: 'documentImport', kind: 'paper' })} onImportSyllabus={() => void importLocalDocument('syllabus')} onImportSyllabusWithAi={() => void importLocalDocument('syllabus', true)} onNewSet={() => void createSet()}
           onImportSet={() => setModal({ type: 'importSet', classId: activeCourse.id })} onNewAiSet={() => setModal({ type: 'aiSet', classId: activeCourse.id })}
           onOpenDocument={(document) => navigate({ kind: 'document', classId: activeCourse.id, documentId: document.id })}
           onOpenLecture={(lecture) => navigate({ kind: 'lecture', classId: activeCourse.id, lectureId: lecture.id })} onDeleteLecture={(lecture) => void deleteLecture(lecture)}
@@ -835,7 +860,7 @@ function App() {
           onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} onToast={showToast}
         />}
         {view.kind === 'document' && (activeDocument ? <DocumentEditor document={activeDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled && !writingModelDeferred} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={generalAiModelReady && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listDocumentRevisions(activeDocument.id)} onReleaseAi={releaseAiModel} onChange={(content, contentPlain, title) => updateDocument({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeDocument.classId, tab: 'notes' })} onDelete={() => void deleteDocument()} onDuplicate={() => void duplicateDocument()} /> : <LoadingView />)}
-        {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor key={`${activeLecture.id}:${activeLecture.revision}`} document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={generalAiModelReady && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} lectureSuggestions={activeLectureNoteSuggestions.lectureId === activeLecture.id ? activeLectureNoteSuggestions.suggestions : []} sidePanel={<LectureRecordingPanel lectureId={activeLecture.id} aiEnabled={library.settings.aiEnabled} voiceModelReady={voiceAiModelReady} voiceModelPath={library.settings.aiVoiceModelPath} microphoneId={library.settings.lectureMicrophoneId} onMicrophoneChange={(lectureMicrophoneId) => void updateEditorSettings({ lectureMicrophoneId })} onNoteSuggestionsChange={updateLectureNoteSuggestions} onToast={showToast} />} /> : <LoadingView />)}
+        {view.kind === 'lecture' && (activeLecture && activeLectureAsDocument ? <DocumentEditor key={`${activeLecture.id}:${activeLecture.revision}`} document={activeLectureAsDocument} spellcheck={library.settings.spellcheck} aiEnabled={library.settings.aiEnabled} aiGrammarEnabled={library.settings.aiGrammar} aiModelReady={generalAiModelReady && wordAiModelReady && !needsDefaultAiModelUpgrade(library.settings.aiModelPath)} fontSize={11} readingSurface={library.settings.editorCanvas} saveState={saveState} grammarProgress={aiProgress} onSpellcheckChange={(spellcheck) => void updateEditorSettings({ spellcheck })} onAiGrammarEnabledChange={(aiGrammar) => void updateEditorSettings({ aiGrammar })} onGrammarReview={reviewGrammar} onResearchAndGrade={researchAndGrade} onDefineWord={defineWord} onAiThesaurus={aiThesaurus} onVersionHistory={() => api.listLectureRevisions(activeLecture.id)} onReleaseAi={releaseAiModel} collectionLabel="Lectures" deleteLabel="Delete lecture" deriveTitle={false} context={`${activeLecture.courseCode || activeLecture.courseName} · ${activeLecture.lectureDate}${activeLecture.scheduledStart ? ` · ${activeLecture.scheduledStart}${activeLecture.scheduledEnd ? `–${activeLecture.scheduledEnd}` : ''}` : ''}${activeLecture.professorSnapshot ? ` · ${activeLecture.professorSnapshot}` : ''}`} onChange={(content, contentPlain, title) => updateLecture({ content, contentPlain, title })} onBack={() => navigate({ kind: 'class', classId: activeLecture.classId, tab: 'lectures' })} onDelete={() => setLectureToDelete(activeLecture)} lectureSuggestions={activeLectureNoteSuggestions.lectureId === activeLecture.id ? activeLectureNoteSuggestions.suggestions : []} sidePanel={<LectureRecordingPanel lectureId={activeLecture.id} aiEnabled={library.settings.aiEnabled} voiceModelReady={voiceAiModelReady} voiceModelPath={library.settings.aiVoiceModelPath} onEnsureVoiceModel={ensureVoiceTranscription} microphoneId={library.settings.lectureMicrophoneId} onMicrophoneChange={(lectureMicrophoneId) => void updateEditorSettings({ lectureMicrophoneId })} onNoteSuggestionsChange={updateLectureNoteSuggestions} onToast={showToast} />} /> : <LoadingView />)}
         {view.kind === 'flashcardSet' && (activeSet ? <FlashcardSetEditor set={activeSet} aiEnabled={library.settings.aiEnabled} onBack={() => navigate({ kind: 'class', classId: activeSet.classId, tab: 'flashcards' })} onStudy={(mode) => navigate({ kind: 'study', classId: activeSet.classId, setIds: [activeSet.id], mode })} onCreateStudyWeb={() => { const summary = sets.find((item) => item.id === activeSet.id); if (summary) void createStudyWeb([summary]) }} onDuplicate={(title) => void duplicateActiveSet(title)} onUpdated={(set) => { setActiveSet(set); void loadClassContent(set.classId) }} onDelete={() => void deleteSet()} onToast={showToast} /> : <LoadingView />)}
         {view.kind === 'study' && (activeStudySets.length ? <StudyView sets={activeStudySets} mode={view.mode} cardIds={view.cardIds} aiEnabled={library.settings.aiEnabled} onGenerateTeachQuestion={generateTeachItBackQuestion} onGradeTeachAnswer={gradeTeachItBackAnswer} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'flashcards' })} onModeChange={(mode) => navigate({ kind: 'study', classId: view.classId, setIds: view.setIds, mode, cardIds: view.cardIds })} /> : <LoadingView />)}
         {view.kind === 'studyWeb' && (activeStudyWeb && activeStudyWebSets.length ? <StudyWebView web={activeStudyWeb} sets={activeStudyWebSets} aiEnabled={library.settings.aiEnabled} autoPin={library.settings.studyWebAutoPin} groupHighlights={library.settings.studyWebGroupHighlights} onSettingsChange={updateStudyWebSettings} startInEditMode={manualStudyWebEditingId === activeStudyWeb.id} onBack={() => navigate({ kind: 'class', classId: view.classId, tab: 'studyWeb' })} onRegenerate={() => { const selectedSets = sets.filter((item) => activeStudyWeb.flashcardSetIds.includes(item.id)); if (selectedSets.length) void createStudyWeb(selectedSets, activeStudyWeb.id) }} onStudyCard={(cardId) => navigate({ kind: 'study', classId: view.classId, setIds: activeStudyWeb.flashcardSetIds, mode: 'flashcards', cardIds: [cardId] })} /> : <LoadingView />)}
@@ -846,6 +871,7 @@ function App() {
     {modal?.type === 'semester' && <CreateSemesterDialog onClose={() => setModal(null)} onCreate={createSemester} />}
     {modal?.type === 'class' && <CreateClassDialog semesters={library.semesters} initialSemesterId={modal.semesterId} onClose={() => setModal(null)} onCreate={createClass} />}
     {modal?.type === 'documentImport' && <DocumentImportDialog kind={modal.kind} onClose={() => setModal(null)} onChooseFile={() => { const kind = modal.kind; setModal(null); void importLocalDocument(kind) }} onGoogleDoc={(url) => { const kind = modal.kind; setModal(null); void importGoogleDocument(kind, url) }} />}
+    {modal?.type === 'documentImportFallback' && <DocumentImportFallbackDialog kind={modal.kind} source={modal.source} onClose={() => setModal(null)} onImportWithAi={() => { const { kind, source } = modal; setModal(null); void importLocalDocument(kind, true, source) }} />}
     {modal?.type === 'importSet' && <ImportSetDialog onClose={() => setModal(null)} onImport={(title, text) => importSet(modal.classId, title, text)} />}
     {modal?.type === 'aiSet' && <AiSetDialog onClose={() => setModal(null)} onCreate={(request) => void generateAiSet(modal.classId, request)} />}
     {availableUpdate && <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="SoFlo update available"><header><div><p className="eyebrow">SOFLO UPDATE</p><h2>Version {availableUpdate.version} is ready</h2></div><button className="icon-button" onClick={() => setAvailableUpdate(null)} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p>SoFlo found a newer release on GitHub. Download it now and restart into the installer to upgrade this copy.</p><p className="subtle-copy">This check only runs because you enabled update notifications. It is SoFlo&apos;s only automatic network request.</p></div><footer><button className="button button-quiet" disabled={downloadingUpdate} onClick={() => setAvailableUpdate(null)}>Not now</button><button className="button button-primary" disabled={downloadingUpdate} onClick={() => { setDownloadingUpdate(true); void api.downloadAndLaunchAppUpdate(availableUpdate.version, availableUpdate.downloadUrl).catch((error) => { setDownloadingUpdate(false); showToast(error instanceof Error ? error.message : 'SoFlo could not download that update.', 'error') }) }}>{downloadingUpdate ? 'Downloading update...' : 'Download and restart'}</button></footer></section></div>}
@@ -1041,6 +1067,11 @@ function DocumentImportDialog({ kind, onClose, onChooseFile, onGoogleDoc }: { ki
   const [url, setUrl] = useState('')
   const label = kind === 'syllabus' ? 'syllabus' : 'paper'
   return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF or Word document</strong><span>Choose a .pdf, .doc, or .docx from this computer. SoFlo keeps headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
+}
+
+function DocumentImportFallbackDialog({ kind, source, onClose, onImportWithAi }: { kind: 'paper' | 'syllabus'; source: string; onClose: () => void; onImportWithAi: () => void }) {
+  const name = source.split(/[\\/]/).pop() || 'This file'
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Unsupported document"><header><div><p className="eyebrow">IMPORT {kind.toUpperCase()}</p><h2>Try importing with AI?</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{name}</strong> is not a supported PDF or Word document. AI import may still be able to recover readable text.</p></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" onClick={onImportWithAi}>Import with AI</button></footer></section></div>
 }
 
 function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (request: AiSetRequest) => void }) {

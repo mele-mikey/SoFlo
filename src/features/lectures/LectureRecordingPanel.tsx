@@ -10,6 +10,7 @@ interface LectureRecordingPanelProps {
   aiEnabled: boolean
   voiceModelReady: boolean
   voiceModelPath: string
+  onEnsureVoiceModel: () => Promise<string | null>
   microphoneId: string
   onMicrophoneChange: (deviceId: string) => void
   onNoteSuggestionsChange: (lectureId: string, suggestions: LectureNoteSuggestion[]) => void
@@ -64,7 +65,7 @@ function combineSamples(parts: Int16Array[]) {
   return combined
 }
 
-export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, voiceModelPath, microphoneId, onMicrophoneChange, onNoteSuggestionsChange, onToast }: LectureRecordingPanelProps) {
+export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, voiceModelPath, onEnsureVoiceModel, microphoneId, onMicrophoneChange, onNoteSuggestionsChange, onToast }: LectureRecordingPanelProps) {
   const [recording, setRecording] = useState<LectureRecording>(() => emptyRecording(lectureId))
   const [segments, setSegments] = useState<LectureTranscriptSegment[]>([])
   const [analysis, setAnalysis] = useState<LectureAnalysis | null>(null)
@@ -87,6 +88,7 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   const uploadChainRef = useRef(Promise.resolve())
   const queuedSampleCountRef = useRef(0)
   const activeRef = useRef(false)
+  const voiceModelPathRef = useRef(voiceModelPath)
   const analysisZoomDismissRef = useRef<number | null>(null)
   const panelVisibilityTimerRef = useRef<number | null>(null)
 
@@ -102,6 +104,7 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   }, [lectureId])
 
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 1600); return () => window.clearInterval(timer) }, [refresh])
+  useEffect(() => { voiceModelPathRef.current = voiceModelPath }, [voiceModelPath])
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void listen<LectureRecording>('lecture-recording-update', (event) => {
@@ -146,9 +149,9 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
     const durationMs = Math.max(1, Math.round(samples.length / 16))
     uploadChainRef.current = uploadChainRef.current.then(async () => {
       const chunkIndex = await api.appendLectureAudioChunk(lectureId, toBase64(samples), durationMs)
-      if (voiceModelReady) await api.queueLectureTranscription(lectureId, chunkIndex, voiceModelPath)
+      if (voiceModelReady || voiceModelPathRef.current) await api.queueLectureTranscription(lectureId, chunkIndex, voiceModelPathRef.current)
     }).catch((error) => onToast(error instanceof Error ? error.message : 'SoFlo could not save that audio chunk.', 'error'))
-  }, [lectureId, onToast, voiceModelPath, voiceModelReady])
+  }, [lectureId, onToast, voiceModelReady])
 
   const flushCapturedSamples = useCallback(() => {
     if (!samplePartsRef.current.length) return
@@ -171,16 +174,18 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
     setBusy(true)
     try {
       await uploadChainRef.current
-      await api.finishLectureRecording(lectureId, voiceModelPath)
+      await api.finishLectureRecording(lectureId, voiceModelPathRef.current)
       await refresh()
     } catch (error) { onToast(error instanceof Error ? error.message : 'SoFlo saved the audio, but could not begin final processing.', 'error') }
     finally { setBusy(false) }
-  }, [flushCapturedSamples, lectureId, onToast, refresh, voiceModelPath])
+  }, [flushCapturedSamples, lectureId, onToast, refresh])
 
   const startRecording = async () => {
-    if (!aiEnabled || !voiceModelReady) { onToast('Download the Voice Transcription model in Settings before recording a lecture.', 'error'); return }
     setBusy(true)
     try {
+      const activeVoiceModelPath = voiceModelReady ? voiceModelPath : await onEnsureVoiceModel()
+      if (!activeVoiceModelPath) return
+      voiceModelPathRef.current = activeVoiceModelPath
       const constraints: MediaTrackConstraints = microphoneId ? { deviceId: { exact: microphoneId }, echoCancellation: true, noiseSuppression: true } : { echoCancellation: true, noiseSuppression: true }
       let stream: MediaStream
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: constraints }) }
@@ -308,7 +313,7 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
       <div className="lecture-panel-header-actions">{isRecording && <span className="recording-live-dot">Live</span>}{analysisReady && <div className="lecture-analysis-view-menu"><button className="icon-button tiny" onClick={() => analysisViewMode === 'compact' ? setAnalysisViewMenuOpen((open) => !open) : returnToAnalysisHome()} aria-label={analysisViewMode === 'compact' ? 'Open lecture analysis views' : 'Return to lecture analysis'} title={analysisViewMode === 'compact' ? 'Lecture analysis views' : 'Return to lecture analysis'}>{analysisViewMode === 'compact' ? <Maximize2 size={16} /> : <Minimize2 size={16} />}</button>{analysisViewMenuOpen && <div><button onClick={() => { setAnalysisViewMode('split'); setAnalysisViewMenuOpen(false) }}><Columns3 size={14} /><span><strong>Side-by-side</strong><small>Notes left · analysis right</small></span></button><button onClick={() => { setAnalysisViewMode('focus'); setAnalysisViewMenuOpen(false) }}><Maximize2 size={14} /><span><strong>AI review</strong><small>Focus only on lecture analysis</small></span></button></div>}</div>}<button className="icon-button tiny" onClick={() => { setSettingsOpen((open) => !open); if (!settingsOpen) void listMicrophones(true) }} aria-label="Lecture recording settings"><Settings2 size={16} /></button></div>
     </header>
     {settingsOpen && <div className="lecture-recording-settings"><div><label htmlFor="lecture-microphone">Microphone</label><select id="lecture-microphone" value={microphoneId} onChange={(event) => { onMicrophoneChange(event.target.value); setSettingsOpen(false) }}><option value="">System default</option>{devices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></div><button className="lecture-import-audio" disabled={busy || isRecording} onClick={() => void importAudio()}><Upload size={14} />Import Audio File</button>{recording.state === 'complete' && <button className="lecture-regenerate-analysis" disabled={busy || !aiEnabled} onClick={() => void retryAnalysis()}>Regenerate analysis</button>}</div>}
-    {canStart && <div className="lecture-recording-ready"><div className="recording-orb"><Mic size={22} /></div><p>Capture the class and let SoFlo build your transcript as you write.</p><button className="lecture-record-button" disabled={busy} onClick={() => void startRecording()}><Play size={16} fill="currentColor" />Start recording</button>{(!aiEnabled || !voiceModelReady) && <small>Voice Transcription needs to be enabled and downloaded in Settings.</small>}</div>}
+    {canStart && <div className="lecture-recording-ready"><div className="recording-orb"><Mic size={22} /></div><p>Capture the class and let SoFlo build your transcript as you write.</p><button className="lecture-record-button" disabled={busy} onClick={() => void startRecording()}><Play size={16} fill="currentColor" />{busy && !voiceModelReady ? 'Preparing voice transcription…' : 'Start recording'}</button>{!voiceModelReady && <small>Voice Transcription will install automatically when you start recording.</small>}{!aiEnabled && <small>Recording and transcription work without General AI; lecture analysis remains unavailable.</small>}</div>}
     {recording.state === 'interrupted' && <div className="lecture-recovery"><strong>{recording.sourceKind === 'import' ? 'Recovered audio import' : 'Recovered recording'}</strong><p>{recording.sourceKind === 'import' ? 'SoFlo kept the prepared audio before the interruption. Finish it to continue transcription.' : 'SoFlo kept the audio saved before the interruption. Continue capture or finish the audio that is already safe.'}</p><div>{recording.sourceKind !== 'import' && <button className="button button-quiet button-small" disabled={busy} onClick={() => void startRecording()}>Continue recording</button>}<button className="button button-primary button-small" disabled={busy} onClick={() => void finishRecoveredRecording()}>{recording.sourceKind === 'import' ? 'Finish import' : 'Finish saved audio'}</button></div></div>}
     {isRecording && <div className="lecture-recording-active"><div className="lecture-timer"><Clock3 size={15} /><strong>{timeLabel(elapsed)}</strong></div><div className="lecture-audio-bars" aria-label="Microphone level">{bars.map((height, index) => <i key={index} style={{ height: `${height}%`, opacity: 0.45 + (height / 180) }} />)}</div><div className="lecture-status"><Waves size={15} /><span>{recording.pendingChunks ? `${progress}% transcribed · ${recording.pendingChunks} chunk${recording.pendingChunks === 1 ? '' : 's'} catching up` : 'Transcript is up to date'}</span></div><button className="lecture-stop-button" disabled={busy} onClick={() => void stopCapture(true)}><Square size={14} fill="currentColor" />Stop & finish</button></div>}
     {!isRecording && !canStart && !['complete', 'analysis_failed', 'interrupted'].includes(recording.state) && <div className="lecture-processing"><AudioLines size={21} /><strong>{processingHeading}</strong><p>{recording.statusMessage}</p>{isTranscriptionPhase && <div className={`lecture-progress ${recording.capturedMs > 0 ? '' : 'is-indeterminate'}`}><i style={{ width: `${progress}%` }} /></div>}{recording.capturedMs > 0 && <small>{processingDetail}</small>}{recording.capturedMs === 0 && isTranscriptionPhase && <small>Preparing the audio for transcription…</small>}</div>}

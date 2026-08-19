@@ -1,7 +1,7 @@
 type TipTapNode = {
   type: string
   attrs?: Record<string, string | number>
-  marks?: { type: string }[]
+  marks?: { type: string; attrs?: Record<string, string> }[]
   content?: TipTapNode[]
   text?: string
 }
@@ -13,11 +13,27 @@ export interface ImportedPdfNote {
 }
 
 const clean = (value: string) => value.replace(/[\t\u00a0\u200b]+/g, ' ').replace(/\s+/g, ' ').trim()
-const textNode = (text: string): TipTapNode[] => text ? text.split(/(\*\*[^*]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g).filter(Boolean).map((part) => {
-  if (part.startsWith('**') && part.endsWith('**')) return { type: 'text', text: part.slice(2, -2), marks: [{ type: 'bold' }] } as TipTapNode
-  if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) return { type: 'text', text: part.slice(1, -1), marks: [{ type: 'italic' }] } as TipTapNode
-  return { type: 'text', text: part }
-}) : []
+const markdownInline = /(\[([^\]\n]+)\]\(([^)\s]+)\)|\(([^)\n]+)\)\[([^\]\s]+)\]|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|`([^`\n]+)`|https?:\/\/[^\s<>()]+)/g
+const safeLink = (value: string) => /^(?:https?:\/\/|mailto:)/i.test(value) ? value : null
+const textNode = (text: string): TipTapNode[] => {
+  if (!text) return []
+  const nodes: TipTapNode[] = []
+  let cursor = 0
+  for (const match of text.matchAll(markdownInline)) {
+    const start = match.index ?? 0
+    if (start > cursor) nodes.push({ type: 'text', text: text.slice(cursor, start) })
+    const [source, _matched, markdownLabel, markdownUrl, reverseLabel, reverseUrl, doubleStar, doubleUnderscore, singleStar, singleUnderscore, code, bareUrl] = match
+    const linkUrl = safeLink(markdownUrl || reverseUrl || bareUrl || '')
+    if (linkUrl) nodes.push({ type: 'text', text: markdownLabel || reverseLabel || bareUrl || linkUrl, marks: [{ type: 'link', attrs: { href: linkUrl } }] })
+    else if (doubleStar || doubleUnderscore || singleStar) nodes.push({ type: 'text', text: doubleStar || doubleUnderscore || singleStar, marks: [{ type: 'bold' }] })
+    else if (singleUnderscore) nodes.push({ type: 'text', text: singleUnderscore, marks: [{ type: 'italic' }] })
+    else if (code) nodes.push({ type: 'text', text: code, marks: [{ type: 'code' }] })
+    else nodes.push({ type: 'text', text: source })
+    cursor = start + source.length
+  }
+  if (cursor < text.length) nodes.push({ type: 'text', text: text.slice(cursor) })
+  return nodes
+}
 const paragraph = (text: string, attrs?: Record<string, string | number>): TipTapNode => ({ type: 'paragraph', ...(attrs ? { attrs } : {}), content: textNode(clean(text)) })
 const listItem = (text: string): TipTapNode => ({ type: 'listItem', content: [paragraph(text)] })
 const startsIndented = (line: string) => /^(?: {2,}|\t)/.test(line)
@@ -133,6 +149,13 @@ function pageNodes(page: string): TipTapNode[] {
       continue
     }
 
+    const markdownHeading = line.match(/^(#{1,6})\s+(.+)$/)
+    if (markdownHeading) {
+      flushParagraph()
+      nodes.push({ type: 'heading', attrs: { level: markdownHeading[1].length }, content: textNode(markdownHeading[2]) })
+      continue
+    }
+
     if (explicitHeading(line)) {
       flushParagraph()
       nodes.push({ type: 'heading', attrs: { level: 2 }, content: textNode(line) })
@@ -148,7 +171,7 @@ function pageNodes(page: string): TipTapNode[] {
 
 function sourceName(path: string) {
   const file = path.split(/[\\/]/).pop() ?? 'Imported PDF'
-  return clean(file.replace(/\.(pdf|docx)$/i, '')) || 'Imported document'
+  return clean(file.replace(/\.(pdf|doc|docx)$/i, '')) || 'Imported document'
 }
 
 export function importPdfAsEditableNote(text: string, path: string): ImportedPdfNote {
@@ -222,7 +245,7 @@ export function importAiFormattedNote(markdown: string, path: string, sourceText
     const bullet = line.match(/^[-*+]\s+(.+)$/)
     const ordered = line.match(/^\d+[.)]\s+(.+)$/)
     const quote = line.match(/^>\s+(.+)$/)
-    if (heading) { content.push({ type: 'heading', attrs: { level: Math.min(3, heading[1].length) }, content: textNode(heading[2]) }); index += 1; continue }
+    if (heading) { content.push({ type: 'heading', attrs: { level: Math.min(6, heading[1].length) }, content: textNode(heading[2]) }); index += 1; continue }
     if (quote) { content.push({ type: 'blockquote', content: [paragraph(quote[1])] }); index += 1; continue }
     if (isTableRow(rawLine) && isTableSeparator(lines[index + 1] ?? '')) {
       const headers = rowValues(rawLine)

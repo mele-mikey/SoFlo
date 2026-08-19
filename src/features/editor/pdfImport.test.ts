@@ -106,4 +106,19 @@ Line two`
     expect(callout?.content?.[0]?.content?.[0]?.text).toContain('Lecture connection (10:22)')
   })
 
+  it('keeps all six Markdown heading levels and inline links out of imported body text', () => {
+    const imported = importAiFormattedNote('# Main\n\n#### Small heading\n\n###### Tiny heading\n\nVisit [SoFlo](https://example.com), use *bold text*, or open (Docs)[https://docs.example.com].', 'C:/Downloads/course.md')
+    const headings = imported.document.content.filter((node) => node.type === 'heading')
+    expect(headings.map((node) => node.attrs?.level)).toEqual([1, 4, 6])
+    const body = imported.document.content.find((node) => node.type === 'paragraph')
+    expect(body?.content?.some((node) => node.marks?.some((mark) => mark.type === 'link' && mark.attrs?.href === 'https://example.com'))).toBe(true)
+    expect(body?.content?.some((node) => node.marks?.some((mark) => mark.type === 'bold') && node.text === 'bold text')).toBe(true)
+    expect(body?.content?.some((node) => node.marks?.some((mark) => mark.type === 'link' && mark.attrs?.href === 'https://docs.example.com'))).toBe(true)
+  })
+
+  it('recognizes Markdown headings in the direct PDF parser too', () => {
+    const imported = importPdfAsEditableNote('# Top level\n\n##### Smaller section\n\n*Important* [resource](https://example.com)', 'C:/Downloads/notes.pdf')
+    expect(imported.document.content.filter((node) => node.type === 'heading').map((node) => node.attrs?.level)).toEqual([1, 5])
+  })
+
 })
