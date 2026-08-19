@@ -159,11 +159,15 @@ const AI_CONTEXT_SIZE: &str = "16384";
 const FLASHCARD_AI_CONTEXT_SIZE: &str = "32768";
 const STUDY_WEB_AI_CONTEXT_SIZE: &str = "12288";
 const WORD_AI_CONTEXT_SIZE: &str = "4096";
-// Let llama.cpp offload every layer that fits on the detected accelerator.
-// It automatically falls back to CPU when a machine has no supported backend.
-const AI_GPU_LAYERS: &str = "-1";
+// Use llama.cpp's documented GPU profiles. `all` is the fast path, `auto`
+// fits what it can, and CPU remains the final compatibility fallback.
+const AI_GPU_LAYERS: &str = "all";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
+const FLASHCARD_SOURCE_CHUNK_CHARS: usize = 6_000;
+const FLASHCARD_BATCH_CARD_LIMIT: usize = 8;
+const FLASHCARD_BATCH_MAX_TOKENS: u16 = 1_400;
+const FLASHCARD_TOTAL_SOURCE_CHARS: usize = 100_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
 const DEFAULT_AI_MODEL_MINIMUM_BYTES: u64 = 2_000_000_000;
 const WORD_AI_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
@@ -288,7 +292,12 @@ fn llama_acceleration_device() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
+    let devices = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    devices
         .lines()
         .filter_map(|line| line.trim().split_once(':').map(|(device, _)| device.trim()))
         .find(|device| {
@@ -1228,9 +1237,9 @@ fn local_chat_text(
         .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
         .json(&serde_json::json!({
             "messages": [{"role":"system","content":system},{"role":"user","content":prompt}],
-            "chat_template_kwargs": { "enable_thinking": false },
             "max_tokens": max_tokens,
-            "temperature": 0.1
+            "temperature": 0.1,
+            "stream": false
         }))
         .send()
         .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
@@ -1517,9 +1526,9 @@ fn define_word_blocking(
                 {"role":"system","content":"You are a concise, reliable English dictionary for a writing app. Return only one complete valid JSON object with keys word, pronunciation, senses, and synonyms. senses must be an array of one to three objects, each with string keys partOfSpeech, definition, and example. Give distinct common meanings, numbered by array order, with clear precise definitions and a short natural example where useful. synonyms must be an array of 5 to 10 single-word or hyphenated precise related alternatives suited to the stated document goal; do not include the queried word itself, duplicate words, or phrases. Do not use Markdown, commentary, or code fences."},
                 {"role":"user","content":format!("DOCUMENT GOAL AND VOICE:\n{}\n\nDefine this one word: {}", paper_context, word)}
             ],
-            "chat_template_kwargs": { "enable_thinking": false },
             "max_tokens": 900,
-            "temperature": 0.1
+            "temperature": 0.1,
+            "stream": false
         }))
         .send()
         .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
@@ -1582,9 +1591,9 @@ fn ai_thesaurus_blocking(
                     {"role":"system","content":instruction},
                     {"role":"user","content":format!("DOCUMENT GOAL AND VOICE:\n{}\n\nFind grouped alternatives for: {}", paper_context, query)}
                 ],
-                "chat_template_kwargs": { "enable_thinking": false },
                 "max_tokens": max_tokens,
-                "temperature": 0.1
+                "temperature": 0.1,
+                "stream": false
             }))
             .send()
             .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
@@ -1765,24 +1774,29 @@ fn generate_flashcards_text_blocking(
 ) -> CommandResult<String> {
     let model_path = resolve_ai_model_path(&app, &model_path)?;
     emit_ai_progress(&app, 6, "Starting your private local model");
-    let ai_port = ensure_flashcard_ai_server(&model_path, &app)?;
+    let mut ai_port = ensure_flashcard_ai_server(&model_path, &app)?;
     emit_ai_progress(&app, 42, "Reading your study materials");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    // Keep the request below the shared 16k-token context, including a useful
-    // JSON response. Math-heavy PDF text can tokenize much more densely than
-    // ordinary prose, so character limits need to stay conservative.
-    let source = materials.chars().take(16_000).collect::<String>();
-    let syllabus = syllabus_context.chars().take(3_000).collect::<String>();
+    // A long math PDF is much more token-dense than its character count makes
+    // it look. Ask for small, complete JSON batches instead of one 100-card
+    // answer that can reach finish_reason=length halfway through an array.
+    let source = materials
+        .chars()
+        .take(FLASHCARD_TOTAL_SOURCE_CHARS)
+        .collect::<String>();
+    let syllabus = syllabus_context.chars().take(1_500).collect::<String>();
     if source.trim().is_empty() {
         return Err(
             "Add a topic, pasted study text, or an uploaded document before creating flashcards."
                 .into(),
         );
     }
-    let source_kind = if materials.trim_start().starts_with("TOPIC OR PROMPT:") {
+    let source_kind = if materials.contains("UPLOADED MATERIAL") {
+        "source-material"
+    } else if materials.trim_start().starts_with("TOPIC OR PROMPT:") {
         "topic"
     } else if materials.trim_start().starts_with("TEXT OR TOPIC:") {
         "text-or-topic"
@@ -1802,87 +1816,72 @@ fn generate_flashcards_text_blocking(
         "Use the supplied source material as the primary factual basis for the flashcards."
     };
     let math_mode = looks_like_math_material(&source);
-    let prompt = flashcard_generation_prompt(request_instruction, &guidance, &source, &syllabus);
     let system = flashcard_system_instruction(math_mode);
-    let output = match flashcard_completion(&client, ai_port, system, &prompt, 6_144, true) {
-        Ok(output) => output,
-        Err(primary_error) => {
-            // Some llama.cpp builds reject chat_template_kwargs, while lower
-            // context configurations can reject large requests. Retry once
-            // with only standard OpenAI fields and a compact prompt.
-            eprintln!("[SoFlo AI] flashcard request retrying after: {primary_error}");
-            emit_ai_progress(&app, 58, "Adjusting the flashcard request");
-            let compact_source = source.chars().take(8_000).collect::<String>();
-            let compact_syllabus = syllabus.chars().take(1_500).collect::<String>();
-            let compact_prompt = flashcard_generation_prompt(request_instruction, &guidance, &compact_source, &compact_syllabus);
-            match flashcard_completion(&client, ai_port, system, &compact_prompt, 4_096, false) {
-                Ok(output) => output,
-                Err(compact_error) => {
-                    // A server can be reachable while a GPU driver or a
-                    // reasoning-enabled chat template rejects requests. This
-                    // retry deliberately uses the same local model without
-                    // reasoning first, then falls back to CPU only if needed.
-                    // It works automatically on another computer without a
-                    // user-side model change.
-                    eprintln!(
-                        "[SoFlo AI] flashcard compatibility server retrying after: {compact_error}"
-                    );
-                    emit_ai_progress(&app, 68, "Switching to a compatible local AI mode");
-                    stop_model_server(&AI_SERVER);
-                    let compatibility_port = ensure_flashcard_compat_ai_server(&model_path, &app)?;
-                    let compatibility_source = source.chars().take(12_000).collect::<String>();
-                    let compatibility_syllabus = syllabus.chars().take(1_500).collect::<String>();
-                    let compatibility_prompt = flashcard_generation_prompt(
-                        request_instruction,
-                        &guidance,
-                        &compatibility_source,
-                        &compatibility_syllabus,
-                    );
-                    match flashcard_completion(
-                        &client,
-                        compatibility_port,
-                        system,
-                        &compatibility_prompt,
-                        4_096,
-                        false,
-                    )
-                    {
-                        Ok(output) => output,
-                        Err(compatibility_error) => {
-                            // Some integrated graphics drivers can start the
-                            // server but reject a real inference request. Only
-                            // then use the slower CPU-only last resort.
-                            eprintln!(
-                                "[SoFlo AI] flashcard CPU fallback retrying after: {compatibility_error}"
-                            );
-                            emit_ai_progress(&app, 78, "Using the most compatible local AI mode");
-                            stop_model_server(&AI_SERVER);
-                            let cpu_port = ensure_flashcard_cpu_ai_server(&model_path, &app)?;
-                            flashcard_completion(
-                                &client,
-                                cpu_port,
-                                system,
-                                &compatibility_prompt,
-                                4_096,
-                                false,
-                            )
-                            .map_err(|cpu_error| format!(
-                                "SoFlo could not create flashcards after automatic compatibility retries. First error: {primary_error}. Compatible mode error: {compatibility_error}. CPU mode error: {cpu_error}"
-                            ))?
-                        }
+    let chunks = split_source_for_ai(&source, FLASHCARD_SOURCE_CHUNK_CHARS);
+    let total_chunks = chunks.len().max(1);
+    let mut cards = Vec::<serde_json::Value>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut cpu_retry_used = false;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if cards.len() >= 100 {
+            break;
+        }
+        let progress = 42u8.saturating_add(((index * 40 / total_chunks) as u8).min(40));
+        emit_ai_progress(
+            &app,
+            progress,
+            &format!("Making flashcards from section {} of {}", index + 1, total_chunks),
+        );
+        let card_limit = FLASHCARD_BATCH_CARD_LIMIT.min(100 - cards.len());
+        let prompt = flashcard_generation_prompt(
+            request_instruction,
+            &guidance,
+            chunk,
+            &syllabus,
+            card_limit,
+        );
+        let batch = match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
+            Ok(batch) => batch,
+            Err(error) if !cpu_retry_used && should_retry_flashcard_batch_on_cpu(&error) => {
+                // A GPU can pass the startup probe yet fail on a larger real
+                // request. Retry that one section once on CPU. Invalid JSON
+                // and client-side request errors stay on the current server;
+                // changing hardware cannot repair either of those.
+                eprintln!("[SoFlo AI] flashcard GPU batch failed: {error}");
+                emit_ai_progress(&app, 68, "Trying a compatible local AI mode");
+                stop_model_server(&AI_SERVER);
+                ai_port = ensure_flashcard_cpu_ai_server(&model_path, &app)?;
+                cpu_retry_used = true;
+                match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
+                    Ok(batch) => batch,
+                    Err(cpu_error) => {
+                        eprintln!("[SoFlo AI] flashcard CPU batch failed: {cpu_error}");
+                        continue;
                     }
                 }
             }
+            Err(error) => {
+                eprintln!("[SoFlo AI] skipped incomplete flashcard section {}: {error}", index + 1);
+                continue;
+            }
+        };
+        for card in batch {
+            if cards.len() >= 100 {
+                break;
+            }
+            let key = flashcard_card_key(&card);
+            if seen.insert(key) {
+                cards.push(card);
+            }
         }
-    };
+    }
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
-    let output = json_array_from_response(&output).unwrap_or_default();
     touch_ai_server();
-    if output.is_empty() {
-        return Err("The local AI model returned no flashcards.".into());
+    if cards.is_empty() {
+        return Err("SoFlo could not make a complete flashcard batch from this document. The local model was tried in its compatible modes; try the file again after reopening SoFlo.".into());
     }
     emit_ai_progress(&app, 100, "Finishing your flashcard set");
-    Ok(output)
+    serde_json::to_string(&cards).map_err(|_| "SoFlo could not save the generated flashcards.".into())
 }
 
 fn flashcard_generation_prompt(
@@ -1890,13 +1889,68 @@ fn flashcard_generation_prompt(
     guidance: &str,
     source: &str,
     syllabus: &str,
+    card_limit: usize,
 ) -> String {
     let syllabus_section = if syllabus.trim().is_empty() {
         String::new()
     } else {
         format!("\n\nCLASS SYLLABUS (supporting context only; use it to align scope and terminology, never invent answers or turn schedules and policies into cards unless the study material asks for them):\n{syllabus}")
     };
-    format!("{request_instruction} Create the most useful flashcards. Extra study guidance: {guidance}\n\nINPUT:\n{source}{syllabus_section}")
+    format!("{request_instruction} This is one section of a larger document. Create at most {card_limit} complete, non-duplicate flashcards from this section only. Other sections are handled separately, so do not try to cover the entire document in one answer. Extra study guidance: {guidance}\n\nINPUT:\n{source}{syllabus_section}")
+}
+
+fn flashcard_batch_completion(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    system: &str,
+    prompt: &str,
+    card_limit: usize,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let max_tokens = if card_limit <= FLASHCARD_BATCH_CARD_LIMIT {
+        FLASHCARD_BATCH_MAX_TOKENS
+    } else {
+        2_200
+    };
+    let output = flashcard_completion(client, port, system, prompt, max_tokens)?;
+    let cards = flashcard_cards_from_response(&output);
+    if cards.is_empty() {
+        return Err("the local model returned incomplete flashcard JSON".into());
+    }
+    Ok(cards.into_iter().take(card_limit).collect())
+}
+
+fn flashcard_cards_from_response(output: &str) -> Vec<serde_json::Value> {
+    let Some(array) = json_array_from_response(output) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<serde_json::Value>>(&array)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|card| {
+            let front = card.get("front")?.as_str()?.trim();
+            let back = card.get("back")?.as_str()?.trim();
+            (!front.is_empty() && !back.is_empty()).then(|| {
+                serde_json::json!({ "front": front, "back": back })
+            })
+        })
+        .collect()
+}
+
+fn flashcard_card_key(card: &serde_json::Value) -> String {
+    ["front", "back"]
+        .iter()
+        .filter_map(|field| card.get(*field).and_then(|value| value.as_str()))
+        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("\u{0}")
+}
+
+fn should_retry_flashcard_batch_on_cpu(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("did not respond")
+        || error.contains("connection")
+        || error.contains("could not read the local ai response")
+        || error.contains("http 5")
 }
 
 fn flashcard_completion(
@@ -1905,19 +1959,16 @@ fn flashcard_completion(
     system: &str,
     prompt: &str,
     max_tokens: u16,
-    include_template_kwargs: bool,
 ) -> CommandResult<String> {
-    let mut payload = serde_json::json!({
+    let payload = serde_json::json!({
         "messages": [
             {"role":"system","content": system},
             {"role":"user","content": prompt}
         ],
         "max_tokens": max_tokens,
-        "temperature": 0.2
+        "temperature": 0.2,
+        "stream": false
     });
-    if include_template_kwargs {
-        payload["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
-    }
     let response = client
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .json(&payload)
@@ -1932,25 +1983,45 @@ fn flashcard_completion(
             .ok()
             .and_then(|value| value.get("error").cloned().or_else(|| value.get("message").cloned()))
             .and_then(|value| value.get("message").cloned().or(Some(value)))
-            .and_then(|value| value.as_str().map(str::to_owned))
+            .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
             .unwrap_or(body)
             .split_whitespace()
             .take(30)
             .collect::<Vec<_>>()
             .join(" ");
+        let mut detail = detail.chars().take(320).collect::<String>();
+        if detail.is_empty() {
+            detail = "no error details were returned".into();
+        }
         return Err(format!("local model returned HTTP {status}: {detail}"));
     }
     let body: serde_json::Value = serde_json::from_str(&body)
         .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    Ok(body
+    let choice = body
         .get("choices")
-        .and_then(|value| value.get(0))
+        .and_then(|value| value.get(0));
+    let content = choice
         .and_then(|value| value.get("message"))
         .and_then(|value| value.get("content"))
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .trim()
-        .to_string())
+        .to_string();
+    if content.is_empty() {
+        let finish_reason = choice
+            .and_then(|value| value.get("finish_reason"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let used_reasoning = choice
+            .and_then(|value| value.get("message"))
+            .and_then(|value| value.get("reasoning_content"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        return Err(format!(
+            "local model returned no usable content (finish reason: {finish_reason}; reasoning output: {used_reasoning})"
+        ));
+    }
+    Ok(content)
 }
 
 fn looks_like_math_material(source: &str) -> bool {
@@ -1972,9 +2043,9 @@ fn looks_like_math_material(source: &str) -> bool {
 
 fn flashcard_system_instruction(math_mode: bool) -> &'static str {
     if math_mode {
-        "You create concise college math flashcards. Return only valid JSON: an array of useful objects with non-empty string fields front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. Preserve each supplied problem's variables, values, signs, exponents, units, and answer exactly. Make problem-first cards: the front is one specific question or expression, and the back begins with its direct answer followed by one to four concise work steps only when the source provides or clearly supports them. When an answer key gives only an answer, do not invent work. Keep equations readable with plain Unicode notation such as x², √, π, ≤, ≥, ≠, →, ×, ÷, and a/b. Never use Markdown, LaTex delimiters, code fences, or commentary. Do not collapse many distinct practice questions into one generic rule card. Include useful concept and rule cards too, but retain the individual practice problems and their answers. If the material or request contains a finite enumerated set, include every distinct member up to 100 cards."
+        "You create concise college math flashcards. Return only one complete valid JSON array of objects with non-empty string fields front and back. The user request gives the maximum number of cards; never exceed it, pad it, or begin another array. Preserve each supplied problem's variables, values, signs, exponents, units, and answer exactly. Make problem-first cards: the front is one specific question or expression, and the back begins with its direct answer followed by one to four concise work steps only when the source provides or clearly supports them. When an answer key gives only an answer, do not invent work. Keep equations readable with plain Unicode notation such as x², √, π, ≤, ≥, ≠, →, ×, ÷, and a/b. Never use Markdown, LaTex delimiters, code fences, or commentary. Do not collapse many distinct practice questions into one generic rule card. Include useful concept and rule cards too, but retain the individual practice problems and their answers."
     } else {
-        "You create concise college flashcards. Return only valid JSON: an array of useful objects with non-empty string fields front and back. Make as many cards as the material genuinely needs, never padding with duplicates, and never exceed 100 cards. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. When the material or request contains a finite enumerated set (for example, amendments, steps, terms, or rules), include every distinct member of that set up to 100 cards rather than stopping at a round number. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."
+        "You create concise college flashcards. Return only one complete valid JSON array of objects with non-empty string fields front and back. The user request gives the maximum number of cards; never exceed it, pad it, or begin another array. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."
     }
 }
 
@@ -2142,16 +2213,6 @@ fn ensure_flashcard_cpu_ai_server(model_path: &str, app: &tauri::AppHandle) -> C
     )
 }
 
-fn ensure_flashcard_compat_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
-    ensure_model_server(
-        &AI_SERVER,
-        model_path,
-        app,
-        FLASHCARD_AI_CONTEXT_SIZE,
-        "off",
-    )
-}
-
 fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "off")
 }
@@ -2184,7 +2245,6 @@ fn start_llama_server(
     port: u16,
     context_size: &str,
     reasoning: &str,
-    use_reasoning: bool,
     gpu_layers: &str,
     gpu_device: Option<&str>,
 ) -> CommandResult<Child> {
@@ -2207,9 +2267,10 @@ fn start_llama_server(
     if let Some(device) = gpu_device {
         command.args(["--device", device]);
     }
-    if use_reasoning {
-        command.args(["--reasoning", reasoning, "--reasoning-budget", "1024"]);
-    }
+    // This must be present even for "off". Omitting it makes Qwen3 fall back
+    // to its default thinking mode, which can spend the whole completion in
+    // reasoning_content and leave message.content empty.
+    command.args(["--reasoning", reasoning]);
     command.arg("--no-webui");
     #[cfg(windows)]
     {
@@ -2299,22 +2360,19 @@ fn ensure_model_server_with_profiles(
     }
     emit_ai_progress(app, 22, "Loading your private local model");
     let gpu_device = if force_cpu { None } else { llama_acceleration_device() };
-    let profiles: &[(bool, &str)] = if force_cpu || gpu_device.is_none() {
-        &[(false, "0")]
-    } else if reasoning.eq_ignore_ascii_case("on") {
-        &[(true, AI_GPU_LAYERS), (false, AI_GPU_LAYERS), (false, "0")]
+    let profiles: &[&str] = if force_cpu || gpu_device.is_none() {
+        &["0"]
     } else {
-        &[(false, AI_GPU_LAYERS), (false, "0")]
+        &[AI_GPU_LAYERS, "auto", "0"]
     };
     let mut last_error = "SoFlo's local AI helper stopped while loading.".to_string();
-    for (use_reasoning, gpu_layers) in profiles {
+    for gpu_layers in profiles {
         let port = available_loopback_port()?;
         let mut child = match start_llama_server(
             model_path,
             port,
             context_size,
             reasoning,
-            *use_reasoning,
             gpu_layers,
             if *gpu_layers == "0" { None } else { gpu_device.as_deref() },
         ) {
@@ -2326,6 +2384,15 @@ fn ensure_model_server_with_profiles(
         };
         match wait_for_model_server_start(&mut child, port, app) {
             Ok(()) => {
+                // `/v1/models` only proves the process loaded. A tiny request
+                // verifies that the selected Vulkan/CUDA device can actually
+                // run inference before SoFlo keeps that GPU profile.
+                if *gpu_layers != "0" && !ai_server_inference_ready(port) {
+                    last_error = "The selected GPU could not complete an AI request.".into();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    continue;
+                }
                 *guard = Some(AiServer {
                     child,
                     model_path: model_path.to_string(),
@@ -2369,6 +2436,42 @@ fn ai_server_ready(port: u16) -> bool {
         })
         .is_ok_and(|response| response.status().is_success())
 }
+
+fn ai_server_inference_ready(port: u16) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .json(&serde_json::json!({
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 8,
+            "temperature": 0.2,
+            "stream": false
+        }))
+        .send()
+    else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    response
+        .json::<serde_json::Value>()
+        .ok()
+        .is_some_and(|body| {
+            body.get("choices")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("message"))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|content| !content.trim().is_empty())
+        })
+}
+
 fn touch_ai_server() {
     touch_model_server(&AI_SERVER);
     touch_model_server(&WORD_AI_SERVER)
@@ -7859,9 +7962,10 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
-        is_visual_line_echo, looks_like_math_material,
+        flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
+        should_retry_flashcard_batch_on_cpu,
         usable_lecture_notes,
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
@@ -7905,6 +8009,31 @@ mod tests {
             json_array_from_response(response).as_deref(),
             Some("[{\"front\":\"Term\",\"back\":\"Definition with [brackets]\"}]")
         );
+    }
+
+    #[test]
+    fn keeps_only_complete_cards_from_a_small_flashcard_batch() {
+        let response = "[{\"front\":\"2 + 2\",\"back\":\"4\"},{\"front\":\"\",\"back\":\"skip\"},{\"front\":\"term\",\"back\":\"meaning\"}]";
+        let cards = flashcard_cards_from_response(response);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0]["front"], "2 + 2");
+        assert_eq!(cards[1]["back"], "meaning");
+    }
+
+    #[test]
+    fn only_retries_flashcard_batches_on_cpu_for_runtime_failures() {
+        assert!(should_retry_flashcard_batch_on_cpu(
+            "SoFlo's local AI model did not respond: connection reset"
+        ));
+        assert!(should_retry_flashcard_batch_on_cpu(
+            "local model returned HTTP 500: backend error"
+        ));
+        assert!(!should_retry_flashcard_batch_on_cpu(
+            "local model returned HTTP 400: invalid request"
+        ));
+        assert!(!should_retry_flashcard_batch_on_cpu(
+            "the local model returned incomplete flashcard JSON"
+        ));
     }
 
     #[test]
