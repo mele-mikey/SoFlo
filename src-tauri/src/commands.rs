@@ -358,19 +358,25 @@ fn is_complete_voice_model(path: &Path) -> bool {
 #[tauri::command]
 pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
-    let model = if settings.ai_writing_model_path.trim().is_empty() {
-        managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME)
-    } else { Path::new(&settings.ai_writing_model_path).to_path_buf() };
+    let configured = Path::new(&settings.ai_writing_model_path);
+    let default = managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME);
+    let model = if is_complete_word_ai_model(configured) {
+        configured.to_path_buf()
+    } else {
+        default
+    };
     Ok(is_complete_word_ai_model(&model))
 }
 
 #[tauri::command]
 pub fn general_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
-    let model = if settings.ai_model_path.trim().is_empty() {
-        managed_models_dir(&app)?.join(DEFAULT_AI_MODEL_NAME)
+    let configured = Path::new(&settings.ai_model_path);
+    let default = managed_models_dir(&app)?.join(DEFAULT_AI_MODEL_NAME);
+    let model = if is_complete_general_ai_model(configured) {
+        configured.to_path_buf()
     } else {
-        Path::new(&settings.ai_model_path).to_path_buf()
+        default
     };
     Ok(is_complete_general_ai_model(&model))
 }
@@ -1784,8 +1790,64 @@ fn generate_flashcards_text_blocking(
             let compact_source = source.chars().take(8_000).collect::<String>();
             let compact_syllabus = syllabus.chars().take(1_500).collect::<String>();
             let compact_prompt = flashcard_generation_prompt(request_instruction, &guidance, &compact_source, &compact_syllabus);
-            flashcard_completion(&client, ai_port, system, &compact_prompt, 4_096, false)
-                .map_err(|retry_error| format!("SoFlo could not create flashcards after a compatibility retry: {retry_error}"))?
+            match flashcard_completion(&client, ai_port, system, &compact_prompt, 4_096, false) {
+                Ok(output) => output,
+                Err(compact_error) => {
+                    // A server can be reachable while a GPU driver or a
+                    // reasoning-enabled chat template rejects requests. This
+                    // retry deliberately uses the same local model without
+                    // reasoning first, then falls back to CPU only if needed.
+                    // It works automatically on another computer without a
+                    // user-side model change.
+                    eprintln!(
+                        "[SoFlo AI] flashcard compatibility server retrying after: {compact_error}"
+                    );
+                    emit_ai_progress(&app, 68, "Switching to a compatible local AI mode");
+                    stop_model_server(&AI_SERVER);
+                    let compatibility_port = ensure_flashcard_compat_ai_server(&model_path, &app)?;
+                    let compatibility_source = source.chars().take(12_000).collect::<String>();
+                    let compatibility_syllabus = syllabus.chars().take(1_500).collect::<String>();
+                    let compatibility_prompt = flashcard_generation_prompt(
+                        request_instruction,
+                        &guidance,
+                        &compatibility_source,
+                        &compatibility_syllabus,
+                    );
+                    match flashcard_completion(
+                        &client,
+                        compatibility_port,
+                        system,
+                        &compatibility_prompt,
+                        4_096,
+                        false,
+                    )
+                    {
+                        Ok(output) => output,
+                        Err(compatibility_error) => {
+                            // Some integrated graphics drivers can start the
+                            // server but reject a real inference request. Only
+                            // then use the slower CPU-only last resort.
+                            eprintln!(
+                                "[SoFlo AI] flashcard CPU fallback retrying after: {compatibility_error}"
+                            );
+                            emit_ai_progress(&app, 78, "Using the most compatible local AI mode");
+                            stop_model_server(&AI_SERVER);
+                            let cpu_port = ensure_flashcard_cpu_ai_server(&model_path, &app)?;
+                            flashcard_completion(
+                                &client,
+                                cpu_port,
+                                system,
+                                &compatibility_prompt,
+                                4_096,
+                                false,
+                            )
+                            .map_err(|cpu_error| format!(
+                                "SoFlo could not create flashcards after automatic compatibility retries. First error: {primary_error}. Compatible mode error: {compatibility_error}. CPU mode error: {cpu_error}"
+                            ))?
+                        }
+                    }
+                }
+            }
         }
     };
     emit_ai_progress(&app, 86, "Checking the generated flashcards");
@@ -2040,6 +2102,27 @@ fn ensure_flashcard_ai_server(model_path: &str, app: &tauri::AppHandle) -> Comma
     )
 }
 
+fn ensure_flashcard_cpu_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    ensure_model_server_with_profiles(
+        &AI_SERVER,
+        model_path,
+        app,
+        FLASHCARD_AI_CONTEXT_SIZE,
+        "off",
+        true,
+    )
+}
+
+fn ensure_flashcard_compat_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    ensure_model_server(
+        &AI_SERVER,
+        model_path,
+        app,
+        FLASHCARD_AI_CONTEXT_SIZE,
+        "off",
+    )
+}
+
 fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
     ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "on")
 }
@@ -2146,6 +2229,17 @@ fn ensure_model_server(
     context_size: &str,
     reasoning: &str,
 ) -> CommandResult<u16> {
+    ensure_model_server_with_profiles(server_state, model_path, app, context_size, reasoning, false)
+}
+
+fn ensure_model_server_with_profiles(
+    server_state: &'static OnceLock<Mutex<Option<AiServer>>>,
+    model_path: &str,
+    app: &tauri::AppHandle,
+    context_size: &str,
+    reasoning: &str,
+    force_cpu: bool,
+) -> CommandResult<u16> {
     let state = server_state.get_or_init(|| Mutex::new(None));
     let mut guard = state
         .lock()
@@ -2171,7 +2265,9 @@ fn ensure_model_server(
         *guard = None;
     }
     emit_ai_progress(app, 22, "Loading your private local model");
-    let profiles: &[(bool, &str)] = if reasoning.eq_ignore_ascii_case("on") {
+    let profiles: &[(bool, &str)] = if force_cpu {
+        &[(false, "0")]
+    } else if reasoning.eq_ignore_ascii_case("on") {
         &[(true, AI_GPU_LAYERS), (false, AI_GPU_LAYERS), (false, "0")]
     } else {
         &[(false, AI_GPU_LAYERS), (false, "0")]
