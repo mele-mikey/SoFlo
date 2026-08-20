@@ -508,6 +508,12 @@ function App() {
     try { await api.updateSettings(settings) } catch { setSettings(library.settings); showToast('Settings could not be saved.', 'error') }
   }
   const supportedImport = (source: string) => /\.(?:pdf|doc|docx)$/i.test(source)
+  const hasFragmentedPdfSpacing = (text: string) => {
+    const words = text.split(/\s+/).filter((word) => /[A-Za-z]/.test(word))
+    if (words.length < 24) return false
+    const fragments = words.slice(1).filter((word, index) => /^[A-Za-z]{2,3}$/.test(word) && /^[A-Za-z]{2,3}$/.test(words[index])).length
+    return fragments >= 8 && fragments * 12 >= words.length
+  }
   const importLocalDocument = async (documentKind: 'paper' | 'syllabus', useAi = false, selectedSource?: string) => {
     if (!classId) { showToast(`Open a class before importing a ${documentKind}.`, 'error'); return }
     const source = selectedSource ?? await open({ title: `Import ${documentKind}`, multiple: false, directory: false, filters: [{ name: 'Supported documents', extensions: ['pdf', 'doc', 'docx'] }, { name: 'All files', extensions: ['*'] }] })
@@ -520,7 +526,9 @@ function App() {
     try {
       const isWord = /\.docx?$/i.test(source)
       const text = isWord ? await api.importWordText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
-      await saveImportedDocument(text, source, documentKind, isWord, useAi)
+      const requiresAiFormatting = !isWord && hasFragmentedPdfSpacing(text)
+      if (requiresAiFormatting && !library?.settings.aiEnabled) { showToast('This PDF needs AI formatting before it can be imported cleanly. Enable General AI and try again.', 'error'); return }
+      await saveImportedDocument(text, source, documentKind, isWord, useAi || requiresAiFormatting)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That document could not be imported.', 'error') }
   }
   const ensureVoiceTranscription = async () => {

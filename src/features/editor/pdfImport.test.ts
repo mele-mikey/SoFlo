@@ -27,6 +27,15 @@ describe('importPdfAsEditableNote', () => {
     expect(imported.document.content.slice(0, 4).map((node) => node.content?.[0]?.text)).toEqual(['Michael Mele', 'Mrs. Swanigan', 'Argument Essay', '10/31/2024'])
   })
 
+  it('does not prepend an indented course document as an MLA heading block', () => {
+    const source = '# Math 135 – 06\n\n# Precalculus\n\n# Syllabus\n\n## Course information\n\n  - Bring a calculator to each class.\n\n## Grading\n\n- Exams\n- Homework'
+    const imported = importAiFormattedNote(source, 'C:/Downloads/math-syllabus.pdf', source)
+    const labels = imported.document.content.map((node) => node.content?.[0]?.text).filter(Boolean)
+    expect(labels.filter((label) => label === 'Math 135 – 06')).toHaveLength(1)
+    expect(labels.filter((label) => label === 'Precalculus')).toHaveLength(1)
+    expect(labels.filter((label) => label === 'Syllabus')).toHaveLength(1)
+  })
+
   it('rebuilds a visual-line MLA extraction without turning every wrapped line into a paragraph', () => {
     const source = `Michael Mele
 

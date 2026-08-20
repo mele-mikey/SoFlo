@@ -5311,11 +5311,10 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let resolved = resolve_ai_model_path(&app_for_ai, &model_path)?;
         let port = ensure_ai_server(&resolved, &app_for_ai)?;
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-        let source_format_system = "You are SoFlo's meticulous local course-document formatter. Return only clean Markdown. Preserve every source fact and never invent, summarize, reorder, or omit material. Repair PDF extraction artifacts, including unintended spaces inserted inside a word, by reading the surrounding context. Join ordinary visual wraps into paragraphs; use headings, lists, tables, links, and emphasis only when the source supports them.";
         let mut sources = detail.sources.clone();
         for source in &mut sources {
             if !has_fragmented_pdf_spacing(&source.content_plain) { continue; }
-            let formatted = request_document_format(&client, port, source_format_system, &format!("Format this course document faithfully. Return Markdown only.\n\n{}", source.content_plain))?;
+            let formatted = refine_document_text_blocking(app_for_ai.clone(), resolved.clone(), source.content_plain.clone(), "syllabus".into())?;
             if formatted.trim().is_empty() { continue; }
             source.content_plain = formatted.trim().to_string();
             connection.execute("UPDATE course_calendar_sources SET content_plain=?1 WHERE id=?2", params![source.content_plain, source.id]).map_err(|error| error.to_string())?;

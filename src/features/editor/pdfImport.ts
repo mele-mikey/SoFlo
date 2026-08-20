@@ -201,8 +201,17 @@ function nodeText(node: TipTapNode) {
   return node.content?.map((child) => child.text ?? '').join('') ?? ''
 }
 
+function hasMlaHeadingBlock(sourceText: string) {
+  const lines = meaningfulLines(sourceText)
+  const dateIndex = lines.slice(0, 6).findIndex(dateLine)
+  return dateIndex >= 2 && dateIndex <= 4 && Boolean(lines[dateIndex + 1]) && lines[dateIndex + 1].length <= 160 && lines.length >= dateIndex + 3
+}
+
 function preserveMlaHeading(content: TipTapNode[], sourceText?: string, path?: string) {
-  if (!sourceText || !path) return content
+  // Only an actual MLA-style paper has a four-line heading to preserve. Course
+  // documents often contain indented lists; treating that indentation as an
+  // MLA heading block prepends the opening material a second time.
+  if (!sourceText || !path || !hasMlaHeadingBlock(sourceText)) return content
   const source = importPdfAsEditableNote(sourceText, path).document.content
   const sourceTitle = source.findIndex((node) => node.type === 'heading' && node.attrs?.level === 1)
   if (sourceTitle <= 0) return content
