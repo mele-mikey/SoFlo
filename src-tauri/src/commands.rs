@@ -74,7 +74,11 @@ impl pdf_extract::OutputDev for FlowTextOutput {
     ) -> Result<(), pdf_extract::OutputError> {
         let x = trm.m31;
         let y = trm.m32;
-        let size = font_size.abs().max(1.0);
+        // PDF text matrices may scale or rotate the font. Using the unscaled
+        // font size here makes ordinary glyph advances look like word gaps.
+        let horizontal_scale = (trm.m11.powi(2) + trm.m12.powi(2)).sqrt();
+        let vertical_scale = (trm.m21.powi(2) + trm.m22.powi(2)).sqrt();
+        let size = (font_size.abs() * horizontal_scale.max(vertical_scale)).max(1.0);
         if self.has_character && self.first_character_in_word {
             let vertical_change = (y - self.last_y).abs();
             if vertical_change > size * 0.45 || (x < self.last_end && vertical_change > size * 0.2)
@@ -99,7 +103,7 @@ impl pdf_extract::OutputDev for FlowTextOutput {
         self.has_character = true;
         self.first_character_in_word = false;
         self.last_y = y;
-        self.last_end = x + width * size;
+        self.last_end = x + width * font_size.abs() * horizontal_scale;
         Ok(())
     }
 
@@ -5228,6 +5232,26 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
         .map_err(|_| "SoFlo could not read that text file.".into())
 }
 
+fn has_fragmented_pdf_spacing(text: &str) -> bool {
+    let words = text
+        .split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphabetic))
+        .collect::<Vec<_>>();
+    if words.len() < 24 {
+        return false;
+    }
+    let fragments = words
+        .windows(2)
+        .filter(|pair| {
+            pair.iter().all(|word| {
+                let letters = word.chars().filter(|character| character.is_alphabetic()).count();
+                letters >= 2 && letters <= 3 && word.chars().all(|character| character.is_alphabetic())
+            })
+        })
+        .count();
+    fragments >= 8 && fragments.saturating_mul(12) >= words.len()
+}
+
 fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
     let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
     let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
@@ -5269,9 +5293,11 @@ pub fn set_course_calendar_item_completed(database: State<'_, Database>, id: Str
 }
 
 #[derive(serde::Deserialize)]
-struct CourseCalendarAiPlan { #[serde(default)] items: Vec<CourseCalendarAiItem>, #[serde(default)] game_plan: String }
+struct CourseCalendarAiPlan { #[serde(default)] items: Vec<CourseCalendarAiItem>, #[serde(default)] game_plan: Vec<CourseCalendarAiPlanStep> }
 #[derive(serde::Deserialize)]
 struct CourseCalendarAiItem { source_title: String, title: String, due_date: String, #[serde(default)] description: String, #[serde(default)] urgency: String, #[serde(default)] source_excerpt: String }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CourseCalendarAiPlanStep { action: String, #[serde(default)] context: String }
 
 #[tauri::command]
 pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, Database>, class_id: String, model_path: String) -> CommandResult<CourseCalendarDetail> {
@@ -5283,11 +5309,20 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let settings = get_settings(&connection, None)?;
         if !settings.ai_enabled { return Err("Enable General AI to build the Course Calendar.".into()); }
         let resolved = resolve_ai_model_path(&app_for_ai, &model_path)?;
-        let source_text = detail.sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(10_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
-        let today = chrono::Local::now().date_naive().to_string();
-        let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Color urgency as critical, high, upcoming, or later based on time remaining and workload. When deadlines overlap, sequence them explicitly in the game plan. Return JSON only: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"supporting text\"}}],\"game_plan\":\"a concise ordered plan for this week\"}}. Omit uncertain dates.\n\n{source_text}");
         let port = ensure_ai_server(&resolved, &app_for_ai)?;
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let source_format_system = "You are SoFlo's meticulous local course-document formatter. Return only clean Markdown. Preserve every source fact and never invent, summarize, reorder, or omit material. Repair PDF extraction artifacts, including unintended spaces inserted inside a word, by reading the surrounding context. Join ordinary visual wraps into paragraphs; use headings, lists, tables, links, and emphasis only when the source supports them.";
+        let mut sources = detail.sources.clone();
+        for source in &mut sources {
+            if !has_fragmented_pdf_spacing(&source.content_plain) { continue; }
+            let formatted = request_document_format(&client, port, source_format_system, &format!("Format this course document faithfully. Return Markdown only.\n\n{}", source.content_plain))?;
+            if formatted.trim().is_empty() { continue; }
+            source.content_plain = formatted.trim().to_string();
+            connection.execute("UPDATE course_calendar_sources SET content_plain=?1 WHERE id=?2", params![source.content_plain, source.id]).map_err(|error| error.to_string())?;
+        }
+        let source_text = sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(10_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
+        let today = chrono::Local::now().date_naive().to_string();
+        let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Color urgency as critical, high, upcoming, or later based on time remaining and workload. Return JSON only: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action the student should take first\",\"context\":\"why it comes now, including the relevant deadline or overlap\"}}]}}. The game plan is not a recap of dates or exam names: each action must tell the student what to actually do, using only work supported by the sources. Prioritize unfinished work in or near the current week, and explain scheduling conflicts in context. Omit uncertain dates and do not invent work.\n\n{source_text}");
         let raw = local_chat_text(&client, port, "You extract course calendars faithfully. Never invent dates. Output JSON only.", &prompt, 1800)?;
         let json = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
         let plan: CourseCalendarAiPlan = serde_json::from_str(json).map_err(|_| "SoFlo could not read the calendar plan returned by the local AI.".to_string())?;
@@ -5295,13 +5330,14 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
         for item in plan.items.into_iter().take(250) {
             if !item.due_date.chars().take(10).collect::<String>().chars().all(|character| character.is_ascii_digit() || character == '-') || item.due_date.len() < 10 { continue; }
-            let source_id = detail.sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())).or_else(|| detail.sources.first()).map(|source| source.id.clone()).unwrap_or_default();
+            let source_id = sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())).or_else(|| sources.first()).map(|source| source.id.clone()).unwrap_or_default();
             let title = item.title.trim().chars().take(180).collect::<String>(); if title.is_empty() || source_id.is_empty() { continue; }
             let due_date = item.due_date.chars().take(10).collect::<String>(); let completed = due_date.as_str() < today.as_str();
             let urgency = match item.urgency.trim().to_lowercase().as_str() { "critical" | "high" | "upcoming" | "later" => item.urgency.trim().to_lowercase(), _ => "upcoming".to_string() };
             transaction.execute("INSERT INTO course_calendar_items (id,class_id,source_id,title,due_date,description,urgency,completed,source_excerpt) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![Uuid::new_v4().to_string(), class_id, source_id, title, due_date, item.description.trim().chars().take(1200).collect::<String>(), urgency, completed as i32, item.source_excerpt.trim().chars().take(1200).collect::<String>()]).map_err(|error| error.to_string())?;
         }
-        transaction.execute("INSERT INTO course_calendar_plans (class_id,game_plan,updated_at) VALUES (?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(class_id) DO UPDATE SET game_plan=excluded.game_plan,updated_at=CURRENT_TIMESTAMP", params![class_id, plan.game_plan.trim().chars().take(4000).collect::<String>()]).map_err(|error| error.to_string())?;
+        let game_plan = serde_json::to_string(&plan.game_plan).map_err(|_| "SoFlo could not save the course game plan.".to_string())?;
+        transaction.execute("INSERT INTO course_calendar_plans (class_id,game_plan,updated_at) VALUES (?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(class_id) DO UPDATE SET game_plan=excluded.game_plan,updated_at=CURRENT_TIMESTAMP", params![class_id, game_plan.chars().take(4000).collect::<String>()]).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         read_course_calendar_detail(&connection, &class_id)
     }).await.map_err(|_| "SoFlo's Course Calendar task stopped unexpectedly.".to_string())?
@@ -8096,6 +8132,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
+        has_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
@@ -8110,6 +8147,13 @@ mod tests {
         let port = available_loopback_port().expect("a private loopback port");
         assert!(port > 0);
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn detects_widespread_pdf_word_fragmentation_without_flagging_normal_prose() {
+        let fragmented = "Ma th em at ics in ter val no ta tion re qui res care ful read ing of each ex am ple be fore prac tic ing";
+        assert!(has_fragmented_pdf_spacing(fragmented));
+        assert!(!has_fragmented_pdf_spacing("This ordinary paragraph uses short words in a normal way, but it still has complete words and readable sentences throughout the document."));
     }
 
     #[test]

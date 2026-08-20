@@ -28,10 +28,11 @@ function SyllabusContent({ syllabus }: { syllabus: DocumentDetail }) {
     }
   }, [syllabus.content, syllabus.contentPlain, syllabus.title])
   const measureRef = useRef<HTMLDivElement>(null)
-  const [pageIndexes, setPageIndexes] = useState<number[][]>(() => [nodes.map((_, index) => index)])
+  const [pageIndexes, setPageIndexes] = useState<number[][]>([])
   useLayoutEffect(() => {
     const measure = measureRef.current
     if (!measure) return
+    setPageIndexes([])
     let frame = 0
     const paginate = () => {
       const capacity = measure.clientHeight
@@ -55,7 +56,8 @@ function SyllabusContent({ syllabus }: { syllabus: DocumentDetail }) {
     window.addEventListener('resize', schedule)
     return () => { cancelAnimationFrame(frame); observer.disconnect(); window.removeEventListener('resize', schedule) }
   }, [nodes])
-  const pages = pageIndexes.flat().length === nodes.length ? pageIndexes : [nodes.map((_, index) => index)]
+  const indexedNodes = pageIndexes.flat()
+  const pages = indexedNodes.length === nodes.length && new Set(indexedNodes).size === nodes.length && indexedNodes.every((nodeIndex) => nodeIndex >= 0 && nodeIndex < nodes.length) ? pageIndexes : []
   return <><div className="syllabus-measure" ref={measureRef} aria-hidden="true">{nodes.map((node, index) => <div className="syllabus-node" key={index}>{renderNode(node, index)}</div>)}</div><div className="syllabus-page-stack">{pages.map((page, pageIndex) => <article className="document-page syllabus-paper" key={pageIndex}><div className="syllabus-paper-content">{page.map((nodeIndex) => <div className="syllabus-node" key={nodeIndex}>{renderNode(nodes[nodeIndex], nodeIndex)}</div>)}</div><span className="syllabus-page-number" aria-label={`Page ${pageIndex + 1}`}>{pageIndex + 1}</span></article>)}</div></>
 }
 function renderNode(node: SyllabusNode, key: number): ReactNode { const raw = nodeText(node).trim(); const markdownHeading = node.type === 'paragraph' ? raw.match(/^(#{1,6})\s+(.+)$/) : null; const text = markdownHeading ? syllabusText({ type: 'text', text: markdownHeading[2] }) : syllabusText(node); if (node.type === 'heading' || markdownHeading) { const level = markdownHeading ? markdownHeading[1].length : node.attrs?.level ?? 2; const Tag = `h${Math.min(6, Math.max(1, level))}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'; return <Tag key={key}>{text}</Tag> }; if (node.type === 'bulletList' || node.type === 'orderedList') { const Tag = node.type === 'bulletList' ? 'ul' : 'ol'; return <Tag key={key}>{node.content?.map((item, index) => <li key={index}>{syllabusText(item)}</li>)}</Tag> }; if (node.type === 'table') return <table key={key}><tbody>{node.content?.map((row, rowIndex) => <tr key={rowIndex}>{row.content?.map((cell, cellIndex) => cell.type === 'tableHeader' ? <th key={cellIndex}>{syllabusText(cell)}</th> : <td key={cellIndex}>{syllabusText(cell)}</td>)}</tr>)}</tbody></table>; if (node.type === 'horizontalRule') return <hr key={key} />; return <p key={key}>{text}</p> }
