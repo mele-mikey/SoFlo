@@ -8,7 +8,9 @@ SetCompressor /SOLID lzma
 SetDatablockOptimize on
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
-SilentInstall normal
+; The setup window is SoFlo's own Tauri UI. NSIS is only the background
+; install worker it launches after the user confirms the options.
+SilentInstall silent
 AutoCloseWindow true
 
 !include "MUI2.nsh"
@@ -105,10 +107,15 @@ Function .onInit
   StrCpy $WorkerMode 0
   ${GetParameters} $0
   ${GetOptions} $0 "--perform-silent-install=" $1
-  ${If} $1 == "1"
-    StrCpy $WorkerMode 1
+  ${If} $1 != "1"
+    ; Keep the visible setup app outside NSIS's temporary plug-in directory.
+    ; That directory is removed when this bootstrapper exits, which can race
+    ; the new process and leave the user with no installer window.
     SetSilent silent
+    Return
   ${EndIf}
+  StrCpy $WorkerMode 1
+  SetSilent silent
 
   ; SoFlo installers are forward-only. The visible setup UI also checks this,
   ; but the worker enforces it so command-line use cannot replace a newer app.
@@ -322,6 +329,17 @@ Function InstallProgressShow
 FunctionEnd
 
 Section "Install SoFlo" InstallSection
+  ${If} $WorkerMode == 0
+    ; Launch the branded setup UI from a stable per-user location, then leave
+    ; the NSIS bootstrapper. The UI re-invokes this exact setup executable in
+    ; worker mode only after the user presses Install.
+    CreateDirectory "$LOCALAPPDATA\SoFlo\InstallerUI"
+    SetOutPath "$LOCALAPPDATA\SoFlo\InstallerUI"
+    File /oname=SoFlo-SetupUI.exe "${APP_EXE}"
+    ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+    ExecShell "open" "$LOCALAPPDATA\SoFlo\InstallerUI\SoFlo-SetupUI.exe" '--installer --setup-exe="$EXEPATH" --current-version="$0" --target-version="${APP_VERSION}"'
+    Quit
+  ${EndIf}
   SetOutPath "$INSTDIR"
   Call EnsureWebView2
   DetailPrint "Installing the SoFlo desktop app..."
