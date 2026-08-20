@@ -831,6 +831,14 @@ fn refine_document_text_blocking(
             source_kind,
             source
         );
+        let request = if has_fragmented_pdf_spacing(source) {
+            format!(
+                "The source below has widespread PDF spacing damage: normal words were split into one-to-three-letter alphabetical pieces. Reconstruct those full words from context before applying Markdown. An answer that keeps that fragmented spacing is invalid.\n\n{}",
+                request
+            )
+        } else {
+            request
+        };
         let mut formatted = request_document_format(&client, ai_port, system, &request)
             .map_err(|error| format!("{} for section {}.", error, index + 1))?;
         if is_visual_line_echo(source, &formatted) {
@@ -5232,14 +5240,11 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
         .map_err(|_| "SoFlo could not read that text file.".into())
 }
 
-fn has_fragmented_pdf_spacing(text: &str) -> bool {
+fn fragmented_pdf_spacing_stats(text: &str) -> (usize, usize) {
     let words = text
         .split_whitespace()
         .filter(|word| word.chars().any(char::is_alphabetic))
         .collect::<Vec<_>>();
-    if words.len() < 24 {
-        return false;
-    }
     let fragments = words
         .windows(2)
         .filter(|pair| {
@@ -5249,7 +5254,25 @@ fn has_fragmented_pdf_spacing(text: &str) -> bool {
             })
         })
         .count();
-    fragments >= 8 && fragments.saturating_mul(12) >= words.len()
+    (words.len(), fragments)
+}
+
+fn has_fragmented_pdf_spacing(text: &str) -> bool {
+    let (word_count, fragments) = fragmented_pdf_spacing_stats(text);
+    word_count >= 24 && fragments >= 8 && fragments.saturating_mul(12) >= word_count
+}
+
+fn repairs_fragmented_pdf_spacing(source: &str, formatted: &str) -> bool {
+    let (_, original_fragments) = fragmented_pdf_spacing_stats(source);
+    let (_, formatted_fragments) = fragmented_pdf_spacing_stats(formatted);
+    original_fragments > 0 && formatted_fragments.saturating_mul(3) <= original_fragments
+}
+
+fn installed_course_formatter_fallback(app: &tauri::AppHandle, active_model: &str) -> Option<String> {
+    let candidate = app.path().app_data_dir().ok()?.join("models").join(DEFAULT_AI_MODEL_NAME);
+    let is_active = candidate.to_string_lossy().eq_ignore_ascii_case(active_model);
+    let is_complete = fs::metadata(&candidate).ok()?.len() >= DEFAULT_AI_MODEL_MINIMUM_BYTES;
+    (!is_active && is_complete).then(|| candidate.to_string_lossy().to_string())
 }
 
 fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
@@ -5314,8 +5337,18 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let mut sources = detail.sources.clone();
         for source in &mut sources {
             if !has_fragmented_pdf_spacing(&source.content_plain) { continue; }
-            let formatted = refine_document_text_blocking(app_for_ai.clone(), resolved.clone(), source.content_plain.clone(), "syllabus".into())?;
-            if formatted.trim().is_empty() { continue; }
+            let original = source.content_plain.clone();
+            let first_try = refine_document_text_blocking(app_for_ai.clone(), resolved.clone(), original.clone(), "syllabus".into())?;
+            let formatted = if repairs_fragmented_pdf_spacing(&original, &first_try) {
+                first_try
+            } else if let Some(fallback_model) = installed_course_formatter_fallback(&app_for_ai, &resolved) {
+                let retry = refine_document_text_blocking(app_for_ai.clone(), fallback_model, original.clone(), "syllabus".into())?;
+                if repairs_fragmented_pdf_spacing(&original, &retry) { retry } else {
+                    return Err(format!("SoFlo's local AI could not repair the extracted text in {}. The source was left unchanged.", source.title));
+                }
+            } else {
+                return Err(format!("SoFlo's local AI could not repair the extracted text in {}. The source was left unchanged.", source.title));
+            };
             source.content_plain = formatted.trim().to_string();
             connection.execute("UPDATE course_calendar_sources SET content_plain=?1 WHERE id=?2", params![source.content_plain, source.id]).map_err(|error| error.to_string())?;
         }
@@ -8131,7 +8164,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        has_fragmented_pdf_spacing,
+        has_fragmented_pdf_spacing, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
@@ -8153,6 +8186,13 @@ mod tests {
         let fragmented = "Ma th em at ics in ter val no ta tion re qui res care ful read ing of each ex am ple be fore prac tic ing";
         assert!(has_fragmented_pdf_spacing(fragmented));
         assert!(!has_fragmented_pdf_spacing("This ordinary paragraph uses short words in a normal way, but it still has complete words and readable sentences throughout the document."));
+    }
+
+    #[test]
+    fn accepts_only_a_meaningful_fragmented_pdf_repair() {
+        let fragmented = "Ma th em at ics in ter val no ta tion re qui res care ful read ing of each ex am ple be fore prac tic ing";
+        assert!(repairs_fragmented_pdf_spacing(fragmented, "Mathematics interval notation requires careful reading of each example before practicing."));
+        assert!(!repairs_fragmented_pdf_spacing(fragmented, fragmented));
     }
 
     #[test]
