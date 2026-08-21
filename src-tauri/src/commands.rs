@@ -5470,8 +5470,8 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(6_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
         let today = chrono::Local::now().date_naive().to_string();
         emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
-        let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Never infer a date. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"why it comes first\"}}]}}. Return at most 60 items and 8 game-plan steps. Omit uncertain dates and do not invent work.\n\n{source_text}");
-        let system = "You extract course calendars faithfully. Never invent dates. Output one valid JSON object only.";
+        let prompt = format!("Extract concrete course work from the documents. A calendar item is allowed only when its exact date appears in its matching source document; never use today's date or infer a date. Put undated readings, study material, and assignments only in game_plan as clear steps for the student, never in items. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"source-backed reason it comes first, without a made-up date\"}}]}}. Return at most 60 items and 8 game-plan steps.\n\n{source_text}");
+        let system = "You extract course calendars faithfully. Dates must be copied from the source. Undated work belongs only in the game plan. Output one valid JSON object only.";
         let ai_plan = (|| {
             let resolved = resolve_ai_model_path(&app_for_ai, &model_path).ok()?;
             let port = ensure_ai_server(&resolved, &app_for_ai).ok()?;
@@ -5481,7 +5481,12 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
                 local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
             })
         })();
-        let plan = ai_plan.filter(|plan| course_calendar_plan_uses_source_dates(plan, &planner_sources)).unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
+        let fallback = fallback_course_calendar_plan(&planner_sources, &today);
+        let plan = match ai_plan {
+            Some(plan) if course_calendar_plan_uses_source_dates(&plan, &planner_sources) => plan,
+            Some(plan) => CourseCalendarAiPlan { items: fallback.items, game_plan: if plan.game_plan.is_empty() { fallback.game_plan } else { plan.game_plan } },
+            None => fallback,
+        };
         emit_ai_progress(&app_for_ai, 88, "Saving your course calendar");
         let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
