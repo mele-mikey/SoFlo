@@ -477,11 +477,11 @@ function App() {
   const chooseAiLaunchMode = async (mode: AiLaunchMode) => {
     setAiLaunchChooserOpen(false)
     if (mode === 'browsing' || !library) return
-    setAiWorkingTitle(mode === 'writing' ? 'Preparing your writing tools' : 'Preparing your study AI')
+    setAiWorkingTitle(mode === 'writing' ? 'Preparing your writing tools' : 'Preparing your lecture and study tools')
     setAiWorking(true)
-    setAiProgress({ progress: 4, message: mode === 'writing' ? 'Loading your local writing and general AI.' : 'Loading your local study AI.' })
+    setAiProgress({ progress: 4, message: mode === 'writing' ? 'Loading your local General AI.' : 'Loading your General AI and lecture transcription.' })
     try {
-      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiModelPath, mode)
+      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiVoiceModelPath, mode)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'SoFlo could not prepare local AI for this session.', 'error')
     } finally {

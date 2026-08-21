@@ -15,8 +15,8 @@ export function AiLaunchChooser({ onChoose, onNeverShowAgain }: AiLaunchChooserP
       <h1>What are you working on?</h1>
       <div className="ai-launch-choices">
         <button className="ai-launch-choice" onClick={() => onChoose('writing')}>
-          <strong>Getting a lecture<br />or writing a paper</strong>
-          <small>Prepare writing and research help</small>
+          <strong>Making a lecture<br />or writing a paper</strong>
+          <small>Lectures prepare General AI and transcription; papers use General AI</small>
           <i><FilePenLine size={30} strokeWidth={1.6} /></i>
         </button>
         <button className="ai-launch-choice" onClick={() => onChoose('study')}>
