@@ -5265,6 +5265,40 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
         .map_err(|_| "SoFlo could not read that text file.".into())
 }
 
+fn local_chat_json_object(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    system: &str,
+    prompt: &str,
+    max_tokens: u16,
+) -> CommandResult<String> {
+    let response = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .json(&serde_json::json!({
+            "messages": [{"role":"system","content":system},{"role":"user","content":prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "response_format": {"type":"json_object"},
+            "stream": false
+        }))
+        .send()
+        .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
+        .error_for_status()
+        .map_err(|error| format!("SoFlo's local AI model could not create the calendar: {}", error))?;
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
+    Ok(body
+        .get("choices")
+        .and_then(|value| value.get(0))
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
+}
+
 fn fragmented_pdf_spacing_stats(text: &str) -> (usize, usize) {
     let words = text
         .split_whitespace()
@@ -5370,8 +5404,10 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         if detail.sources.is_empty() { return Err("Add one or more course documents first.".into()); }
         let settings = get_settings(&connection, None)?;
         if !settings.ai_enabled { return Err("Enable General AI to build the Course Calendar.".into()); }
+        emit_ai_progress(&app_for_ai, 5, "Preparing Course Calendar");
         let resolved = resolve_ai_model_path(&app_for_ai, &model_path)?;
         let port = ensure_ai_server(&resolved, &app_for_ai)?;
+        emit_ai_progress(&app_for_ai, 18, "Reading saved course documents");
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
         let mut sources = detail.sources.clone();
         let mut planner_sources = Vec::new();
@@ -5394,13 +5430,15 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         if planner_sources.is_empty() { return Err("Course Calendar could not read a usable text version of these documents. Try adding a clearer PDF, Word document, or PowerPoint.".into()); }
         let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(6_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
         let today = chrono::Local::now().date_naive().to_string();
+        emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
         let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Never infer a date. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"why it comes first\"}}]}}. Return at most 60 items and 8 game-plan steps. Omit uncertain dates and do not invent work.\n\n{source_text}");
         let system = "You extract course calendars faithfully. Never invent dates. Output one valid JSON object only.";
-        let raw = local_chat_text(&client, port, system, &prompt, 1400)?;
+        let raw = local_chat_json_object(&client, port, system, &prompt, 1400)?;
         let plan = course_calendar_plan_from_response(&raw).or_else(|| {
             let retry = format!("Return only the requested JSON object now, with empty arrays if there are no supported dated items.\n\n{prompt}");
-            local_chat_text(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
+            local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
         }).ok_or_else(|| "SoFlo could not read a valid calendar plan from the selected General AI model.".to_string())?;
+        emit_ai_progress(&app_for_ai, 88, "Saving your course calendar");
         let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
         for item in plan.items.into_iter().take(250) {
@@ -5414,6 +5452,7 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let game_plan = serde_json::to_string(&plan.game_plan).map_err(|_| "SoFlo could not save the course game plan.".to_string())?;
         transaction.execute("INSERT INTO course_calendar_plans (class_id,game_plan,updated_at) VALUES (?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(class_id) DO UPDATE SET game_plan=excluded.game_plan,updated_at=CURRENT_TIMESTAMP", params![class_id, game_plan.chars().take(4000).collect::<String>()]).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
+        emit_ai_progress(&app_for_ai, 100, "Course Calendar is ready");
         read_course_calendar_detail(&connection, &class_id)
     }).await.map_err(|_| "SoFlo's Course Calendar task stopped unexpectedly.".to_string())?
 }
