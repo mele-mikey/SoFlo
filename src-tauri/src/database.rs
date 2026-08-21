@@ -945,6 +945,25 @@ impl Database {
                 PRAGMA user_version = 21;
             "#).map_err(|error| error.to_string())?;
         }
+        if version < 22 {
+            connection.execute_batch(r#"
+                CREATE TABLE IF NOT EXISTS course_calendar_manual_items (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    due_date TEXT NOT NULL,
+                    start_time TEXT,
+                    description TEXT NOT NULL DEFAULT '',
+                    color TEXT NOT NULL DEFAULT '#8B7CF6',
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_course_calendar_manual_items_class_due
+                    ON course_calendar_manual_items(class_id, due_date, archived);
+                PRAGMA user_version = 22;
+            "#).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }

@@ -174,6 +174,67 @@
   opacity: 0.52;
   text-decoration: line-through;
 }
+.course-calendar-layout.calendar-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+.course-calendar-add {
+  color: #e7e0ff;
+  border-color: #7564c9;
+  background: #30285a;
+}
+.course-calendar-manual-form {
+  display: grid;
+  gap: 14px;
+}
+.course-calendar-manual-form > label,
+.course-calendar-manual-datetime label {
+  display: grid;
+  gap: 6px;
+  color: #d9d3e3;
+  font-size: 12px;
+  font-weight: 700;
+}
+.course-calendar-manual-form input,
+.course-calendar-manual-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+.course-calendar-manual-form label span {
+  color: #97909f;
+  font-size: 10px;
+  font-weight: 500;
+}
+.course-calendar-manual-datetime {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.course-calendar-color-picker {
+  display: flex;
+  gap: 8px;
+  margin-top: 7px;
+}
+.course-calendar-color-picker button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  color: #191521;
+  cursor: pointer;
+}
+.course-calendar-color-picker button:not(.selected) svg {
+  opacity: 0;
+}
+.course-calendar-color-picker button.selected {
+  border-color: #f1edf8;
+  box-shadow: 0 0 0 2px #574c7c;
+}
+.course-calendar-event-time {
+  color: #b9afff;
+  font-weight: 700;
+}
 .course-calendar-plan ol {
   display: grid;
   gap: 10px;

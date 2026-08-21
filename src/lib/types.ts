@@ -63,6 +63,10 @@ export interface CourseCalendarItem {
   urgency: 'critical' | 'high' | 'upcoming' | 'later' | string
   completed: boolean
   sourceExcerpt: string
+  startTime?: string | null
+  color?: string | null
+  isManual?: boolean
+  archived?: boolean
 }
 
 export interface CourseCalendarDetail {

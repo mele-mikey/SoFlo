@@ -5341,8 +5341,12 @@ fn repairs_fragmented_pdf_spacing(source: &str, formatted: &str) -> bool {
 fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
     let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
     let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    let mut items = connection.prepare("SELECT id, class_id, source_id, title, due_date, description, urgency, completed, source_excerpt FROM course_calendar_items WHERE class_id=?1 ORDER BY due_date, completed, title").map_err(|error| error.to_string())?;
-    let items = items.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: row.get(2)?, title: row.get(3)?, due_date: row.get(4)?, description: row.get(5)?, urgency: row.get(6)?, completed: row.get::<_, i64>(7)? != 0, source_excerpt: row.get(8)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut items_statement = connection.prepare("SELECT id, class_id, source_id, title, due_date, description, urgency, completed, source_excerpt FROM course_calendar_items WHERE class_id=?1 ORDER BY due_date, completed, title").map_err(|error| error.to_string())?;
+    let mut items = items_statement.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: row.get(2)?, title: row.get(3)?, due_date: row.get(4)?, description: row.get(5)?, urgency: row.get(6)?, completed: row.get::<_, i64>(7)? != 0, source_excerpt: row.get(8)?, start_time: None, color: None, is_manual: false, archived: false })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut manual_statement = connection.prepare("SELECT id, class_id, title, due_date, start_time, description, color, archived FROM course_calendar_manual_items WHERE class_id=?1 AND archived=0 ORDER BY due_date, start_time, title").map_err(|error| error.to_string())?;
+    let manual_items = manual_statement.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: String::new(), title: row.get(2)?, due_date: row.get(3)?, start_time: row.get(4)?, description: row.get(5)?, color: Some(row.get(6)?), archived: row.get::<_, i64>(7)? != 0, urgency: "upcoming".to_string(), completed: false, source_excerpt: String::new(), is_manual: true })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    items.extend(manual_items);
+    items.sort_by(|left, right| left.due_date.cmp(&right.due_date).then_with(|| left.start_time.cmp(&right.start_time)).then_with(|| left.title.cmp(&right.title)));
     let plan = connection.query_row("SELECT game_plan, updated_at FROM course_calendar_plans WHERE class_id=?1", [class_id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| error.to_string())?;
     Ok(CourseCalendarDetail { class_id: class_id.to_string(), sources, items, game_plan: plan.as_ref().map(|entry: &(String, String)| entry.0.clone()).unwrap_or_default(), updated_at: plan.map(|entry| entry.1) })
 }
@@ -5391,6 +5395,31 @@ pub fn remove_course_calendar_source(database: State<'_, Database>, id: String) 
 pub fn set_course_calendar_item_completed(database: State<'_, Database>, id: String, completed: bool) -> CommandResult<()> {
     let connection = database.open()?;
     connection.execute("UPDATE course_calendar_items SET completed=?1 WHERE id=?2", params![completed as i32, id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_course_calendar_manual_item(database: State<'_, Database>, input: SaveCourseCalendarManualItemInput) -> CommandResult<CourseCalendarDetail> {
+    let title = input.title.trim().chars().take(180).collect::<String>();
+    if title.is_empty() { return Err("Give the calendar event a title.".into()); }
+    let due_date = input.due_date.trim();
+    chrono::NaiveDate::parse_from_str(due_date, "%Y-%m-%d").map_err(|_| "Choose a valid event date.".to_string())?;
+    let start_time = input.start_time.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(|value| {
+        chrono::NaiveTime::parse_from_str(value, "%H:%M").map(|_| value.to_string()).map_err(|_| "Choose a valid event time.".to_string())
+    }).transpose()?;
+    let color = input.color.trim();
+    if !matches!(color, "#8B7CF6" | "#63B98F" | "#7E8ADE" | "#E8B558" | "#EF8794" | "#4E86D9") { return Err("Choose one of SoFlo's event colors.".into()); }
+    let description = input.description.unwrap_or_default().trim().chars().take(1600).collect::<String>();
+    let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let connection = database.open()?;
+    connection.execute("INSERT INTO course_calendar_manual_items (id,class_id,title,due_date,start_time,description,color,archived,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,0,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,due_date=excluded.due_date,start_time=excluded.start_time,description=excluded.description,color=excluded.color,archived=0,updated_at=CURRENT_TIMESTAMP", params![id, input.class_id, title, due_date, start_time, description, color]).map_err(|error| error.to_string())?;
+    read_course_calendar_detail(&connection, &input.class_id)
+}
+
+#[tauri::command]
+pub fn archive_course_calendar_manual_item(database: State<'_, Database>, id: String) -> CommandResult<()> {
+    let connection = database.open()?;
+    connection.execute("UPDATE course_calendar_manual_items SET archived=1,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
     Ok(())
 }
 

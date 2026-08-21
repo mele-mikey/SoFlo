@@ -108,6 +108,10 @@ pub struct CourseCalendarItem {
     pub urgency: String,
     pub completed: bool,
     pub source_excerpt: String,
+    pub start_time: Option<String>,
+    pub color: Option<String>,
+    pub is_manual: bool,
+    pub archived: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -127,6 +131,18 @@ pub struct AddCourseCalendarSourceInput {
     pub title: String,
     pub content_plain: String,
     pub source_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCourseCalendarManualItemInput {
+    pub id: Option<String>,
+    pub class_id: String,
+    pub title: String,
+    pub due_date: String,
+    pub start_time: Option<String>,
+    pub description: Option<String>,
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

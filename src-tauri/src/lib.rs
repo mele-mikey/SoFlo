@@ -126,6 +126,8 @@ pub fn run() {
             commands::add_course_calendar_source,
             commands::remove_course_calendar_source,
             commands::set_course_calendar_item_completed,
+            commands::save_course_calendar_manual_item,
+            commands::archive_course_calendar_manual_item,
             commands::refresh_course_calendar,
             commands::list_flashcard_sets,
             commands::create_flashcard_set,
