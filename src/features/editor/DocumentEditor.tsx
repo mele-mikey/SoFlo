@@ -1208,13 +1208,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     try { globalThis.print() } catch { setPdfMessage('SoFlo could not open the PDF export dialog.') }
   }
   const importPdf = async () => {
-    const source = await open({ title: 'Import document into this paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'docx'] }] })
+    const source = await open({ title: 'Import document into this paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'pptx'] }] })
     if (!source || Array.isArray(source)) return
     setPdfMessage('Importing editable text…')
     try {
-      const isWord = source.toLowerCase().endsWith('.docx')
-      const extracted = isWord ? await api.importWordText(source) : await api.importPdfText(source)
-      const imported = isWord ? importAiFormattedNote(extracted, source, extracted) : importPdfAsEditableNote(extracted, source)
+      const isWord = /\.docx?$/i.test(source)
+      const isPresentation = /\.pptx$/i.test(source)
+      const extracted = isWord ? await api.importWordText(source) : isPresentation ? await api.importPowerPointText(source) : await api.importPdfText(source)
+      const imported = isWord || isPresentation ? importAiFormattedNote(extracted, source, extracted) : importPdfAsEditableNote(extracted, source)
       editor.chain().focus().setTextSelection(editor.state.doc.content.size).insertContent(imported.document.content).run()
       setPdfMessage('Structured PDF content added to the end of this paper.')
     } catch (error) { setPdfMessage(error instanceof Error ? error.message : 'SoFlo could not import that PDF.') }

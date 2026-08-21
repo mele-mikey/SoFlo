@@ -507,7 +507,7 @@ function App() {
     setSettings(settings)
     try { await api.updateSettings(settings) } catch { setSettings(library.settings); showToast('Settings could not be saved.', 'error') }
   }
-  const supportedImport = (source: string) => /\.(?:pdf|doc|docx)$/i.test(source)
+  const supportedImport = (source: string) => /\.(?:pdf|doc|docx|pptx)$/i.test(source)
   const hasFragmentedPdfSpacing = (text: string) => {
     const words = text.split(/\s+/).filter((word) => /[A-Za-z]/.test(word))
     if (words.length < 24) return false
@@ -516,7 +516,7 @@ function App() {
   }
   const importLocalDocument = async (documentKind: 'paper' | 'syllabus', useAi = false, selectedSource?: string) => {
     if (!classId) { showToast(`Open a class before importing a ${documentKind}.`, 'error'); return }
-    const source = selectedSource ?? await open({ title: `Import ${documentKind}`, multiple: false, directory: false, filters: [{ name: 'Supported documents', extensions: ['pdf', 'doc', 'docx'] }, { name: 'All files', extensions: ['*'] }] })
+    const source = selectedSource ?? await open({ title: `Import ${documentKind}`, multiple: false, directory: false, filters: [{ name: 'Supported documents', extensions: ['pdf', 'doc', 'docx', 'pptx'] }, { name: 'All files', extensions: ['*'] }] })
     if (!source || Array.isArray(source)) return
     if (!supportedImport(source)) {
       if (!useAi && library?.settings.aiEnabled) { setModal({ type: 'documentImportFallback', kind: documentKind, source }); return }
@@ -525,10 +525,11 @@ function App() {
     }
     try {
       const isWord = /\.docx?$/i.test(source)
-      const text = isWord ? await api.importWordText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
-      const requiresAiFormatting = !isWord && hasFragmentedPdfSpacing(text)
+      const isPresentation = /\.pptx$/i.test(source)
+      const text = isWord ? await api.importWordText(source) : isPresentation ? await api.importPowerPointText(source) : documentKind === 'syllabus' ? await api.importSyllabusPdfText(source) : await api.importPdfText(source)
+      const requiresAiFormatting = !isWord && !isPresentation && hasFragmentedPdfSpacing(text)
       if (requiresAiFormatting && !library?.settings.aiEnabled) { showToast('This PDF needs AI formatting before it can be imported cleanly. Enable General AI and try again.', 'error'); return }
-      await saveImportedDocument(text, source, documentKind, isWord, useAi || requiresAiFormatting)
+      await saveImportedDocument(text, source, documentKind, isWord || isPresentation, useAi || requiresAiFormatting)
     } catch (error) { showToast(error instanceof Error ? error.message : 'That document could not be imported.', 'error') }
   }
   const ensureVoiceTranscription = async () => {
@@ -590,7 +591,7 @@ function App() {
   }
   const generateAiSet = async (targetClassId: string, request: AiSetRequest) => {
     try {
-      const imported = await Promise.all(request.sources.map((source) => /\.docx?$/i.test(source) ? api.importWordText(source) : api.importPdfText(source)))
+      const imported = await Promise.all(request.sources.map((source) => /\.docx?$/i.test(source) ? api.importWordText(source) : /\.pptx$/i.test(source) ? api.importPowerPointText(source) : api.importPdfText(source)))
       const syllabusContext = await api.getSyllabus(targetClassId).then((document) => document?.contentPlain.trim().slice(0, 20_000) ?? '').catch(() => '')
       const manual = request.pasted.trim()
       const textOnly = !request.sources.length && Boolean(manual)
@@ -1077,12 +1078,12 @@ function GuidedWalkthrough({ initialStep, hasExample, onStep, onCreateExample, o
 function DocumentImportDialog({ kind, onClose, onChooseFile, onGoogleDoc }: { kind: 'paper' | 'syllabus'; onClose: () => void; onChooseFile: () => void; onGoogleDoc: (url: string) => void }) {
   const [url, setUrl] = useState('')
   const label = kind === 'syllabus' ? 'syllabus' : 'paper'
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF or Word document</strong><span>Choose a .pdf, .doc, or .docx from this computer. SoFlo keeps headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog document-import-dialog" role="dialog" aria-modal="true" aria-label={`Import ${label}`}><header><div><p className="eyebrow">IMPORT {label.toUpperCase()}</p><h2>Bring in a document</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><button type="button" className="document-import-choice" onClick={onChooseFile}><strong>PDF, Word, or PowerPoint</strong><span>Choose a .pdf, .doc, .docx, or .pptx from this computer. SoFlo keeps the readable slide text, headings, paragraphs, lists, and basic emphasis where the source makes them available.</span></button><form className="document-import-google" onSubmit={(event) => { event.preventDefault(); if (url.trim()) onGoogleDoc(url.trim()) }}><label>Google Docs link<input type="url" autoFocus value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://docs.google.com/document/d/..." /></label><p>SoFlo asks Google for the document&apos;s downloadable Word copy only after you submit this link. Private Docs must allow viewing and downloading.</p><button className="button button-primary" disabled={!url.trim()}>Import Google Doc</button></form></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button></footer></section></div>
 }
 
 function DocumentImportFallbackDialog({ kind, source, onClose, onImportWithAi }: { kind: 'paper' | 'syllabus'; source: string; onClose: () => void; onImportWithAi: () => void }) {
   const name = source.split(/[\\/]/).pop() || 'This file'
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Unsupported document"><header><div><p className="eyebrow">IMPORT {kind.toUpperCase()}</p><h2>Try importing with AI?</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{name}</strong> is not a supported PDF or Word document. AI import may still be able to recover readable text.</p></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" onClick={onImportWithAi}>Import with AI</button></footer></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog" role="dialog" aria-modal="true" aria-label="Unsupported document"><header><div><p className="eyebrow">IMPORT {kind.toUpperCase()}</p><h2>Try importing with AI?</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><div className="paper-dialog-content"><p><strong>{name}</strong> is not a supported PDF, Word, or PowerPoint document. AI import may still be able to recover readable text.</p></div><footer><button className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" onClick={onImportWithAi}>Import with AI</button></footer></section></div>
 }
 
 function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (request: AiSetRequest) => void }) {
@@ -1090,12 +1091,12 @@ function AiSetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (re
   const [pasted, setPasted] = useState('')
   const [title, setTitle] = useState('AI study set')
   const choose = async () => {
-    const picked = await open({ title: 'Choose up to five study documents', multiple: true, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx'] }] })
+    const picked = await open({ title: 'Choose up to five study documents', multiple: true, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'pptx'] }] })
     if (!picked) return
     setSources((Array.isArray(picked) ? picked : [picked]).slice(0, 5))
   }
   const hasMaterial = Boolean(sources.length || pasted.trim())
-  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog ai-set-dialog-simple" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (hasMaterial) onCreate({ sources, pasted, topic: '', guidance: '', title, cardCount: 'auto', depth: 'standard' }) }}><div className="paper-dialog-content"><p>Paste notes, a study guide, or simply describe a topic. Adding files is optional. Your class syllabus is included as supporting context when one is available.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>What do you want to study?<textarea autoFocus rows={7} value={pasted} onChange={(event) => setPasted(event.target.value)} placeholder="Paste notes here, or write something like: Create cards for introductory Java inheritance." /></label><section className="ai-source-section"><strong>Have files instead?</strong><span>Optionally add up to five PDFs or Word documents (.doc or .docx). SoFlo automatically keeps math problems and equations in problem-and-answer form.</span><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Add files ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}</section></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!hasMaterial}>Create flashcards</button></footer></form></section></div>
+  return <div className="paper-dialog-backdrop" role="presentation"><section className="paper-dialog ai-set-dialog ai-set-dialog-simple" role="dialog" aria-modal="true" aria-label="Create flashcards with AI"><header><div><p className="eyebrow">LOCAL AI</p><h2>Create flashcards</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></header><form onSubmit={(event) => { event.preventDefault(); if (hasMaterial) onCreate({ sources, pasted, topic: '', guidance: '', title, cardCount: 'auto', depth: 'standard' }) }}><div className="paper-dialog-content"><p>Paste notes, a study guide, or simply describe a topic. Adding files is optional. Your class syllabus is included as supporting context when one is available.</p><label>Set name<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>What do you want to study?<textarea autoFocus rows={7} value={pasted} onChange={(event) => setPasted(event.target.value)} placeholder="Paste notes here, or write something like: Create cards for introductory Java inheritance." /></label><section className="ai-source-section"><strong>Have files instead?</strong><span>Optionally add up to five PDFs, Word documents, or PowerPoints (.pptx). SoFlo automatically keeps math problems and equations in problem-and-answer form.</span><button type="button" className="button button-quiet ai-action" onClick={() => void choose()}><Plus size={15} /> Add files ({sources.length}/5)</button>{sources.length > 0 && <div className="ai-source-list">{sources.map((source) => <span key={source}>{source.split(/[\\/]/).pop()}<button type="button" onClick={() => setSources((current) => current.filter((item) => item !== source))}><X size={13} /></button></span>)}</div>}</section></div><footer><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button className="button button-primary ai-action" disabled={!hasMaterial}>Create flashcards</button></footer></form></section></div>
 }
 
 export default App

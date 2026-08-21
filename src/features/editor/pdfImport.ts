@@ -171,7 +171,7 @@ function pageNodes(page: string): TipTapNode[] {
 
 function sourceName(path: string) {
   const file = path.split(/[\\/]/).pop() ?? 'Imported PDF'
-  return clean(file.replace(/\.(pdf|doc|docx)$/i, '')) || 'Imported document'
+  return clean(file.replace(/\.(pdf|doc|docx|pptx)$/i, '')) || 'Imported document'
 }
 
 export function importPdfAsEditableNote(text: string, path: string): ImportedPdfNote {

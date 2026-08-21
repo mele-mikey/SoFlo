@@ -602,6 +602,16 @@ pub fn import_word_text(path: String) -> CommandResult<String> {
 }
 
 #[tauri::command]
+pub fn import_powerpoint_text(path: String) -> CommandResult<String> {
+    let source = PathBuf::from(path);
+    if !source.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("pptx")) {
+        return Err("Choose a .pptx PowerPoint presentation. Legacy .ppt files need to be saved as .pptx first.".into());
+    }
+    let file = fs::File::open(&source).map_err(|_| "SoFlo could not read that PowerPoint presentation.".to_string())?;
+    powerpoint_to_markdown(file)
+}
+
+#[tauri::command]
 pub fn import_google_doc(url: String) -> CommandResult<String> {
     let document_id = google_document_id(&url)?;
     let export_url = format!("https://docs.google.com/document/d/{document_id}/export?format=docx");
@@ -774,6 +784,48 @@ fn word_document_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
         return Err("That Word document has no readable text to import.".into());
     }
     Ok(text)
+}
+
+fn powerpoint_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
+    let mut archive = zip::ZipArchive::new(file).map_err(|_| "That file is not a supported .pptx PowerPoint presentation.".to_string())?;
+    let mut slides = (0..archive.len()).filter_map(|index| archive.by_index(index).ok().and_then(|entry| {
+        let name = entry.name().replace('\\', "/");
+        let stem = name.strip_prefix("ppt/slides/slide")?.strip_suffix(".xml")?;
+        let number = stem.parse::<usize>().ok()?;
+        Some((number, name))
+    })).collect::<Vec<_>>();
+    slides.sort_by_key(|(number, _)| *number);
+    let mut markdown = Vec::new();
+    for (number, name) in slides {
+        let mut xml = String::new();
+        archive.by_name(&name).map_err(|_| "SoFlo could not read a slide in that PowerPoint presentation.".to_string())?.read_to_string(&mut xml).map_err(|_| "SoFlo could not read a slide in that PowerPoint presentation.".to_string())?;
+        let text = powerpoint_slide_text(&xml);
+        if !text.is_empty() { markdown.push(format!("## Slide {number}\n\n{text}")); }
+    }
+    if markdown.is_empty() { return Err("That PowerPoint presentation has no readable slide text to import.".into()); }
+    Ok(markdown.join("\n\n---\n\n"))
+}
+
+fn powerpoint_slide_text(xml: &str) -> String {
+    let mut text = String::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<a:t") {
+        let Some(tag_end) = rest[start..].find('>') else { break; };
+        let after_tag = &rest[start + tag_end + 1..];
+        let Some(end) = after_tag.find("</a:t>") else { break; };
+        text.push_str(&decode_presentation_xml(&after_tag[..end]));
+        rest = &after_tag[end + "</a:t>".len()..];
+        let next_paragraph = rest.find("</a:p>");
+        let next_text = rest.find("<a:t");
+        if next_paragraph.is_some_and(|paragraph| next_text.map_or(true, |next| paragraph < next)) {
+            text.push('\n');
+        }
+    }
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+fn decode_presentation_xml(value: &str) -> String {
+    value.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'")
 }
 
 #[tauri::command]
@@ -5268,13 +5320,6 @@ fn repairs_fragmented_pdf_spacing(source: &str, formatted: &str) -> bool {
     original_fragments > 0 && formatted_fragments.saturating_mul(3) <= original_fragments
 }
 
-fn installed_course_formatter_fallback(app: &tauri::AppHandle, active_model: &str) -> Option<String> {
-    let candidate = app.path().app_data_dir().ok()?.join("models").join(DEFAULT_AI_MODEL_NAME);
-    let is_active = candidate.to_string_lossy().eq_ignore_ascii_case(active_model);
-    let is_complete = fs::metadata(&candidate).ok()?.len() >= DEFAULT_AI_MODEL_MINIMUM_BYTES;
-    (!is_active && is_complete).then(|| candidate.to_string_lossy().to_string())
-}
-
 fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
     let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
     let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
@@ -5303,8 +5348,18 @@ pub fn add_course_calendar_source(database: State<'_, Database>, input: AddCours
 
 #[tauri::command]
 pub fn remove_course_calendar_source(database: State<'_, Database>, id: String) -> CommandResult<()> {
-    let connection = database.open()?;
-    connection.execute("DELETE FROM course_calendar_sources WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    let mut connection = database.open()?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let class_id = transaction.query_row("SELECT class_id FROM course_calendar_sources WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM course_calendar_sources WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    if let Some(class_id) = class_id {
+        let remaining: i64 = transaction.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if remaining == 0 {
+            transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+            transaction.execute("DELETE FROM course_calendar_plans WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -5339,16 +5394,10 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
             if !has_fragmented_pdf_spacing(&source.content_plain) { continue; }
             let original = source.content_plain.clone();
             let first_try = refine_document_text_blocking(app_for_ai.clone(), resolved.clone(), original.clone(), "syllabus".into())?;
-            let formatted = if repairs_fragmented_pdf_spacing(&original, &first_try) {
-                first_try
-            } else if let Some(fallback_model) = installed_course_formatter_fallback(&app_for_ai, &resolved) {
-                let retry = refine_document_text_blocking(app_for_ai.clone(), fallback_model, original.clone(), "syllabus".into())?;
-                if repairs_fragmented_pdf_spacing(&original, &retry) { retry } else {
-                    return Err(format!("SoFlo's local AI could not repair the extracted text in {}. The source was left unchanged.", source.title));
-                }
-            } else {
-                return Err(format!("SoFlo's local AI could not repair the extracted text in {}. The source was left unchanged.", source.title));
-            };
+            if !repairs_fragmented_pdf_spacing(&original, &first_try) {
+                return Err(format!("Your selected General AI model could not repair the extracted text in {}. The source was left unchanged.", source.title));
+            }
+            let formatted = first_try;
             source.content_plain = formatted.trim().to_string();
             connection.execute("UPDATE course_calendar_sources SET content_plain=?1 WHERE id=?2", params![source.content_plain, source.id]).map_err(|error| error.to_string())?;
         }
@@ -8164,7 +8213,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        has_fragmented_pdf_spacing, repairs_fragmented_pdf_spacing,
+        has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
@@ -8193,6 +8242,12 @@ mod tests {
         let fragmented = "Ma th em at ics in ter val no ta tion re qui res care ful read ing of each ex am ple be fore prac tic ing";
         assert!(repairs_fragmented_pdf_spacing(fragmented, "Mathematics interval notation requires careful reading of each example before practicing."));
         assert!(!repairs_fragmented_pdf_spacing(fragmented, fragmented));
+    }
+
+    #[test]
+    fn reads_powerpoint_slide_text_without_splitting_a_single_paragraph_run() {
+        let slide = r#"<p:sld><a:p><a:r><a:t>Exam</a:t></a:r><a:r><a:t> Review</a:t></a:r></a:p><a:p><a:r><a:t>Bring notes &amp; calculator</a:t></a:r></a:p></p:sld>"#;
+        assert_eq!(powerpoint_slide_text(slide), "Exam Review\nBring notes & calculator");
     }
 
     #[test]

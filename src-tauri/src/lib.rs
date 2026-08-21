@@ -53,6 +53,7 @@ pub fn run() {
             commands::import_pdf_text,
             commands::import_syllabus_pdf_text,
             commands::import_word_text,
+            commands::import_powerpoint_text,
             commands::import_google_doc,
             commands::check_for_app_update,
             commands::download_and_launch_app_update,

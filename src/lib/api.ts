@@ -118,6 +118,7 @@ export const api = {
   importPdfText: (path: string) => call<string>('import_pdf_text', { path }),
   importSyllabusPdfText: (path: string) => call<string>('import_syllabus_pdf_text', { path }),
   importWordText: (path: string) => call<string>('import_word_text', { path }),
+  importPowerPointText: (path: string) => call<string>('import_powerpoint_text', { path }),
   importGoogleDoc: (url: string) => call<string>('import_google_doc', { url }),
   checkForAppUpdate: () => call<{ version: string; downloadUrl: string } | null>('check_for_app_update'),
   downloadAndLaunchAppUpdate: (version: string, downloadUrl: string) => call<void>('download_and_launch_app_update', { version, downloadUrl }),
