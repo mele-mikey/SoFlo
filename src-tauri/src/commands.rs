@@ -5406,6 +5406,41 @@ fn course_calendar_plan_from_response(output: &str) -> Option<CourseCalendarAiPl
         .and_then(|json| serde_json::from_str::<CourseCalendarAiPlan>(&json).ok())
 }
 
+fn explicit_course_dates(text: &str) -> Vec<(String, String)> {
+    text.split(|character: char| !(character.is_ascii_digit() || character == '/' || character == '-'))
+        .filter_map(|token| {
+            let separator = if token.contains('/') { '/' } else if token.contains('-') { '-' } else { return None };
+            let values = token.split(separator).collect::<Vec<_>>();
+            if values.len() != 3 || values.iter().any(|value| value.is_empty()) { return None; }
+            let first = values[0].parse::<i32>().ok()?; let second = values[1].parse::<u32>().ok()?; let third = values[2].parse::<u32>().ok()?;
+            let (year, month, day) = if values[0].len() == 4 { (first, second, third) } else { (values[2].parse::<i32>().ok()?, first as u32, second) };
+            chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| (date.to_string(), token.to_string()))
+        })
+        .collect()
+}
+
+fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) -> CourseCalendarAiPlan {
+    let mut seen = HashSet::new(); let mut items = Vec::new();
+    for source in sources {
+        for line in source.content_plain.replace('\u{000c}', "\n").lines() {
+            let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() { continue; }
+            for (due_date, raw_date) in explicit_course_dates(&text) {
+                let before = text.split_once(&raw_date).map(|(value, _)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
+                let after = text.split_once(&raw_date).map(|(_, value)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
+                let title = if before.chars().any(|character| character.is_alphabetic()) { before.chars().take(180).collect::<String>() } else if after.chars().any(|character| character.is_alphabetic()) { after.chars().take(180).collect::<String>() } else { format!("Dated course work from {}", source.title) };
+                let key = format!("{}|{}|{}", source.id, due_date, title.to_ascii_lowercase());
+                if !seen.insert(key) { continue; }
+                let urgency = if due_date.as_str() < today { "later" } else { "upcoming" }.to_string();
+                items.push(CourseCalendarAiItem { source_title: source.title.clone(), title, due_date, description: text.chars().take(1200).collect(), urgency, source_excerpt: text.chars().take(1200).collect() });
+            }
+        }
+    }
+    items.sort_by(|left, right| left.due_date.cmp(&right.due_date)); items.truncate(250);
+    let game_plan = items.iter().filter(|item| item.due_date.as_str() >= today).take(8).map(|item| CourseCalendarAiPlanStep { action: format!("Start {} before {}.", item.title, item.due_date), context: format!("Explicitly dated in {}.", item.source_title) }).collect();
+    CourseCalendarAiPlan { items, game_plan }
+}
+
 #[tauri::command]
 pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, Database>, class_id: String, model_path: String) -> CommandResult<CourseCalendarDetail> {
     let database = database.inner().clone(); let app_for_ai = app.clone();
@@ -5438,17 +5473,16 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
                 planner_sources.push(source.clone());
             }
         }
-        if planner_sources.is_empty() { return Err("Course Calendar could not read a usable text version of these documents. Try adding a clearer PDF, Word document, or PowerPoint.".into()); }
+        if planner_sources.is_empty() { planner_sources = sources.clone(); }
         let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(6_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
         let today = chrono::Local::now().date_naive().to_string();
         emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
         let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Never infer a date. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"why it comes first\"}}]}}. Return at most 60 items and 8 game-plan steps. Omit uncertain dates and do not invent work.\n\n{source_text}");
         let system = "You extract course calendars faithfully. Never invent dates. Output one valid JSON object only.";
-        let raw = local_chat_json_object(&client, port, system, &prompt, 1400)?;
-        let plan = course_calendar_plan_from_response(&raw).or_else(|| {
+        let plan = local_chat_json_object(&client, port, system, &prompt, 1400).ok().and_then(|raw| course_calendar_plan_from_response(&raw)).or_else(|| {
             let retry = format!("Return only the requested JSON object now, with empty arrays if there are no supported dated items.\n\n{prompt}");
             local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
-        }).ok_or_else(|| "SoFlo could not read a valid calendar plan from the selected General AI model.".to_string())?;
+        }).unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
         emit_ai_progress(&app_for_ai, 88, "Saving your course calendar");
         let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
