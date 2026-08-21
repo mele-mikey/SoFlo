@@ -514,6 +514,17 @@ fn uninstaller_executable_argument() -> CommandResult<PathBuf> {
 #[tauri::command]
 pub fn run_installer_worker() -> CommandResult<()> {
     let setup = setup_executable_argument()?;
+    // The branded setup UI is a separate executable, so it can close the
+    // installed app before NSIS replaces it. Without this, Windows leaves the
+    // old executable locked while the installer still updates its registry
+    // version, creating a false successful update.
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill.exe")
+            .args(["/IM", "SoFlo.exe", "/T", "/F"])
+            .status();
+        thread::sleep(Duration::from_millis(700));
+    }
     let status = Command::new(setup)
         .arg("--perform-silent-install=1")
         .status()
