@@ -5441,6 +5441,13 @@ fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) 
     CourseCalendarAiPlan { items, game_plan }
 }
 
+fn course_calendar_plan_uses_source_dates(plan: &CourseCalendarAiPlan, sources: &[CourseCalendarSource]) -> bool {
+    plan.items.iter().all(|item| {
+        let Some(source) = sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())) else { return false; };
+        explicit_course_dates(&source.content_plain).into_iter().any(|(date, _)| date == item.due_date.chars().take(10).collect::<String>())
+    })
+}
+
 #[tauri::command]
 pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, Database>, class_id: String, model_path: String) -> CommandResult<CourseCalendarDetail> {
     let database = database.inner().clone(); let app_for_ai = app.clone();
@@ -5474,7 +5481,7 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
                 local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
             })
         })();
-        let plan = ai_plan.unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
+        let plan = ai_plan.filter(|plan| course_calendar_plan_uses_source_dates(plan, &planner_sources)).unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
         emit_ai_progress(&app_for_ai, 88, "Saving your course calendar");
         let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
@@ -8283,14 +8290,14 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
+        course_calendar_plan_uses_source_dates, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
         usable_lecture_notes,
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
-        StudyWebSemanticPlan, StudyWebSourceCard,
+        StudyWebSemanticPlan, StudyWebSourceCard, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
     };
 
     #[test]
@@ -8319,6 +8326,16 @@ mod tests {
         let dates = explicit_course_dates("Exam 1: Due 09/20/2026. Final: 2026-12-09. Chapter 1 has no date.");
         assert_eq!(dates, vec![("2026-09-20".into(), "09/20/2026".into()), ("2026-12-09".into(), "2026-12-09".into())]);
     }
+
+    #[test]
+    fn rejects_calendar_dates_the_source_does_not_contain() {
+        let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Exam 1: 09/20/2026".into(), source_path: None, created_at: String::new() }];
+        let valid = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-09-20".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
+        let fabricated = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-08-21".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
+        assert!(course_calendar_plan_uses_source_dates(&valid, &sources));
+        assert!(!course_calendar_plan_uses_source_dates(&fabricated, &sources));
+    }
+
 
     #[test]
     fn reads_powerpoint_slide_text_without_splitting_a_single_paragraph_run() {
