@@ -200,13 +200,13 @@ function App() {
   }, [activeLecture?.id])
   const refreshWordAiModelStatus = useCallback(async () => {
     try {
-      const [generalReady, writingReady, voiceReady] = await Promise.all([api.generalAiModelReady(), api.wordAiModelReady(), api.voiceAiModelReady()])
+      const [generalReady, voiceReady] = await Promise.all([api.generalAiModelReady(), api.voiceAiModelReady()])
       setGeneralAiModelReady(generalReady)
-      setWordAiModelReady(writingReady)
+      setWordAiModelReady(generalReady)
       setVoiceAiModelReady(voiceReady)
     } catch { setGeneralAiModelReady(false); setWordAiModelReady(false); setVoiceAiModelReady(false) } finally { setWordAiModelStatusLoaded(true) }
   }, [])
-  useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, library?.settings.aiWritingModelPath, library?.settings.aiVoiceModelPath, refreshWordAiModelStatus])
+  useEffect(() => { setWordAiModelStatusLoaded(false); void refreshWordAiModelStatus() }, [library?.settings.aiModelPath, library?.settings.aiVoiceModelPath, refreshWordAiModelStatus])
   useEffect(() => {
     if (aiLaunchPromptEvaluated.current || !library || !wordAiModelStatusLoaded) return
     aiLaunchPromptEvaluated.current = true
@@ -445,7 +445,7 @@ function App() {
     const aiModelPath = await ensureAiModel()
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to review grammar.')
     setAiProgress({ progress: 3, message: 'Preparing your grammar review' })
-    try { return await api.reviewGrammarText(quick ? (library?.settings.aiWritingModelPath || '') : aiModelPath, text, quick, paperContext) } finally { setAiProgress(null) }
+    try { return await api.reviewGrammarText(aiModelPath, text, quick, paperContext) } finally { setAiProgress(null) }
   }
   const researchAndGrade = async (text: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
@@ -456,22 +456,12 @@ function App() {
   const defineWord = async (word: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to look up a word.')
-    let modelPath = library?.settings.aiWritingModelPath || ''
-    if (!await api.wordAiModelReady()) {
-      setAiDownloadProgress(0)
-      try { await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
-    }
-    return api.defineWord(modelPath, word, paperContext)
+    return api.defineWord(aiModelPath, word, paperContext)
   }
   const aiThesaurus = async (word: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to use the thesaurus.')
-    let modelPath = library?.settings.aiWritingModelPath || ''
-    if (!await api.wordAiModelReady()) {
-      setAiDownloadProgress(0)
-      try { await api.downloadDefaultAiModel(); setWordAiModelReady(true) } catch (error) { setAiDownloadProgress(null); throw error }
-    }
-    return api.aiThesaurus(modelPath, word, paperContext)
+    return api.aiThesaurus(aiModelPath, word, paperContext)
   }
   const generateTeachItBackQuestion = async (front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => {
     const aiModelPath = await ensureAiModel()
@@ -491,7 +481,7 @@ function App() {
     setAiWorking(true)
     setAiProgress({ progress: 4, message: mode === 'writing' ? 'Loading your local writing and general AI.' : 'Loading your local study AI.' })
     try {
-      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiWritingModelPath, mode)
+      await api.prepareAiForSession(library.settings.aiModelPath, library.settings.aiModelPath, mode)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'SoFlo could not prepare local AI for this session.', 'error')
     } finally {

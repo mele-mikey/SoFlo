@@ -1248,13 +1248,8 @@ fn review_grammar_text_blocking(
     }
     let paper_context = normalized_paper_context(&paper_context);
     emit_ai_progress(&app, 12, "Reading your writing");
-    let server_port = if quick {
-        let writing_model_path = resolve_word_ai_model_path(&app, &model_path)?;
-        ensure_word_ai_server(&writing_model_path, &app)?
-    } else {
-        let general_model_path = resolve_ai_model_path(&app, &model_path)?;
-        ensure_ai_server(&general_model_path, &app)?
-    };
+    let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+    let server_port = ensure_ai_server(&general_model_path, &app)?;
     emit_ai_progress(&app, 45, "Checking spelling and grammar");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(if quick { 24 } else { 70 }))
@@ -1316,11 +1311,7 @@ fn review_grammar_text_blocking(
             }
         }
     }
-    if quick {
-        touch_word_ai_server();
-    } else {
-        touch_ai_server();
-    }
+    touch_ai_server();
     emit_ai_progress(&app, 90, "Preparing suggestions");
     let output = serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".into());
     emit_ai_progress(&app, 100, "Grammar review ready");
@@ -1628,8 +1619,8 @@ fn define_word_blocking(
         return Err("Select one ordinary word to look it up.".into());
     }
     let paper_context = normalized_paper_context(&paper_context);
-    let word_model_path = resolve_word_ai_model_path(&app, &model_path)?;
-    let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
+    let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+    let word_ai_port = ensure_ai_server(&general_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
@@ -1659,7 +1650,7 @@ fn define_word_blocking(
         .and_then(|value| value.get("content"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    touch_word_ai_server();
+    touch_ai_server();
     json_object_from_response(output)
         .ok_or_else(|| "SoFlo could not prepare a word reference.".into())
 }
@@ -1689,8 +1680,8 @@ fn ai_thesaurus_blocking(
         return Err("Enter a word or short phrase to explore.".into());
     }
     let paper_context = normalized_paper_context(&paper_context);
-    let word_model_path = resolve_word_ai_model_path(&app, &model_path)?;
-    let word_ai_port = ensure_word_ai_server(&word_model_path, &app)?;
+    let general_model_path = resolve_ai_model_path(&app, &model_path)?;
+    let word_ai_port = ensure_ai_server(&general_model_path, &app)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
@@ -1733,7 +1724,7 @@ fn ai_thesaurus_blocking(
     };
     let instruction = "You are a precise English thesaurus for college writing. Return only one complete valid JSON object with exactly these keys: query, close, related, broad. Each value must be an array of 3 to 6 concise alternatives. close means nearly interchangeable in the same context; related means useful formal or academic alternatives with a slightly different shade; broad means more distant but relevant words or phrases. Preserve the part of speech and meaning of the query. Use single words or short phrases, never definitions, commentary, Markdown, duplicates, or the queried term itself. Do not invent unusual words.";
     let output = request(instruction, 700)?;
-    touch_word_ai_server();
+    touch_ai_server();
     if let Some(object) = thesaurus_json_from_response(&output, query) {
         return Ok(object);
     }
@@ -2667,34 +2658,19 @@ pub async fn prepare_ai_for_session(
             return Err("Choose writing or study AI for this session.".into());
         }
 
-        if mode == "writing" {
-            WORD_AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
-            let writing_model = match resolve_word_ai_model_path(&app, &writing_model_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
-                    return Err(error);
-                }
-            };
-            emit_ai_progress(&app, 48, "Preparing your writing AI");
-            if let Err(error) = ensure_word_ai_server(&writing_model, &app) {
-                WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
-                return Err(error);
-            }
-        } else {
-            AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
-            let general_model = match resolve_ai_model_path(&app, &general_model_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
-                    return Err(error);
-                }
-            };
-            emit_ai_progress(&app, 8, "Preparing your local study AI");
-            if let Err(error) = ensure_ai_server(&general_model, &app) {
+        let _ = writing_model_path;
+        AI_SERVER_SESSION_PINNED.store(true, Ordering::Relaxed);
+        let general_model = match resolve_ai_model_path(&app, &general_model_path) {
+            Ok(path) => path,
+            Err(error) => {
                 AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
                 return Err(error);
             }
+        };
+        emit_ai_progress(&app, if mode == "writing" { 48 } else { 8 }, "Preparing your local AI");
+        if let Err(error) = ensure_ai_server(&general_model, &app) {
+            AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
+            return Err(error);
         }
 
         emit_ai_progress(&app, 100, "Your AI is ready for this session");
@@ -2799,32 +2775,22 @@ pub async fn download_default_ai_model(
                 configured.join(DEFAULT_AI_MODEL_NAME)
             }
         };
-        let word_destination = download_app
-            .path()
-            .app_data_dir()
-            .map_err(|error| error.to_string())?
-            .join("models")
-            .join(WORD_AI_MODEL_NAME);
         let voice_destination = download_app
             .path()
             .app_data_dir()
             .map_err(|error| error.to_string())?
             .join("models")
             .join(VOICE_MEDIUM_MODEL_NAME);
-        let word = managed_ai_model("writing", "medium")?;
         let voice = managed_ai_model("voice", "medium")?;
-        if use_existing_custom_model || destination.is_file() {
-            download_ai_model_file(&download_app, word.url, &word_destination, 0, 58, word.minimum_bytes)?;
-        } else {
-            download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 45, None)?;
-            download_ai_model_file(&download_app, word.url, &word_destination, 45, 72, word.minimum_bytes)?;
+        if !(use_existing_custom_model || destination.is_file()) {
+            download_ai_model_file(&download_app, MAIN_MODEL_URL, &destination, 0, 70, None)?;
         }
-        download_ai_model_file(&download_app, voice.url, &voice_destination, 72, 100, voice.minimum_bytes)?;
+        download_ai_model_file(&download_app, voice.url, &voice_destination, 70, 100, voice.minimum_bytes)?;
         let _ = download_app.emit("ai-download-progress", 100u8);
         let _ = download_app.emit("ai-download-finished", ());
         Ok(DefaultAiModelPaths {
             general_path: destination.to_string_lossy().to_string(),
-            writing_path: word_destination.to_string_lossy().to_string(),
+            writing_path: destination.to_string_lossy().to_string(),
             voice_path: voice_destination.to_string_lossy().to_string(),
         })
     }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
@@ -5331,7 +5297,13 @@ fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> Comma
 
 #[tauri::command]
 pub fn get_course_calendar(database: State<'_, Database>, class_id: String) -> CommandResult<CourseCalendarDetail> {
-    read_course_calendar_detail(&database.open()?, &class_id)
+    let connection = database.open()?;
+    let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if source_count == 0 {
+        connection.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM course_calendar_plans WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+    }
+    read_course_calendar_detail(&connection, &class_id)
 }
 
 #[tauri::command]
