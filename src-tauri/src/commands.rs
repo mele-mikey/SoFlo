@@ -5451,23 +5451,9 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         let settings = get_settings(&connection, None)?;
         if !settings.ai_enabled { return Err("Enable General AI to build the Course Calendar.".into()); }
         emit_ai_progress(&app_for_ai, 5, "Preparing Course Calendar");
-        let resolved = resolve_ai_model_path(&app_for_ai, &model_path)?;
-        let port = ensure_ai_server(&resolved, &app_for_ai)?;
         emit_ai_progress(&app_for_ai, 18, "Reading saved course documents");
-        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-        let mut sources = detail.sources.clone();
+        let sources = detail.sources.clone();
         let mut planner_sources = Vec::new();
-        for source in &mut sources {
-            if !has_fragmented_pdf_spacing(&source.content_plain) { continue; }
-            let original = source.content_plain.clone();
-            let first_try = refine_document_text_blocking(app_for_ai.clone(), resolved.clone(), original.clone(), "syllabus".into());
-            if let Ok(formatted) = first_try {
-                if repairs_fragmented_pdf_spacing(&original, &formatted) {
-                    source.content_plain = formatted.trim().to_string();
-                    connection.execute("UPDATE course_calendar_sources SET content_plain=?1 WHERE id=?2", params![source.content_plain, source.id]).map_err(|error| error.to_string())?;
-                }
-            }
-        }
         for source in &sources {
             if !has_fragmented_pdf_spacing(&source.content_plain) {
                 planner_sources.push(source.clone());
@@ -5479,10 +5465,16 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
         emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
         let prompt = format!("TODAY: {today}\n\nExtract only concrete course deadlines, readings, exams, meetings, assignments, and milestones from the documents. Never infer a date. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"why it comes first\"}}]}}. Return at most 60 items and 8 game-plan steps. Omit uncertain dates and do not invent work.\n\n{source_text}");
         let system = "You extract course calendars faithfully. Never invent dates. Output one valid JSON object only.";
-        let plan = local_chat_json_object(&client, port, system, &prompt, 1400).ok().and_then(|raw| course_calendar_plan_from_response(&raw)).or_else(|| {
-            let retry = format!("Return only the requested JSON object now, with empty arrays if there are no supported dated items.\n\n{prompt}");
-            local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
-        }).unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
+        let ai_plan = (|| {
+            let resolved = resolve_ai_model_path(&app_for_ai, &model_path).ok()?;
+            let port = ensure_ai_server(&resolved, &app_for_ai).ok()?;
+            let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build().ok()?;
+            local_chat_json_object(&client, port, system, &prompt, 1400).ok().and_then(|raw| course_calendar_plan_from_response(&raw)).or_else(|| {
+                let retry = format!("Return only the requested JSON object now, with empty arrays if there are no supported dated items.\n\n{prompt}");
+                local_chat_json_object(&client, port, system, &retry, 1400).ok().and_then(|output| course_calendar_plan_from_response(&output))
+            })
+        })();
+        let plan = ai_plan.unwrap_or_else(|| fallback_course_calendar_plan(&planner_sources, &today));
         emit_ai_progress(&app_for_ai, 88, "Saving your course calendar");
         let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
@@ -8291,7 +8283,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
+        explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
@@ -8320,6 +8312,12 @@ mod tests {
         let fragmented = "Ma th em at ics in ter val no ta tion re qui res care ful read ing of each ex am ple be fore prac tic ing";
         assert!(repairs_fragmented_pdf_spacing(fragmented, "Mathematics interval notation requires careful reading of each example before practicing."));
         assert!(!repairs_fragmented_pdf_spacing(fragmented, fragmented));
+    }
+
+    #[test]
+    fn reads_explicit_course_dates_without_inventing_dates() {
+        let dates = explicit_course_dates("Exam 1: Due 09/20/2026. Final: 2026-12-09. Chapter 1 has no date.");
+        assert_eq!(dates, vec![("2026-09-20".into(), "09/20/2026".into()), ("2026-12-09".into(), "2026-12-09".into())]);
     }
 
     #[test]
