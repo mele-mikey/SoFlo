@@ -5436,13 +5436,22 @@ fn course_calendar_plan_from_response(output: &str) -> Option<CourseCalendarAiPl
 }
 
 fn explicit_course_dates(text: &str) -> Vec<(String, String)> {
+    explicit_course_dates_with_year(text, source_calendar_year(text))
+}
+
+fn source_calendar_year(text: &str) -> Option<i32> {
+    text.split(|character: char| !character.is_ascii_digit())
+        .find_map(|value| value.parse::<i32>().ok().filter(|year| (2020..=2100).contains(year)))
+}
+
+fn explicit_course_dates_with_year(text: &str, source_year: Option<i32>) -> Vec<(String, String)> {
     text.split(|character: char| !(character.is_ascii_digit() || character == '/' || character == '-'))
         .filter_map(|token| {
             let separator = if token.contains('/') { '/' } else if token.contains('-') { '-' } else { return None };
             let values = token.split(separator).collect::<Vec<_>>();
-            if values.len() != 3 || values.iter().any(|value| value.is_empty()) { return None; }
-            let first = values[0].parse::<i32>().ok()?; let second = values[1].parse::<u32>().ok()?; let third = values[2].parse::<u32>().ok()?;
-            let (year, month, day) = if values[0].len() == 4 { (first, second, third) } else { (values[2].parse::<i32>().ok()?, first as u32, second) };
+            if !(values.len() == 2 || values.len() == 3) || values.iter().any(|value| value.is_empty()) { return None; }
+            let first = values[0].parse::<i32>().ok()?; let second = values[1].parse::<u32>().ok()?;
+            let (year, month, day) = if values.len() == 2 { (source_year?, first as u32, second) } else { let third = values[2].parse::<u32>().ok()?; if values[0].len() == 4 { (first, second, third) } else { (values[2].parse::<i32>().ok()?, first as u32, second) } };
             chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| (date.to_string(), token.to_string()))
         })
         .collect()
@@ -5451,10 +5460,11 @@ fn explicit_course_dates(text: &str) -> Vec<(String, String)> {
 fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) -> CourseCalendarAiPlan {
     let mut seen = HashSet::new(); let mut items = Vec::new();
     for source in sources {
+        let source_year = source_calendar_year(&source.content_plain);
         for line in source.content_plain.replace('\u{000c}', "\n").lines() {
             let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
             if text.is_empty() { continue; }
-            for (due_date, raw_date) in explicit_course_dates(&text) {
+            for (due_date, raw_date) in explicit_course_dates_with_year(&text, source_year) {
                 let before = text.split_once(&raw_date).map(|(value, _)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
                 let after = text.split_once(&raw_date).map(|(_, value)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
                 let title = if before.chars().any(|character| character.is_alphabetic()) { before.chars().take(180).collect::<String>() } else if after.chars().any(|character| character.is_alphabetic()) { after.chars().take(180).collect::<String>() } else { format!("Dated course work from {}", source.title) };
@@ -5496,11 +5506,11 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
             }
         }
         if planner_sources.is_empty() { planner_sources = sources.clone(); }
-        let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(6_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
+        let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(25_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
         let today = chrono::Local::now().date_naive().to_string();
         emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
-        let prompt = format!("Extract concrete course work from the documents. A calendar item is allowed only when its exact date appears in its matching source document; never use today's date or infer a date. Put undated readings, study material, and assignments only in game_plan as clear steps for the student, never in items. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"source-backed reason it comes first, without a made-up date\"}}]}}. Return at most 60 items and 8 game-plan steps.\n\n{source_text}");
-        let system = "You extract course calendars faithfully. Dates must be copied from the source. Undated work belongs only in the game plan. Output one valid JSON object only.";
+        let prompt = format!("Extract concrete dated course events from the documents: assignment deadlines, exams, scheduled class activities, and explicitly dated course work. A calendar item is allowed only when its date appears in its matching source document. If a syllabus gives a term year (for example, Fall 2026), you may apply that source-provided year to a short schedule date such as 9/1; never use today's date or guess a year. Put undated readings, study material, and assignments only in game_plan as clear steps for the student, never in items. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"source-backed reason it comes first, without a made-up date\"}}]}}. Return at most 60 items and 8 game-plan steps.\n\n{source_text}");
+        let system = "You extract course calendars faithfully. Dates must be copied from the source; a source-stated term year may complete a short numeric schedule date. Undated work belongs only in the game plan. Output one valid JSON object only.";
         let ai_plan = (|| {
             let resolved = resolve_ai_model_path(&app_for_ai, &model_path).ok()?;
             let port = ensure_ai_server(&resolved, &app_for_ai).ok()?;
