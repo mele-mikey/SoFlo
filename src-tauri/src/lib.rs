@@ -129,6 +129,7 @@ pub fn run() {
             commands::save_course_calendar_manual_item,
             commands::archive_course_calendar_manual_item,
             commands::refresh_course_calendar,
+            commands::ask_study_tutor,
             commands::list_flashcard_sets,
             commands::create_flashcard_set,
             commands::get_flashcard_set,

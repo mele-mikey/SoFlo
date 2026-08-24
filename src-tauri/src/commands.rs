@@ -1052,7 +1052,12 @@ pub async fn generate_teach_it_back_question(
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-        let system = "You create one focused teach-back question from a two-sided flashcard. The front is normally the term or prompt and the back is normally its meaning or explanation. Use both sides as private context, but build the question around the side the student is shown. Do not reveal the hidden answer. EASY asks only for the core meaning or general definition. HARD asks for the meaning plus an important implication, connection, mechanism, example, or extra step supported by the card; never demand facts absent from the card. Return only one valid JSON object with exactly these string keys: question, target, hint. target is a short private description of what a strong answer should cover. hint is one short optional nudge that does not give away the answer.";
+        let math_mode = looks_like_math_material(&format!("{front}\n{back}"));
+        let system = if math_mode {
+            "You create one focused, solvable college-math practice question from a two-sided flashcard. Use the card's exact concept, method, and notation as private context. Make a fresh numerical or algebraic variation only when the card supports it; include every value needed to solve it and keep the result mathematically valid. The student must be able to show work and reach one clear answer. Do not reveal the answer in question or hint. target is the private correct final result plus the key method. hint is exactly one first-step nudge, never the final answer. Return only one valid JSON object with exactly these string keys: question, target, hint. Use readable Unicode math; never use Markdown or LaTex delimiters."
+        } else {
+            "You create one focused teach-back question from a two-sided flashcard. The front is normally the term or prompt and the back is normally its meaning or explanation. Use both sides as private context, but build the question around the side the student is shown. Do not reveal the hidden answer. EASY asks only for the core meaning or general definition. HARD asks for the meaning plus an important implication, connection, mechanism, example, or extra step supported by the card; never demand facts absent from the card. Return only one valid JSON object with exactly these string keys: question, target, hint. target is a short private description of what a strong answer should cover. hint is one short optional nudge that does not give away the answer."
+        };
         let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nSIDE SHOWN TO STUDENT: {}\nDIFFICULTY: {}\nCreate the question now.", front, back, shown_side, difficulty);
         let output = local_chat_text(&client, port, system, &prompt, 520)?;
         touch_ai_server();
@@ -1089,7 +1094,12 @@ pub async fn grade_teach_it_back_answer(
             .timeout(Duration::from_secs(65))
             .build()
             .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-        let system = "You grade a student's teach-back explanation against a flashcard. Reward correct meaning expressed in the student's own words; do not demand exact wording. Be encouraging and specific. A mostly correct answer scores 60 or above. A vague, materially incorrect, or empty answer scores below 60. Return only one valid JSON object with exactly these keys: score (integer 0-100), verdict (one of strong, good, developing, review), feedback (two concise sentences), understood (array of up to 3 short strings), missed (array of up to 3 short strings).";
+        let math_mode = looks_like_math_material(&format!("{front}\n{back}\n{question}\n{target}"));
+        let system = if math_mode {
+            "You grade a student's worked math response against the flashcard and question. Accept algebraically equivalent answers and harmless notation differences. Reward a correct final result and valid method; point out the first substantive error rather than dumping a full solution. A mostly correct result or method scores 60 or above. Return only one valid JSON object with exactly these keys: score (integer 0-100), verdict (one of strong, good, developing, review), feedback (two concise sentences), understood (array of up to 3 short strings), missed (array of up to 3 short strings)."
+        } else {
+            "You grade a student's teach-back explanation against a flashcard. Reward correct meaning expressed in the student's own words; do not demand exact wording. Be encouraging and specific. A mostly correct answer scores 60 or above. A vague, materially incorrect, or empty answer scores below 60. Return only one valid JSON object with exactly these keys: score (integer 0-100), verdict (one of strong, good, developing, review), feedback (two concise sentences), understood (array of up to 3 short strings), missed (array of up to 3 short strings)."
+        };
         let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nQUESTION:\n{}\n\nSTRONG ANSWER TARGET:\n{}\n\nSTUDENT EXPLANATION:\n{}\n\nGrade the explanation for meaning and understanding.", front.trim(), back.trim(), question.trim(), target.trim(), answer.trim());
         let output = local_chat_text(&client, port, system, &prompt, 720)?;
         touch_ai_server();
@@ -5274,6 +5284,35 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
     fs::read_to_string(&source)
         .map(|content| content.trim_start_matches('\u{feff}').to_string())
         .map_err(|_| "SoFlo could not read that text file.".into())
+}
+
+#[tauri::command]
+pub async fn ask_study_tutor(
+    app: tauri::AppHandle,
+    model_path: String,
+    front: String,
+    back: String,
+    question: String,
+    student_work: String,
+    message: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if message.trim().is_empty() { return Err("Ask your tutor a question first.".into()); }
+        let resolved = resolve_ai_model_path(&app, &model_path)?;
+        emit_ai_progress(&app, 18, "Preparing study help");
+        let port = ensure_ai_server(&resolved, &app)?;
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(75)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let math_mode = looks_like_math_material(&format!("{front}\n{back}\n{question}"));
+        let system = if math_mode {
+            "You are SoFlo's patient math tutor. Help the student solve the active problem without silently doing it for them. Explain one useful next step at a time, check their work, and use readable Unicode math. Do not give the final answer unless they explicitly ask for it. If they request another or changed problem, make one equivalent solvable variation with all numbers provided and do not include its answer. Stay grounded in the active flashcard concept."
+        } else {
+            "You are SoFlo's patient study tutor. Help the student understand the active flashcard with concise, accurate explanations, examples, and questions. Guide them instead of simply giving away an answer unless they explicitly ask for it. Stay grounded in the active flashcard."
+        };
+        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nACTIVE QUESTION:\n{}\n\nSTUDENT WORK SO FAR:\n{}\n\nSTUDENT'S MESSAGE:\n{}", front.trim(), back.trim(), question.trim(), student_work.trim(), message.trim());
+        let output = local_chat_text(&client, port, system, &prompt, 900)?;
+        touch_ai_server();
+        Ok(output.trim().to_string())
+    }).await.map_err(|_| "SoFlo's tutor task stopped unexpectedly.".to_string())?
 }
 
 fn local_chat_json_object(

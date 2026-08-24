@@ -1,4 +1,4 @@
-import { BrainCircuit, Check, ChevronLeft, ChevronRight, Clock3, Lightbulb, LoaderCircle, RotateCcw, Shuffle, SkipForward, Sparkles, Star, X } from 'lucide-react'
+import { BrainCircuit, Check, ChevronLeft, ChevronRight, Clock3, Lightbulb, LoaderCircle, MessageCircle, RotateCcw, Send, Shuffle, SkipForward, Sparkles, Star, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import type { Flashcard, FlashcardSetDetail } from '../../lib/types'
@@ -11,6 +11,7 @@ interface StudyViewProps {
   aiEnabled: boolean
   onGenerateTeachQuestion: (front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => Promise<string>
   onGradeTeachAnswer: (front: string, back: string, question: string, target: string, answer: string) => Promise<string>
+  onAskStudyTutor: (front: string, back: string, question: string, studentWork: string, message: string) => Promise<string>
   onBack: () => void
   onModeChange: (mode: StudyViewProps['mode']) => void
 }
@@ -19,6 +20,8 @@ type RecordResponse = (cardId: string, isCorrect: boolean, questionType: string,
 
 type TeachQuestion = { question: string; target: string; hint: string }
 type TeachGrade = { score: number; verdict: 'strong' | 'good' | 'developing' | 'review'; feedback: string; understood: string[]; missed: string[] }
+const isMathText = (value: string) => /[=<>√²³π±×÷]|\b(?:solve|equation|function|factor|simplify|derivative|integral|graph|slope|interval)\b/i.test(value)
+function MathText({ children }: { children: string }) { return <span className={isMathText(children) ? 'math-study-text' : ''}>{children}</span> }
 
 function parseTeachQuestion(raw: string): TeachQuestion | null {
   try {
@@ -41,7 +44,7 @@ function parseTeachGrade(raw: string): TeachGrade | null {
   } catch { return null }
 }
 
-export function StudyView({ sets, mode, cardIds, aiEnabled, onGenerateTeachQuestion, onGradeTeachAnswer, onBack, onModeChange }: StudyViewProps) {
+export function StudyView({ sets, mode, cardIds, aiEnabled, onGenerateTeachQuestion, onGradeTeachAnswer, onAskStudyTutor, onBack, onModeChange }: StudyViewProps) {
   const sessionRef = useRef<Record<string, string>>({})
   const set = sets[0]
   const cards = useMemo(
@@ -100,7 +103,7 @@ export function StudyView({ sets, mode, cardIds, aiEnabled, onGenerateTeachQuest
     {mode === 'learn' && <Learn cards={cards} onRecord={record} />}
     {mode === 'test' && <Test setId={set?.id ?? ''} cards={cards} onRecord={record} />}
     {mode === 'match' && <Match setId={set?.id ?? ''} cards={cards} onRecord={record} />}
-    {mode === 'teachItBack' && <TeachItBack cards={cards} onRecord={record} onGenerateQuestion={onGenerateTeachQuestion} onGradeAnswer={onGradeTeachAnswer} />}
+    {mode === 'teachItBack' && <TeachItBack cards={cards} onRecord={record} onGenerateQuestion={onGenerateTeachQuestion} onGradeAnswer={onGradeTeachAnswer} onAskTutor={onAskStudyTutor} />}
   </main>
 }
 
@@ -149,7 +152,7 @@ function Flashcards({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordR
     </div>
     {card ? <><p className="study-progress">{index + 1} / {activeCards.length}</p>
       <button key={flipNonce} className={`flashcard ${flipped ? 'flipped' : ''}${flipNonce ? ' flip-animate' : ''}`} onClick={flipCard}>
-        <span className="flashcard-side"><small>{flipped ? 'Definition' : 'Term'}</small><strong>{flipped ? card.back : card.front}</strong><em>Click or press Space to flip</em></span>
+        <span className="flashcard-side"><small>{flipped ? 'Definition' : 'Term'}</small><strong><MathText>{flipped ? card.back : card.front}</MathText></strong><em>Click or press Space to flip</em></span>
       </button>
       <div className="study-footer">
         <button className="round-button" disabled={index === 0} onClick={() => { setFlipped(false); setIndex((value) => value - 1) }} aria-label="Previous card"><ChevronLeft size={21} /></button>
@@ -159,7 +162,7 @@ function Flashcards({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordR
   </section>
 }
 
-function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer }: { cards: Flashcard[]; onRecord: RecordResponse; onGenerateQuestion: StudyViewProps['onGenerateTeachQuestion']; onGradeAnswer: StudyViewProps['onGradeTeachAnswer'] }) {
+function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer, onAskTutor }: { cards: Flashcard[]; onRecord: RecordResponse; onGenerateQuestion: StudyViewProps['onGenerateTeachQuestion']; onGradeAnswer: StudyViewProps['onGradeTeachAnswer']; onAskTutor: StudyViewProps['onAskStudyTutor'] }) {
   const [queue, setQueue] = useState(() => shuffled(cards))
   const [index, setIndex] = useState(0)
   const [question, setQuestion] = useState<TeachQuestion | null>(null)
@@ -172,10 +175,12 @@ function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer }: { c
   const [correctCount, setCorrectCount] = useState(0)
   const [difficulty, setDifficulty] = useState<'easy' | 'hard'>('hard')
   const [difficultyOpen, setDifficultyOpen] = useState(false)
+  const [questionNonce, setQuestionNonce] = useState(0)
   const generateQuestionRef = useRef(onGenerateQuestion)
   useEffect(() => { generateQuestionRef.current = onGenerateQuestion }, [onGenerateQuestion])
   const card = queue[index]
   const shownSide: 'front' | 'back' = index % 2 === 0 ? 'front' : 'back'
+  const mathMode = isMathText(`${card?.front ?? ''}\n${card?.back ?? ''}`)
 
   useEffect(() => {
     if (!card) return
@@ -198,7 +203,7 @@ function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer }: { c
       }
     }).finally(() => { if (!cancelled) setLoadingQuestion(false) })
     return () => { cancelled = true }
-  }, [card, difficulty, shownSide])
+  }, [card, difficulty, shownSide, questionNonce])
 
   if (!cards.length) return <StudyEmpty text="Add cards before using Teach It Back." />
   if (!card) return <section className="teach-back-study teach-back-complete"><span className="teach-back-orb"><BrainCircuit size={29} /></span><p className="eyebrow">TEACH IT BACK</p><h1>You explained the whole set.</h1><p>{correctCount} of {queue.length} explanations showed solid understanding. Every response has been added to your mastery history.</p><button className="button button-primary ai-action" onClick={() => { setQueue(shuffled(cards)); setIndex(0); setCorrectCount(0) }}><RotateCcw size={16} /> Teach it again</button></section>
@@ -228,17 +233,36 @@ function TeachItBack({ cards, onRecord, onGenerateQuestion, onGradeAnswer }: { c
   }
 
   return <section className="teach-back-study">
-    <div className="teach-back-heading"><div><p className="eyebrow">AI STUDY GAME</p><h1>Teach It Back.</h1><p>Explain the idea naturally. SoFlo checks your understanding, then always moves you forward.</p></div><span>{index + 1} / {queue.length}</span></div>
+    <div className="teach-back-heading"><div><p className="eyebrow">AI STUDY GAME</p><h1>{mathMode ? 'Work It Out.' : 'Teach It Back.'}</h1><p>{mathMode ? 'Solve the problem step by step. SoFlo checks the method and your final answer.' : 'Explain the idea naturally. SoFlo checks your understanding, then always moves you forward.'}</p></div><span>{index + 1} / {queue.length}</span></div>
     <article className="teach-back-card">
-      <div className="teach-back-clue"><small>{shownSide === 'front' ? 'TERM / PROMPT' : 'DEFINITION / CONTEXT'}</small><strong>{shownSide === 'front' ? card.front : card.back}</strong></div>
+      <div className="teach-back-clue"><small>{mathMode ? 'CONCEPT / REFERENCE' : shownSide === 'front' ? 'TERM / PROMPT' : 'DEFINITION / CONTEXT'}</small><strong><MathText>{shownSide === 'front' ? card.front : card.back}</MathText></strong></div>
       <div className="teach-back-question"><div className="teach-back-question-bar"><small>DESCRIBE IT IN YOUR OWN WORDS</small><button type="button" onClick={() => setDifficultyOpen((open) => !open)}>Too Hard? Change Difficulty.</button>{difficultyOpen && <div className="teach-back-difficulty" role="dialog" aria-label="Teach It Back difficulty"><span>QUESTION DIFFICULTY</span><div><button className={difficulty === 'easy' ? 'active' : ''} onClick={() => { setDifficulty('easy'); setDifficultyOpen(false) }}>Easy</button><button className={difficulty === 'hard' ? 'active' : ''} onClick={() => { setDifficulty('hard'); setDifficultyOpen(false) }}>Hard</button></div><p>{difficulty === 'easy' ? 'Focus on the general definition.' : 'Include a connection, detail, or extra step.'}</p></div>}</div>{loadingQuestion ? <div className="teach-back-loading"><LoaderCircle size={19} /> Building a {difficulty} question from both sides of this card…</div> : <h2>{question?.question}</h2>}</div>
+      {mathMode && !loadingQuestion && !grade && <button className="teach-back-hint" onClick={() => setQuestionNonce((value) => value + 1)}><Sparkles size={14} /> New solvable version</button>}
       {question?.hint && !grade && <button className="teach-back-hint" onClick={() => setShowHint((value) => !value)}><Lightbulb size={14} /> {showHint ? question.hint : 'Need a small hint?'}</button>}
       <textarea value={answer} disabled={loadingQuestion || Boolean(grade)} onChange={(event) => setAnswer(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void submit() }} rows={6} placeholder="Explain what this means as if you were teaching it to someone else…" />
       {error && <p className="teach-back-error">{error}</p>}
       {!grade && <div className="teach-back-actions"><button className="button button-primary ai-action teach-back-submit" disabled={loadingQuestion || grading || !answer.trim()} onClick={() => void submit()}>{grading ? <><LoaderCircle className="teach-back-spin" size={16} /> Reviewing your explanation…</> : <><Sparkles size={16} /> Check my explanation</>}</button><button className="button teach-back-skip" disabled={loadingQuestion || grading} onClick={skip}>Skip <SkipForward size={15} /></button></div>}
       {grade && <div className={`teach-back-grade ${grade.score >= 60 ? 'passed' : 'review'}`}><div><span>{grade.score}</span><div><small>{grade.verdict}</small><strong>{grade.score >= 60 ? 'You understand this.' : 'Give this one another look.'}</strong></div></div><p>{grade.feedback}</p>{grade.understood.length > 0 && <section><strong>What you understood</strong><ul>{grade.understood.map((item) => <li key={item}>{item}</li>)}</ul></section>}{grade.missed.length > 0 && <section><strong>Worth reviewing</strong><ul>{grade.missed.map((item) => <li key={item}>{item}</li>)}</ul></section>}<button className="button button-primary" onClick={next}>{index === queue.length - 1 ? 'Finish set' : 'Next question'} <ChevronRight size={15} /></button></div>}
+      <StudyTutor card={card} question={question?.question ?? ''} studentWork={answer} onAsk={onAskTutor} />
+      <StudyTutor card={card} question={question?.question ?? ''} studentWork={answer} onAsk={onAskTutor} />
     </article>
   </section>
+}
+
+function StudyTutor({ card, question, studentWork, onAsk }: { card: Flashcard; question: string; studentWork: string; onAsk: StudyViewProps['onAskStudyTutor'] }) {
+  const [messages, setMessages] = useState<{ role: 'user' | 'tutor'; text: string }[]>([])
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(false)
+  useEffect(() => { setMessages([]); setDraft('') }, [card.id, question])
+  const send = async () => {
+    const message = draft.trim()
+    if (!message || loading) return
+    setDraft(''); setMessages((current) => [...current, { role: 'user', text: message }]); setLoading(true)
+    try { const reply = await onAsk(card.front, card.back, question, studentWork, message); setMessages((current) => [...current, { role: 'tutor', text: reply || 'Try writing the next step you think belongs here.' }]) }
+    catch (error) { setMessages((current) => [...current, { role: 'tutor', text: error instanceof Error ? error.message : 'The tutor could not respond right now.' }]) }
+    finally { setLoading(false) }
+  }
+  return <section className="study-tutor"><header><span><MessageCircle size={15} /> General AI tutor</span><small>Ask about this card or your work.</small></header>{messages.length > 0 && <div className="study-tutor-messages">{messages.map((message, index) => <p key={index} className={message.role}><MathText>{message.text}</MathText></p>)}{loading && <p className="tutor-loading"><LoaderCircle size={14} /> Thinking…</p>}</div>}<div><textarea value={draft} rows={2} disabled={loading} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void send() }} placeholder="Help me with this step…" /><button className="button button-soft button-small ai-action" disabled={loading || !draft.trim()} onClick={() => void send()}><Send size={14} /> Ask</button></div></section>
 }
 
 function Learn({ cards, onRecord }: { cards: Flashcard[]; onRecord: RecordResponse }) {
