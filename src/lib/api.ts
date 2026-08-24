@@ -128,7 +128,7 @@ export const api = {
   generateFlashcardsText: (modelPath: string, materials: string, guidance: string, syllabusContext = '') => call<string>('generate_flashcards_text', { modelPath, materials, guidance, syllabusContext }),
   generateTeachItBackQuestion: (modelPath: string, front: string, back: string, shownSide: 'front' | 'back', difficulty: 'easy' | 'hard') => call<string>('generate_teach_it_back_question', { modelPath, front, back, shownSide, difficulty }),
   gradeTeachItBackAnswer: (modelPath: string, front: string, back: string, question: string, target: string, answer: string) => call<string>('grade_teach_it_back_answer', { modelPath, front, back, question, target, answer }),
-  askStudyTutor: (modelPath: string, front: string, back: string, question: string, studentWork: string, message: string) => call<string>('ask_study_tutor', { modelPath, front, back, question, studentWork, message }),
+  askStudyTutor: (modelPath: string, front: string, back: string, question: string, studentWork: string, message: string, history: string) => call<string>('ask_study_tutor', { modelPath, front, back, question, studentWork, message, history }),
   reviewGrammarText: (modelPath: string, text: string, quick: boolean, paperContext: string) => call<string>('review_grammar_text', { modelPath, text, quick, paperContext }),
   researchAndGradeText: (modelPath: string, text: string, paperContext: string) => call<string>('research_and_grade_text', { modelPath, text, paperContext }),
   defineWord: (modelPath: string, word: string, paperContext: string) => call<string>('define_word', { modelPath, word, paperContext }),

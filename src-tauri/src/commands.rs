@@ -5295,6 +5295,7 @@ pub async fn ask_study_tutor(
     question: String,
     student_work: String,
     message: String,
+    history: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         if message.trim().is_empty() { return Err("Ask your tutor a question first.".into()); }
@@ -5304,11 +5305,11 @@ pub async fn ask_study_tutor(
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(75)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
         let math_mode = looks_like_math_material(&format!("{front}\n{back}\n{question}"));
         let system = if math_mode {
-            "You are SoFlo's patient math tutor. Help the student solve the active problem without silently doing it for them. Explain one useful next step at a time, check their work, and use readable Unicode math. Do not give the final answer unless they explicitly ask for it. If they request another or changed problem, make one equivalent solvable variation with all numbers provided and do not include its answer. Stay grounded in the active flashcard concept."
+            "You are SoFlo's patient, interactive math tutor. Continue the conversation naturally. When a student is stuck, identify the exact operation or rule that matters, separate the work into 2 to 4 small readable steps, then ask one short check-in question. When they give an answer, compare it to their work, affirm what is right, correct the first real mistake, and give one slightly harder comparable problem. Use readable Unicode math and short line breaks. Do not give a final answer before they attempt it unless they explicitly ask. If they request another or changed problem, make one equivalent solvable variation with all values supplied and do not include its answer. Stay grounded in the active flashcard concept."
         } else {
             "You are SoFlo's patient study tutor. Help the student understand the active flashcard with concise, accurate explanations, examples, and questions. Guide them instead of simply giving away an answer unless they explicitly ask for it. Stay grounded in the active flashcard."
         };
-        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nACTIVE QUESTION:\n{}\n\nSTUDENT WORK SO FAR:\n{}\n\nSTUDENT'S MESSAGE:\n{}", front.trim(), back.trim(), question.trim(), student_work.trim(), message.trim());
+        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nACTIVE QUESTION:\n{}\n\nSTUDENT WORK SO FAR:\n{}\n\nRECENT TUTOR DIALOGUE:\n{}\n\nSTUDENT'S NEW MESSAGE:\n{}", front.trim(), back.trim(), question.trim(), student_work.trim(), history.trim(), message.trim());
         let output = local_chat_text(&client, port, system, &prompt, 900)?;
         touch_ai_server();
         Ok(output.trim().to_string())

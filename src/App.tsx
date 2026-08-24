@@ -473,10 +473,10 @@ function App() {
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to use Teach It Back.')
     return api.gradeTeachItBackAnswer(aiModelPath, front, back, question, target, answer)
   }
-  const askStudyTutor = async (front: string, back: string, question: string, studentWork: string, message: string) => {
+  const askStudyTutor = async (front: string, back: string, question: string, studentWork: string, message: string, history: string) => {
     const aiModelPath = await ensureAiModel()
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to use the study tutor.')
-    return api.askStudyTutor(aiModelPath, front, back, question, studentWork, message)
+    return api.askStudyTutor(aiModelPath, front, back, question, studentWork, message, history)
   }
   const releaseAiModel = useCallback(async () => { await api.stopAiServer() }, [])
   const chooseAiLaunchMode = async (mode: AiLaunchMode) => {
