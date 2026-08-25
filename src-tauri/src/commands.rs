@@ -3873,7 +3873,6 @@ pub fn start_lecture_recording(database: State<'_, Database>, lecture_id: String
         let _ = fs::remove_file(&audio_path);
         connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-        connection.execute("DELETE FROM lecture_analyses WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     }
     std::fs::OpenOptions::new().create(true).append(true).open(&raw_path).map_err(|error| error.to_string())?;
@@ -4046,7 +4045,6 @@ fn process_imported_lecture_audio(
     let _ = fs::remove_file(&source_copy);
     connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-    connection.execute("DELETE FROM lecture_analyses WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     fs::copy(&source, &source_copy).map_err(|_| "SoFlo could not copy that media file into your lecture.".to_string())?;
     connection.execute(
@@ -4302,15 +4300,7 @@ fn finalize_lecture_recording_job(job: &VoiceTranscriptionJob) -> CommandResult<
     let connection = job.database.open()?;
     connection.execute("UPDATE lecture_recordings SET state='analyzing', duration_ms=captured_ms, status_message='Preparing lecture analysis…', stopped_at=COALESCE(stopped_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&job.lecture_id]).map_err(|error| error.to_string())?;
     emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
-    let analysis_result = create_lecture_analysis(&job.app, &job.database, &job.lecture_id);
-    let connection = job.database.open()?;
-    match analysis_result {
-        Ok(()) => update_recording_status(&connection, &job.lecture_id, "complete", "Lecture analysis is ready.")?,
-        Err(error) => {
-            connection.execute("INSERT INTO lecture_analyses (lecture_id, status) VALUES (?1,'failed') ON CONFLICT(lecture_id) DO UPDATE SET status='failed', updated_at=CURRENT_TIMESTAMP", [&job.lecture_id]).map_err(|failure| failure.to_string())?;
-            update_recording_status(&connection, &job.lecture_id, "analysis_failed", &format!("Transcript is ready. Analysis can be retried: {}", error))?
-        },
-    }
+    update_recording_status(&connection, &job.lecture_id, "complete", "Transcript is ready. Use the AI button to append organized notes to your lecture paper.")?;
     emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
     Ok(())
 }
@@ -4612,17 +4602,20 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
         [lecture_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).map_err(|_| "That lecture could not be found.".to_string())?;
-    let current_is_prior_generated_notes = prior_generated_notes
-        .map(lecture_markdown_to_plain_text)
-        .map(|prior_plain| normalize_note_fragment(&prior_plain) == normalize_note_fragment(&current_plain))
-        .unwrap_or(false);
-    // A regeneration may safely replace the AI-created draft it originally
-    // filled. If the student has written or changed anything, leave it alone.
-    if !current_plain.trim().is_empty() && !current_is_prior_generated_notes {
-        return Ok(false);
+    let _ = prior_generated_notes;
+    let generated_content = lecture_markdown_to_editor_content(detailed_notes);
+    let generated_nodes = serde_json::from_str::<serde_json::Value>(&generated_content).ok()
+        .and_then(|value| value.get("content").and_then(|items| items.as_array()).cloned())
+        .unwrap_or_default();
+    let mut content_value = serde_json::from_str::<serde_json::Value>(&current_content)
+        .unwrap_or_else(|_| serde_json::json!({ "type": "doc", "content": [] }));
+    if let Some(nodes) = content_value.get_mut("content").and_then(|items| items.as_array_mut()) {
+        if !nodes.is_empty() { nodes.push(serde_json::json!({ "type": "horizontalRule" })); }
+        nodes.extend(generated_nodes);
     }
-    let content = lecture_markdown_to_editor_content(detailed_notes);
-    let plain = lecture_markdown_to_plain_text(detailed_notes);
+    let content = serde_json::to_string(&content_value).map_err(|error| error.to_string())?;
+    let generated_plain = lecture_markdown_to_plain_text(detailed_notes);
+    let plain = if current_plain.trim().is_empty() { generated_plain } else { format!("{}\n\n{}", current_plain.trim_end(), generated_plain) };
     if plain.is_empty() { return Ok(false); }
     transaction.execute(
         "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",

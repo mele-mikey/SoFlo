@@ -1,6 +1,6 @@
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
-import { AudioLines, ChevronLeft, ChevronRight, Clock3, Columns3, Maximize2, Mic, Minimize2, Play, Settings2, Square, Upload, Waves } from 'lucide-react'
+import { AudioLines, ChevronLeft, ChevronRight, Clock3, Mic, Play, Settings2, Sparkles, Square, Upload, Waves } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from '../../lib/api'
 import type { LectureAnalysis, LectureNoteSuggestion, LectureRecording, LectureTranscriptSegment } from '../../lib/types'
@@ -18,7 +18,6 @@ interface LectureRecordingPanelProps {
 }
 
 type InputDevice = { deviceId: string; label: string }
-type AnalysisViewMode = 'compact' | 'split' | 'focus'
 type PanelVisibility = 'visible' | 'hiding' | 'hidden' | 'revealing'
 
 const emptyRecording = (lectureId: string): LectureRecording => ({
@@ -74,11 +73,7 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   const [level, setLevel] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [busy, setBusy] = useState(false)
-  const [analysisViewMode, setAnalysisViewMode] = useState<AnalysisViewMode>('compact')
-  const [analysisViewMenuOpen, setAnalysisViewMenuOpen] = useState(false)
   const [panelVisibility, setPanelVisibility] = useState<PanelVisibility>('visible')
-  const [analysisZoom, setAnalysisZoom] = useState(100)
-  const [analysisZoomVisible, setAnalysisZoomVisible] = useState(false)
   const streamRef = useRef<MediaStream | null>(null)
   const contextRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
@@ -89,7 +84,6 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   const queuedSampleCountRef = useRef(0)
   const activeRef = useRef(false)
   const voiceModelPathRef = useRef(voiceModelPath)
-  const analysisZoomDismissRef = useRef<number | null>(null)
   const panelVisibilityTimerRef = useRef<number | null>(null)
 
   const refresh = useCallback(async () => {
@@ -119,18 +113,7 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
     return () => window.clearInterval(timer)
   }, [])
   useEffect(() => () => { void stopCapture(false) }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => () => { if (analysisZoomDismissRef.current !== null) window.clearTimeout(analysisZoomDismissRef.current) }, [])
   useEffect(() => () => { if (panelVisibilityTimerRef.current !== null) window.clearTimeout(panelVisibilityTimerRef.current) }, [])
-  useEffect(() => {
-    const exitFocusedReview = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && analysisViewMode !== 'compact') {
-        event.preventDefault()
-        setAnalysisViewMode('compact')
-      }
-    }
-    window.addEventListener('keydown', exitFocusedReview)
-    return () => window.removeEventListener('keydown', exitFocusedReview)
-  }, [analysisViewMode])
   useEffect(() => { onNoteSuggestionsChange(lectureId, analysis?.noteSuggestions ?? []) }, [analysis?.noteSuggestions, lectureId, onNoteSuggestionsChange])
 
   const listMicrophones = useCallback(async (askPermission: boolean) => {
@@ -236,25 +219,11 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   const retryAnalysis = async () => {
     setBusy(true)
     setSettingsOpen(false)
-    try { await api.retryLectureAnalysis(lectureId); await refresh() }
+    try { await api.retryLectureAnalysis(lectureId); onToast('SoFlo is organizing the transcript and will append the structured notes to this lecture.', 'success'); await refresh() }
     catch (error) { onToast(error instanceof Error ? error.message : 'SoFlo could not retry the lecture analysis.', 'error') }
     finally { setBusy(false) }
   }
-  const revealAnalysisZoom = () => {
-    setAnalysisZoomVisible(true)
-    if (analysisZoomDismissRef.current !== null) window.clearTimeout(analysisZoomDismissRef.current)
-    analysisZoomDismissRef.current = window.setTimeout(() => setAnalysisZoomVisible(false), 3_000)
-  }
-  const resetAnalysisZoom = () => {
-    setAnalysisZoom(100)
-    revealAnalysisZoom()
-  }
-  const returnToAnalysisHome = () => {
-    setAnalysisViewMenuOpen(false)
-    setAnalysisViewMode('compact')
-  }
   const hidePanel = () => {
-    setAnalysisViewMenuOpen(false)
     if (panelVisibility === 'hidden' || panelVisibility === 'hiding') return
     setPanelVisibility('hiding')
     if (panelVisibilityTimerRef.current !== null) window.clearTimeout(panelVisibilityTimerRef.current)
@@ -265,19 +234,6 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
     setPanelVisibility('revealing')
     window.requestAnimationFrame(() => setPanelVisibility('visible'))
   }
-  useEffect(() => {
-    const updateAnalysisZoom = () => globalThis.document.querySelectorAll<HTMLElement>('.lecture-recording-panel .lecture-analysis').forEach((element) => element.style.setProperty('--lecture-analysis-zoom', String(analysisZoom / 100)))
-    const interceptAnalysisZoom = (event: WheelEvent) => {
-      if (!event.ctrlKey || !(event.target instanceof Element) || !event.target.closest('.lecture-recording-panel .lecture-analysis')) return
-      event.preventDefault()
-      setAnalysisZoom((current) => Math.max(70, Math.min(160, current + (event.deltaY < 0 ? 5 : -5))))
-      revealAnalysisZoom()
-    }
-    updateAnalysisZoom()
-    globalThis.document.addEventListener('wheel', interceptAnalysisZoom, { passive: false })
-    return () => globalThis.document.removeEventListener('wheel', interceptAnalysisZoom)
-  }, [analysisZoom])
-
   const isRecording = recording.state === 'recording' && activeRef.current
   const progress = recording.capturedMs > 0 ? Math.min(100, Math.round(recording.transcribedMs / recording.capturedMs * 100)) : 0
   const isTranscriptionPhase = ['importing', 'queued', 'transcribing', 'transcription_failed'].includes(recording.state)
@@ -301,25 +257,22 @@ export function LectureRecordingPanel({ lectureId, aiEnabled, voiceModelReady, v
   const canStart = recording.state === 'ready'
   const bars = Array.from({ length: 18 }, (_, index) => Math.max(12, Math.min(100, 14 + level * (34 + ((index * 17) % 48)))))
 
-  const analysisReady = Boolean(analysis?.overview || analysis?.detailedNotes)
   if (panelVisibility === 'hidden') {
     return <button className="lecture-analysis-restore" type="button" onClick={showPanel} aria-label="Show lecture panel" title="Show lecture panel"><ChevronLeft size={17} /></button>
   }
   return <section className={`lecture-panel-shell panel-${panelVisibility}`}>
     <button className="lecture-panel-collapse" type="button" onClick={hidePanel} aria-label="Hide lecture panel" title="Hide lecture panel"><ChevronRight size={16} /></button>
-    <div className={`lecture-recording-panel ${isRecording ? 'is-recording' : ''} analysis-view-${analysisViewMode} panel-${panelVisibility}`}>
+    <div className={`lecture-recording-panel ${isRecording ? 'is-recording' : ''} panel-${panelVisibility}`}>
     <header>
-      <div><p className="eyebrow">LIVE LECTURE</p><h2>{recording.state === 'complete' ? 'Lecture Analysis' : 'Lecture Recording'}</h2></div>
-      <div className="lecture-panel-header-actions">{isRecording && <span className="recording-live-dot">Live</span>}{analysisReady && <div className="lecture-analysis-view-menu"><button className="icon-button tiny" onClick={() => analysisViewMode === 'compact' ? setAnalysisViewMenuOpen((open) => !open) : returnToAnalysisHome()} aria-label={analysisViewMode === 'compact' ? 'Open lecture analysis views' : 'Return to lecture analysis'} title={analysisViewMode === 'compact' ? 'Lecture analysis views' : 'Return to lecture analysis'}>{analysisViewMode === 'compact' ? <Maximize2 size={16} /> : <Minimize2 size={16} />}</button>{analysisViewMenuOpen && <div><button onClick={() => { setAnalysisViewMode('split'); setAnalysisViewMenuOpen(false) }}><Columns3 size={14} /><span><strong>Side-by-side</strong><small>Notes left · analysis right</small></span></button><button onClick={() => { setAnalysisViewMode('focus'); setAnalysisViewMenuOpen(false) }}><Maximize2 size={14} /><span><strong>AI review</strong><small>Focus only on lecture analysis</small></span></button></div>}</div>}<button className="icon-button tiny" onClick={() => { setSettingsOpen((open) => !open); if (!settingsOpen) void listMicrophones(true) }} aria-label="Lecture recording settings"><Settings2 size={16} /></button></div>
+      <div><p className="eyebrow">LIVE LECTURE</p><h2>Lecture Recording</h2></div>
+      <div className="lecture-panel-header-actions">{isRecording && <span className="recording-live-dot">Live</span>}{recording.state === 'complete' && aiEnabled && <button className="icon-button tiny ai-action" disabled={busy} onClick={() => void retryAnalysis()} aria-label="Organize and append lecture notes" title="Organize and append lecture notes"><Sparkles size={16} /></button>}<button className="icon-button tiny" onClick={() => { setSettingsOpen((open) => !open); if (!settingsOpen) void listMicrophones(true) }} aria-label="Lecture recording settings"><Settings2 size={16} /></button></div>
     </header>
-    {settingsOpen && <div className="lecture-recording-settings"><div><label htmlFor="lecture-microphone">Microphone</label><select id="lecture-microphone" value={microphoneId} onChange={(event) => { onMicrophoneChange(event.target.value); setSettingsOpen(false) }}><option value="">System default</option>{devices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></div><button className="lecture-import-audio" disabled={busy || isRecording} onClick={() => void importAudio()}><Upload size={14} />Import Audio File</button>{recording.state === 'complete' && <button className="lecture-regenerate-analysis" disabled={busy || !aiEnabled} onClick={() => void retryAnalysis()}>Regenerate analysis</button>}</div>}
+    {settingsOpen && <div className="lecture-recording-settings"><div><label htmlFor="lecture-microphone">Microphone</label><select id="lecture-microphone" value={microphoneId} onChange={(event) => { onMicrophoneChange(event.target.value); setSettingsOpen(false) }}><option value="">System default</option>{devices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></div><button className="lecture-import-audio" disabled={busy || isRecording} onClick={() => void importAudio()}><Upload size={14} />Import Audio or Video</button></div>}
     {canStart && <div className="lecture-recording-ready"><div className="recording-orb"><Mic size={22} /></div><p>Capture the class and let SoFlo build your transcript as you write.</p><button className="lecture-record-button" disabled={busy} onClick={() => void startRecording()}><Play size={16} fill="currentColor" />{busy && !voiceModelReady ? 'Preparing voice transcription…' : 'Start recording'}</button>{!voiceModelReady && <small>Voice Transcription will install automatically when you start recording.</small>}{!aiEnabled && <small>Recording and transcription work without General AI; lecture analysis remains unavailable.</small>}</div>}
     {recording.state === 'interrupted' && <div className="lecture-recovery"><strong>{recording.sourceKind === 'import' ? 'Recovered audio import' : 'Recovered recording'}</strong><p>{recording.sourceKind === 'import' ? 'SoFlo kept the prepared audio before the interruption. Finish it to continue transcription.' : 'SoFlo kept the audio saved before the interruption. Continue capture or finish the audio that is already safe.'}</p><div>{recording.sourceKind !== 'import' && <button className="button button-quiet button-small" disabled={busy} onClick={() => void startRecording()}>Continue recording</button>}<button className="button button-primary button-small" disabled={busy} onClick={() => void finishRecoveredRecording()}>{recording.sourceKind === 'import' ? 'Finish import' : 'Finish saved audio'}</button></div></div>}
     {isRecording && <div className="lecture-recording-active"><div className="lecture-timer"><Clock3 size={15} /><strong>{timeLabel(elapsed)}</strong></div><div className="lecture-audio-bars" aria-label="Microphone level">{bars.map((height, index) => <i key={index} style={{ height: `${height}%`, opacity: 0.45 + (height / 180) }} />)}</div><div className="lecture-status"><Waves size={15} /><span>{recording.pendingChunks ? `${progress}% transcribed · ${recording.pendingChunks} chunk${recording.pendingChunks === 1 ? '' : 's'} catching up` : 'Transcript is up to date'}</span></div><button className="lecture-stop-button" disabled={busy} onClick={() => void stopCapture(true)}><Square size={14} fill="currentColor" />Stop & finish</button></div>}
     {!isRecording && !canStart && !['complete', 'analysis_failed', 'interrupted'].includes(recording.state) && <div className="lecture-processing"><AudioLines size={21} /><strong>{processingHeading}</strong><p>{recording.statusMessage}</p>{isTranscriptionPhase && <div className={`lecture-progress ${recording.capturedMs > 0 ? '' : 'is-indeterminate'}`}><i style={{ width: `${progress}%` }} /></div>}{recording.capturedMs > 0 && <small>{processingDetail}</small>}{recording.capturedMs === 0 && isTranscriptionPhase && <small>Preparing the audio for transcription…</small>}</div>}
-    {(recording.state === 'complete' || recording.state === 'analysis_failed') && <div className="lecture-analysis">{recording.state === 'analysis_failed' && <><p className="lecture-analysis-error">{recording.statusMessage}</p><button className="button button-primary button-small" disabled={busy} onClick={() => void retryAnalysis()}>Retry analysis</button></>}{analysis?.detailedNotes && <DetailedLectureNotes notes={analysis.detailedNotes} />}{analysis && <AnalysisList title="Key points" items={analysis.keyPoints} />}</div>}
     {segments.length > 0 && <details className="lecture-transcript"><summary>Transcript <span>{segments.length} segments</span></summary><div>{segments.slice(-18).map((segment) => <article key={segment.id}><small>{timeLabel(segment.startMs)}{segment.speaker !== 'Primary speaker' && ` · ${segment.speaker}`}</small><p>{segment.text}</p></article>)}</div></details>}
-    {analysisZoomVisible && analysisReady && <button type="button" className="lecture-analysis-zoom-indicator" onClick={resetAnalysisZoom} title="Reset analysis zoom">{analysisZoom}% <span>Reset</span></button>}
     </div>
   </section>
 }
@@ -332,6 +285,9 @@ function AnalysisList({ title, items }: { title: string; items: string[] }) {
 function DetailedLectureNotes({ notes }: { notes: string }) {
   return <section className="lecture-detailed-notes"><MarkdownLectureNotes notes={notes} /></section>
 }
+
+void AnalysisList
+void DetailedLectureNotes
 
 function MarkdownLectureNotes({ notes }: { notes: string }) {
   const lines = notes.split(/\r?\n/)

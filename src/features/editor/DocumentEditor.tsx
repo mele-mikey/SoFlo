@@ -798,6 +798,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const grammarReviewRef = useRef<(quick: boolean) => Promise<boolean>>(async () => false)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
+  const visiblePageReviewRef = useRef({ key: '', visibleAt: 0 })
   // When AI spelling is enabled, it owns the marks so the editor never mixes
   // its straight interactive underlines with the browser's red squiggles.
   const customAiSpellcheck = aiEnabled && aiGrammarEnabled
@@ -1140,8 +1141,14 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady) return
     const timer = window.setInterval(() => {
       const now = Date.now()
-      const recentlyTyped = now - grammarLastInputAt.current < 8_000
-      if (!globalThis.document.hasFocus() || !editor.isFocused || grammarRequestRef.current || !recentlyTyped) return
+      if (!globalThis.document.hasFocus() || !editor.isFocused || grammarRequestRef.current) return
+      const page = visiblePaperPage()
+      const pageKey = `${page.from}:${page.to}`
+      if (visiblePageReviewRef.current.key !== pageKey) {
+        visiblePageReviewRef.current = { key: pageKey, visibleAt: now }
+        return
+      }
+      if (now - visiblePageReviewRef.current.visibleAt < 5_000) return
       if (grammarLastAutomaticReviewAt.current && now - grammarLastAutomaticReviewAt.current < 30_000) return
       grammarLastAutomaticReviewAt.current = now
       void grammarReviewRef.current(true)
@@ -1152,18 +1159,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     if (!editor || !aiEnabled || !aiGrammarEnabled || !aiModelReady) return
     if (editor.getText().trim().length < 3) return
     let cancelled = false
-    let attempts = 0
     let timer = 0
     const run = async () => {
       if (cancelled || grammarRequestRef.current || !globalThis.document.hasFocus()) return
-      attempts += 1
-      const found = await grammarReviewRef.current(true)
-      if (!cancelled && !found && attempts < 2) timer = window.setTimeout(() => { void run() }, 2_500)
+      await grammarReviewRef.current(true)
     }
-    timer = window.setTimeout(() => { void run() }, 450)
-    const onFocus = () => { if (attempts < 2) void run() }
-    window.addEventListener('focus', onFocus)
-    return () => { cancelled = true; window.clearTimeout(timer); window.removeEventListener('focus', onFocus) }
+    timer = window.setTimeout(() => { void run() }, 5_200)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [aiEnabled, aiGrammarEnabled, aiModelReady, document.id, editor])
   useEffect(() => () => { void onReleaseAi() }, [document.id, onReleaseAi])
   useEffect(() => {
