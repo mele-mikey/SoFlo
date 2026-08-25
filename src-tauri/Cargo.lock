@@ -3924,7 +3924,7 @@ dependencies = [
 
 [[package]]
 name = "soflo"
-version = "1.1.66"
+version = "1.1.67"
 dependencies = [
  "argon2",
  "base64 0.22.1",

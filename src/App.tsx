@@ -173,15 +173,23 @@ function App() {
     } finally { setBooting(false) }
   }, [showToast])
   const loadClassContent = useCallback(async (classId: string) => {
-    try {
-      const [nextDocuments, nextFolders, nextLectures, nextSets, nextCards, nextStudyWebs] = await Promise.all([api.listDocuments(classId), api.listDocumentFolders(classId), api.listLectures(classId), api.listSets(classId), api.listAllCards(classId), api.listStudyWebs(classId)])
-      setDocuments(nextDocuments)
-      setDocumentFolders(nextFolders)
-      setLectures(nextLectures)
-      setSets(nextSets)
-      setAllCards(nextCards)
-      setStudyWebs(nextStudyWebs)
-    } catch (error) { showToast(error instanceof Error ? error.message : 'Class materials could not be loaded.', 'error') }
+    const results = await Promise.allSettled([
+      api.listDocuments(classId), api.listDocumentFolders(classId), api.listLectures(classId),
+      api.listSets(classId), api.listAllCards(classId), api.listStudyWebs(classId),
+    ])
+    const [documentsResult, foldersResult, lecturesResult, setsResult, cardsResult, studyWebsResult] = results
+    if (documentsResult.status === 'fulfilled') setDocuments(documentsResult.value)
+    if (foldersResult.status === 'fulfilled') setDocumentFolders(foldersResult.value)
+    if (lecturesResult.status === 'fulfilled') setLectures(lecturesResult.value)
+    if (setsResult.status === 'fulfilled') setSets(setsResult.value)
+    if (cardsResult.status === 'fulfilled') setAllCards(cardsResult.value)
+    if (studyWebsResult.status === 'fulfilled') setStudyWebs(studyWebsResult.value)
+    // A corrupt optional collection must never prevent a class from opening.
+    // The active editor remains usable and its save queue stays intact.
+    if (results.every((result) => result.status === 'rejected')) {
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      showToast(failure?.reason instanceof Error ? failure.reason.message : 'SoFlo could not reach your local library.', 'error')
+    }
   }, [showToast])
   useEffect(() => { void loadLibrary() }, [loadLibrary])
   useEffect(() => {
