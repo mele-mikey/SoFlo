@@ -506,6 +506,13 @@ function MathGraph({ expression }: { expression: string }) {
     </svg>
   );
 }
+function MathNumberLine({ expression }: { expression: string }) {
+  const match = normalizedMath(expression).match(/[A-Za-z]\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const operator = match[1]; const value = Number(match[2]); const position = Math.max(24, Math.min(296, 160 + value * 16)); const towardRight = operator === '>' || operator === '>='; const closed = operator === '>=' || operator === '<=';
+  return <svg className="math-number-line" viewBox="0 0 320 110" role="img" aria-label={`Number line for ${expression}`}><path className="math-axis" d="M18 56H302M18 56l8-5M18 56l8 5M302 56l-8-5M302 56l-8 5" />{Array.from({ length: 11 }, (_, index) => { const x = 40 + index * 24; const label = index - 5; return <g key={label}><path className="math-axis" d={`M${x} 50V62`} /><text x={x} y="79" textAnchor="middle">{label}</text></g> })}<path className="math-curve" d={towardRight ? `M${position} 56H300` : `M20 56H${position}`} /><circle cx={position} cy="56" r="6" className={closed ? 'math-number-dot closed' : 'math-number-dot'} /><path className="math-curve" d={towardRight ? 'M300 56l-9-5M300 56l-9 5' : 'M20 56l9-5M20 56l9 5'} /></svg>;
+}
+
 function MathPractice({
   cards,
   onRecord,
@@ -528,6 +535,7 @@ function MathPractice({
     );
   const prompt = mathExpression(card.front);
   const target = mathExpression(card.back);
+  const inequality = /(?:≤|≥|<|>)/.test(prompt);
   const check = () => {
     const correct = equivalentMath(answer, target);
     setChecked(correct);
@@ -620,15 +628,14 @@ function MathPractice({
         </article>
         <aside className="math-workspace">
           <header>
-            <small>GRAPH / NUMBER LINE</small>
+            <small>{inequality ? "NUMBER LINE" : "FUNCTION GRAPH"}</small>
             <strong>
               <MathFormula value={prompt} />
             </strong>
           </header>
-          <MathGraph expression={prompt} />
+          {inequality ? <MathNumberLine expression={prompt} /> : <MathGraph expression={prompt} />}
           <p>
-            Graphing supports numeric functions of <em>x</em>. Inequalities and
-            interval notation stay visible in the equation workspace.
+            {inequality ? "Open circles are strict; filled circles include the boundary." : <>Graphs evaluate numeric functions of <em>x</em>.</>}
           </p>
         </aside>
       </div>
