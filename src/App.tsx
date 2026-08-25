@@ -629,8 +629,11 @@ function App() {
       setManualStudyWebEditingId(null)
       navigate({ kind: 'studyWeb', classId: targets[0].classId, webId: web.id })
       showToast(existingWebId ? 'Study Web regenerated.' : 'Study Web created.')
+      return null
     } catch (error) {
-      showToast(aiFailureMessage(error), 'error')
+      const message = aiFailureMessage(error)
+      showToast(message, 'error')
+      return message
     } finally {
       setAiWorking(false)
       setAiProgress(null)
@@ -862,7 +865,7 @@ function App() {
           onRenameDocumentFolder={(id, title) => void renamePaperFolder(id, title)} onOpenSet={(setId) => navigate({ kind: 'flashcardSet', classId: activeCourse.id, setId })}
           onStudy={(setIds, mode, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds, mode, cardIds })}
           onStudyWeak={(setId, cardIds) => navigate({ kind: 'study', classId: activeCourse.id, setIds: [setId], mode: 'learn', cardIds })}
-          onCreateStudyWeb={(selectedSets, existingWebId) => void createStudyWeb(selectedSets, existingWebId)} onCreateEmptyStudyWeb={() => void createEmptyStudyWeb()} onImportStudyWeb={() => void importStudyWeb()}
+          onCreateStudyWeb={(selectedSets, existingWebId) => createStudyWeb(selectedSets, existingWebId)} onCreateEmptyStudyWeb={() => void createEmptyStudyWeb()} onImportStudyWeb={() => void importStudyWeb()}
           onOpenStudyWeb={(webId) => { const web = studyWebs.find((item) => item.id === webId); if (web) void api.getStudyWeb(web.id).then((detail) => openStudyWeb(detail)).catch(() => showToast('That Study Web could not be opened.', 'error')) }} onDuplicateSet={(set, title) => void duplicateSet(set, title)}
           onTrashSet={(set) => void trashSet(set)} onRestoreDocument={(id) => void restoreDocument(id)} onRestoreSet={(id) => void restoreSet(id)} onArchive={() => setModal({ type: 'archiveClass' })} onToast={showToast}
         />}
