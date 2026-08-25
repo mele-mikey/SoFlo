@@ -322,7 +322,7 @@ const HistoryDiff = Extension.create({
     })]
   },
 })
-function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions: boolean): GrammarIssue[] {
+function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions: boolean, bounds?: { from: number; to: number }): GrammarIssue[] {
   let candidates: Array<{ kind?: string; original?: string; replacement?: string; suggestion?: string; alternatives?: unknown; reason?: string; why?: string; explanation?: string; category?: string; partOfSpeech?: string; definition?: string; useCase?: string; synonyms?: unknown }> = []
   try { candidates = JSON.parse(raw) as typeof candidates } catch { return [] }
   const issues: GrammarIssue[] = []
@@ -351,12 +351,18 @@ function extractGrammarIssues(raw: string, editor: Editor, allowDeepSuggestions:
     let found: { from: number; to: number } | null = null
     editor.state.doc.descendants((node, position) => {
       if (found || !node.isText || !node.text) return
-      const match = node.text.toLocaleLowerCase().indexOf(original.toLocaleLowerCase())
-      if (match < 0) return
-      const key = `${position + match}:${original}`
-      if (used.has(key)) return
-      used.add(key)
-      found = { from: position + match, to: position + match + original.length }
+      const needle = original.toLocaleLowerCase()
+      let match = node.text.toLocaleLowerCase().indexOf(needle)
+      while (match >= 0 && !found) {
+        const from = position + match
+        const to = from + original.length
+        const key = `${from}:${original}`
+        if ((!bounds || (from >= bounds.from && to <= bounds.to)) && !used.has(key)) {
+          used.add(key)
+          found = { from, to }
+        }
+        match = node.text.toLocaleLowerCase().indexOf(needle, match + needle.length)
+      }
     })
     if (found) {
       const match = found as { from: number; to: number }
@@ -1295,13 +1301,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : issue.kind === 'lecture' ? 'ai-lecture-connection' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}-${issue.kind}` })))
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
   }
-  const visiblePaperPageText = () => {
+  const visiblePaperPage = () => {
     const documentSize = editor.state.doc.content.size
     const breaks = (paperPaginationKey.getState(editor.state) ?? DecorationSet.empty).find()
       .filter((decoration) => String(decoration.spec.key ?? '').startsWith('paper-break-'))
       .map((decoration) => decoration.from)
       .sort((left, right) => left - right)
-    if (!breaks.length) return editor.getText()
+    if (!breaks.length) return { text: editor.getText(), from: 0, to: documentSize }
 
     const scrollArea = editor.view.dom.closest<HTMLElement>('.editor-page-wrap')
     const visibleCenter = scrollArea
@@ -1316,7 +1322,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const pageStarts = [0, ...breaks]
     const start = pageStarts[Math.min(visiblePage, pageStarts.length - 1)]
     const end = pageStarts[visiblePage + 1] ?? documentSize
-    return editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText()
+    return { text: editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText(), from: start, to: end }
   }
   const reviewGrammar = async (quick = false) => {
     if (!aiEnabled || !aiGrammarEnabled || !aiModelReady) return false
@@ -1338,8 +1344,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       // The paper is visually paginated inside one ProseMirror document. Both
       // quiet checks and AI Review must examine the complete page the person is
       // viewing, rather than always beginning at page one of a longer paper.
-      const source = visiblePaperPageText()
-      const issues = extractGrammarIssues(await onGrammarReview(source, quick, paperContext), editor, !quick).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+      const page = visiblePaperPage()
+      const issues = extractGrammarIssues(await onGrammarReview(page.text, quick, paperContext), editor, !quick, page).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       // A manual review started after a passive pass should replace that pass,
       // never be overwritten by an older background response.
       if (generation !== grammarReviewGenerationRef.current) return false
