@@ -77,6 +77,7 @@ export const api = {
   createSet: (input: { classId: string; title: string; description?: string }) => call<FlashcardSetDetail>('create_flashcard_set', { input }),
   getSet: (id: string) => call<FlashcardSetDetail>('get_flashcard_set', { id }),
   saveSet: (input: { id: string; title: string; description?: string | null }) => call<FlashcardSetDetail>('save_flashcard_set', { input }),
+  setFlashcardSetStudyKind: (id: string, studyKind: 'standard' | 'math') => call<FlashcardSetDetail>('set_flashcard_set_study_kind', { id, studyKind }),
   setSetDeleted: (id: string, deleted: boolean) => call<void>('set_flashcard_set_deleted', { id, deleted }),
   duplicateSet: (id: string, title: string) => call<FlashcardSetDetail>('duplicate_flashcard_set', { id, title }),
   saveCard: (input: { id?: string; setId: string; front: string; back: string; notes?: string | null; imagePath?: string | null; position: number; isStarred: boolean }) => call<Flashcard>('save_flashcard', { input }),

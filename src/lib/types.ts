@@ -121,6 +121,7 @@ export interface FlashcardSetSummary {
   classId: string
   title: string
   description: string | null
+  studyKind: 'standard' | 'math'
   cardCount: number
   updatedAt: string
   deletedAt: string | null
@@ -196,6 +197,7 @@ export interface FlashcardSetDetail {
   classId: string
   title: string
   description: string | null
+  studyKind: 'standard' | 'math'
   cards: Flashcard[]
   progress: CardProgress[]
   updatedAt: string

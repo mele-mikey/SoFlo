@@ -18,6 +18,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { evaluate, simplify } from "mathjs";
 import { api } from "../../lib/api";
 import type { Flashcard, FlashcardSetDetail } from "../../lib/types";
 import {
@@ -297,6 +298,19 @@ export function StudyView({
       }, {}),
     [progress],
   );
+  const mathSet = useMemo(
+    () =>
+      set?.studyKind === "math" ||
+      (cards.length > 0 &&
+        cards.filter((card) => isMathText(`${card.front}\n${card.back}`))
+          .length /
+          cards.length >=
+          0.6),
+    [cards, set?.studyKind],
+  );
+  const availableModes = mathSet
+    ? (["flashcards", "learn", "test", "teachItBack"] as const)
+    : (["flashcards", "learn", "test", "match", "teachItBack"] as const);
 
   useEffect(() => setProgress(sets.flatMap((item) => item.progress)), [sets]);
   useEffect(() => {
@@ -365,9 +379,7 @@ export function StudyView({
           {sets.length === 1 ? set?.title : `${sets.length} selected sets`}
         </button>
         <nav>
-          {(
-            ["flashcards", "learn", "test", "match", "teachItBack"] as const
-          ).map((item) => (
+          {availableModes.map((item) => (
             <button
               key={item}
               disabled={item === "teachItBack" && !aiEnabled}
@@ -399,15 +411,20 @@ export function StudyView({
           {mastery.mastered ?? 0} mastered · {mastery.needsWork ?? 0} need work
         </span>
       </header>
-      {mode === "flashcards" && <Flashcards cards={cards} onRecord={record} />}
-      {mode === "learn" && <Learn cards={cards} onRecord={record} />}
-      {mode === "test" && (
+      {mathSet && <MathPractice cards={cards} onRecord={record} />}
+      {!mathSet && mode === "flashcards" && (
+        <Flashcards cards={cards} onRecord={record} />
+      )}
+      {!mathSet && mode === "learn" && (
+        <Learn cards={cards} onRecord={record} />
+      )}
+      {!mathSet && mode === "test" && (
         <Test setId={set?.id ?? ""} cards={cards} onRecord={record} />
       )}
-      {mode === "match" && (
+      {!mathSet && mode === "match" && (
         <Match setId={set?.id ?? ""} cards={cards} onRecord={record} />
       )}
-      {mode === "teachItBack" && (
+      {!mathSet && mode === "teachItBack" && (
         <TeachItBack
           cards={cards}
           onRecord={record}
@@ -417,6 +434,205 @@ export function StudyView({
         />
       )}
     </main>
+  );
+}
+
+function mathExpression(value: string) {
+  const latex = value.match(/\\(?:frac|sqrt|left|right)[^\n]+/);
+  if (latex) return latex[0];
+  const expression = value.match(
+    /(?:-?\d+|[A-Za-z])(?:[A-Za-z0-9()\s]*[+\-*/^=<>≤≥][A-Za-z0-9()\s+\-*/^=<>≤≥]+)+/,
+  );
+  return expression?.[0]?.trim() ?? value.trim();
+}
+function normalizedMath(value: string) {
+  return value
+    .replace(/≤/g, "<=")
+    .replace(/≥/g, ">=")
+    .replace(/×/g, "*")
+    .replace(/÷/g, "/")
+    .replace(/√/g, "sqrt")
+    .replace(/\s+/g, "");
+}
+function equivalentMath(answer: string, target: string) {
+  const left = normalizedMath(answer);
+  const right = normalizedMath(target);
+  if (!left || !right) return false;
+  try {
+    if (simplify(`(${left})-(${right})`).toString() === "0") return true;
+    for (const x of [-4, -2, -1, 0, 1, 2, 4]) {
+      const a = Number(evaluate(left, { x }));
+      const b = Number(evaluate(right, { x }));
+      if (
+        !Number.isFinite(a) ||
+        !Number.isFinite(b) ||
+        Math.abs(a - b) > 0.00001
+      )
+        return false;
+    }
+    return true;
+  } catch {
+    return left === right;
+  }
+}
+function MathGraph({ expression }: { expression: string }) {
+  const plot = expression.replace(/^\s*(?:y\s*=)?\s*/i, "");
+  const points: string[] = [];
+  for (let pixel = 0; pixel <= 320; pixel += 2) {
+    const x = (pixel - 160) / 16;
+    try {
+      const y = Number(evaluate(normalizedMath(plot), { x }));
+      if (Number.isFinite(y) && Math.abs(y) < 100)
+        points.push(`${pixel},${100 - y * 10}`);
+    } catch {
+      /* no curve for a non-numeric expression */
+    }
+  }
+  return (
+    <svg
+      className="math-graph"
+      viewBox="0 0 320 200"
+      role="img"
+      aria-label={`Graph of ${expression}`}
+    >
+      <path
+        className="math-grid"
+        d="M0 20H320M0 60H320M0 100H320M0 140H320M0 180H320M40 0V200M80 0V200M120 0V200M160 0V200M200 0V200M240 0V200M280 0V200"
+      />
+      <path className="math-axis" d="M0 100H320M160 0V200" />
+      {points.length > 1 && (
+        <polyline className="math-curve" points={points.join(" ")} />
+      )}
+    </svg>
+  );
+}
+function MathPractice({
+  cards,
+  onRecord,
+}: {
+  cards: Flashcard[];
+  onRecord: RecordResponse;
+}) {
+  const [index, setIndex] = useState(0);
+  const [answer, setAnswer] = useState("");
+  const [checked, setChecked] = useState<boolean | null>(null);
+  const card = cards[index];
+  useEffect(() => {
+    setIndex(0);
+    setAnswer("");
+    setChecked(null);
+  }, [cards]);
+  if (!card)
+    return (
+      <StudyEmpty text="Add math cards to start a math practice session." />
+    );
+  const prompt = mathExpression(card.front);
+  const target = mathExpression(card.back);
+  const check = () => {
+    const correct = equivalentMath(answer, target);
+    setChecked(correct);
+    onRecord(card.id, correct, "mathPractice", answer);
+  };
+  const next = () => {
+    setIndex((current) => (current + 1) % cards.length);
+    setAnswer("");
+    setChecked(null);
+  };
+  return (
+    <section className="math-practice">
+      <header>
+        <div>
+          <p className="eyebrow">MATH PRACTICE</p>
+          <h1>Work the math, not a matching game.</h1>
+          <p>
+            Use <code>^</code> exponents, <code>/</code> fractions,{" "}
+            <code>sqrt()</code>, parentheses, functions, and inequalities.
+          </p>
+        </div>
+        <span>
+          {index + 1} / {cards.length}
+        </span>
+      </header>
+      <div className="math-practice-grid">
+        <article className="math-problem">
+          <small>PROBLEM</small>
+          <p>{card.front}</p>
+          <div className="math-problem-expression">
+            <MathFormula value={prompt} display />
+          </div>
+          <label>
+            Your answer
+            <input
+              value={answer}
+              onChange={(event) => {
+                setAnswer(event.target.value);
+                setChecked(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") check();
+              }}
+              placeholder="Example: x^2 / (x + 1)"
+              autoFocus
+            />
+          </label>
+          <div className="math-keypad">
+            {["x", "y", "^", "/", "(", ")", "sqrt(", "π", "≤", "≥", "∪"].map(
+              (key) => (
+                <button
+                  key={key}
+                  onClick={() => setAnswer((current) => current + key)}
+                >
+                  {key}
+                </button>
+              ),
+            )}
+          </div>
+          {checked !== null && (
+            <div
+              className={
+                checked ? "math-result correct" : "math-result incorrect"
+              }
+            >
+              <strong>{checked ? "Correct." : "Not quite."}</strong>
+              <span>
+                {checked ? (
+                  "Your expression is equivalent."
+                ) : (
+                  <>
+                    Expected: <MathFormula value={target} />
+                  </>
+                )}
+              </span>
+            </div>
+          )}
+          <footer>
+            <button
+              className="button button-primary"
+              disabled={!answer.trim()}
+              onClick={check}
+            >
+              Check answer
+            </button>
+            <button className="button button-soft" onClick={next}>
+              Next problem <ChevronRight size={15} />
+            </button>
+          </footer>
+        </article>
+        <aside className="math-workspace">
+          <header>
+            <small>GRAPH / NUMBER LINE</small>
+            <strong>
+              <MathFormula value={prompt} />
+            </strong>
+          </header>
+          <MathGraph expression={prompt} />
+          <p>
+            Graphing supports numeric functions of <em>x</em>. Inequalities and
+            interval notation stay visible in the equation workspace.
+          </p>
+        </aside>
+      </div>
+    </section>
   );
 }
 

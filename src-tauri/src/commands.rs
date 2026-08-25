@@ -3040,9 +3040,10 @@ fn read_set_summary(row: &Row<'_>) -> rusqlite::Result<FlashcardSetSummary> {
         class_id: row.get(1)?,
         title: row.get(2)?,
         description: row.get(3)?,
-        card_count: row.get(4)?,
-        updated_at: row.get(5)?,
-        deleted_at: row.get(6)?,
+        study_kind: row.get(4)?,
+        card_count: row.get(5)?,
+        updated_at: row.get(6)?,
+        deleted_at: row.get(7)?,
     })
 }
 
@@ -5109,7 +5110,7 @@ pub fn list_flashcard_sets(
 ) -> CommandResult<Vec<FlashcardSetSummary>> {
     let connection = database.open()?;
     purge_expired_trash(&connection)?;
-    let mut statement = connection.prepare("SELECT s.id, s.class_id, s.title, s.description, COUNT(c.id), s.updated_at, s.deleted_at FROM flashcard_sets s LEFT JOIN flashcards c ON c.set_id=s.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND (?2=1 OR s.deleted_at IS NULL) GROUP BY s.id ORDER BY s.updated_at DESC").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT s.id, s.class_id, s.title, s.description, s.study_kind, COUNT(c.id), s.updated_at, s.deleted_at FROM flashcard_sets s LEFT JOIN flashcards c ON c.set_id=s.id WHERE s.class_id=?1 AND s.is_study_web_private=0 AND (?2=1 OR s.deleted_at IS NULL) GROUP BY s.id ORDER BY s.updated_at DESC").map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params![class_id, include_deleted as i32], read_set_summary)
         .map_err(|error| error.to_string())?;
@@ -5139,15 +5140,16 @@ pub fn get_flashcard_set(
     id: String,
 ) -> CommandResult<FlashcardSetDetail> {
     let connection = database.open()?;
-    let (id, class_id, title, description, updated_at): (
+    let (id, class_id, title, description, study_kind, updated_at): (
         String,
         String,
         String,
         Option<String>,
         String,
+        String,
     ) = connection
         .query_row(
-            "SELECT id, class_id, title, description, updated_at FROM flashcard_sets WHERE id=?1",
+            "SELECT id, class_id, title, description, study_kind, updated_at FROM flashcard_sets WHERE id=?1",
             [&id],
             |row| {
                 Ok((
@@ -5156,6 +5158,7 @@ pub fn get_flashcard_set(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
@@ -5177,6 +5180,7 @@ pub fn get_flashcard_set(
         class_id,
         title,
         description,
+        study_kind,
         cards,
         progress,
         updated_at,
@@ -5284,6 +5288,17 @@ pub fn read_text_file(path: String) -> CommandResult<String> {
     fs::read_to_string(&source)
         .map(|content| content.trim_start_matches('\u{feff}').to_string())
         .map_err(|_| "SoFlo could not read that text file.".into())
+}
+
+#[tauri::command]
+pub fn set_flashcard_set_study_kind(
+    database: State<'_, Database>,
+    id: String,
+    study_kind: String,
+) -> CommandResult<FlashcardSetDetail> {
+    let kind = match study_kind.trim() { "math" => "math", _ => "standard" };
+    database.open()?.execute("UPDATE flashcard_sets SET study_kind=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![kind, id]).map_err(|error| error.to_string())?;
+    get_flashcard_set(database, id)
 }
 
 #[tauri::command]

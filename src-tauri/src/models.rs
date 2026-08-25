@@ -248,6 +248,7 @@ pub struct FlashcardSetSummary {
     pub class_id: String,
     pub title: String,
     pub description: Option<String>,
+    pub study_kind: String,
     pub card_count: i32,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -287,6 +288,7 @@ pub struct FlashcardSetDetail {
     pub class_id: String,
     pub title: String,
     pub description: Option<String>,
+    pub study_kind: String,
     pub cards: Vec<Flashcard>,
     #[serde(default)]
     pub progress: Vec<CardProgress>,

@@ -593,7 +593,7 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS classes ( id TEXT PRIMARY KEY NOT NULL, semester_id TEXT NOT NULL REFERENCES semesters(id) ON DELETE RESTRICT, name TEXT NOT NULL, course_code TEXT NOT NULL DEFAULT '', professor TEXT, location TEXT, schedule TEXT, icon TEXT NOT NULL DEFAULT 'book-open', accent_color TEXT NOT NULL DEFAULT '#8B7CF6', position INTEGER NOT NULL DEFAULT 0, archived_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS documents ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '{"type":"doc","content":[{"type":"paragraph"}]}', content_plain TEXT NOT NULL DEFAULT '', is_favorite INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS document_revisions ( id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, title TEXT NOT NULL, content TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
-                CREATE TABLE IF NOT EXISTS flashcard_sets ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, description TEXT, is_study_web_private INTEGER NOT NULL DEFAULT 0, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
+                CREATE TABLE IF NOT EXISTS flashcard_sets ( id TEXT PRIMARY KEY NOT NULL, class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE RESTRICT, title TEXT NOT NULL, description TEXT, study_kind TEXT NOT NULL DEFAULT 'standard', is_study_web_private INTEGER NOT NULL DEFAULT 0, deleted_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS flashcards ( id TEXT PRIMARY KEY NOT NULL, set_id TEXT NOT NULL REFERENCES flashcard_sets(id) ON DELETE CASCADE, front TEXT NOT NULL DEFAULT '', back TEXT NOT NULL DEFAULT '', notes TEXT, image_path TEXT, position INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP );
                 CREATE TABLE IF NOT EXISTS card_progress ( card_id TEXT PRIMARY KEY NOT NULL REFERENCES flashcards(id) ON DELETE CASCADE, mastery TEXT NOT NULL DEFAULT 'new', correct_count INTEGER NOT NULL DEFAULT 0, incorrect_count INTEGER NOT NULL DEFAULT 0, consecutive_correct INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT, due_at TEXT );
                 CREATE TABLE IF NOT EXISTS study_sessions ( id TEXT PRIMARY KEY NOT NULL, set_id TEXT REFERENCES flashcard_sets(id) ON DELETE SET NULL, class_id TEXT REFERENCES classes(id) ON DELETE SET NULL, mode TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, metadata TEXT NOT NULL DEFAULT '{}' );
@@ -963,6 +963,14 @@ impl Database {
                     ON course_calendar_manual_items(class_id, due_date, archived);
                 PRAGMA user_version = 22;
             "#).map_err(|error| error.to_string())?;
+        }
+        if version < 23 {
+            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            if !columns.iter().any(|column| column == "study_kind") {
+                connection.execute_batch("ALTER TABLE flashcard_sets ADD COLUMN study_kind TEXT NOT NULL DEFAULT 'standard';").map_err(|error| error.to_string())?;
+            }
+            connection.execute_batch("PRAGMA user_version = 23;").map_err(|error| error.to_string())?;
         }
         Ok(())
     }

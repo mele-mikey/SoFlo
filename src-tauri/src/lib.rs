@@ -134,6 +134,7 @@ pub fn run() {
             commands::create_flashcard_set,
             commands::get_flashcard_set,
             commands::save_flashcard_set,
+            commands::set_flashcard_set_study_kind,
             commands::set_flashcard_set_deleted,
             commands::export_flashcard_set_text,
             commands::read_text_file,
