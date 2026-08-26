@@ -170,8 +170,8 @@ const AI_GPU_LAYERS: &str = "all";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 const FLASHCARD_SOURCE_CHUNK_CHARS: usize = 6_000;
-const FLASHCARD_BATCH_CARD_LIMIT: usize = 8;
-const FLASHCARD_BATCH_MAX_TOKENS: u16 = 1_400;
+const FLASHCARD_BATCH_CARD_LIMIT: usize = 10;
+const FLASHCARD_BATCH_MAX_TOKENS: u16 = 1_800;
 const FLASHCARD_TOTAL_SOURCE_CHARS: usize = 100_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
 const DEFAULT_AI_MODEL_MINIMUM_BYTES: u64 = 2_000_000_000;
@@ -1950,25 +1950,38 @@ fn generate_flashcards_text_blocking(
     let mut cards = Vec::<serde_json::Value>::new();
     let mut seen = HashSet::<String>::new();
     let mut cpu_retry_used = false;
+    // A review sheet often demonstrates a type of problem only once. When the
+    // student explicitly asks for more practice, run two additional model
+    // passes for each section so it can make fresh, solvable variations rather
+    // than stopping after the source examples.
+    let expanded_math_practice = math_mode && flashcard_expansion_requested(&guidance);
+    let batches_per_chunk = if expanded_math_practice { 3 } else { 1 };
+    let total_batches = total_chunks * batches_per_chunk;
     for (index, chunk) in chunks.iter().enumerate() {
-        if cards.len() >= card_budget {
-            break;
-        }
-        let progress = 42u8.saturating_add(((index * 40 / total_chunks) as u8).min(40));
-        emit_ai_progress(
-            &app,
-            progress,
-            &format!("Making flashcards from section {} of {}", index + 1, total_chunks),
-        );
-        let card_limit = FLASHCARD_BATCH_CARD_LIMIT.min(card_budget - cards.len());
-        let prompt = flashcard_generation_prompt(
-            request_instruction,
-            &guidance,
-            chunk,
-            &syllabus,
-            card_limit,
-        );
-        let batch = match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
+        for batch_index in 0..batches_per_chunk {
+            if cards.len() >= card_budget {
+                break;
+            }
+            let completed_batches = index * batches_per_chunk + batch_index;
+            let progress = 42u8.saturating_add(((completed_batches * 40 / total_batches) as u8).min(40));
+            let detail = if batch_index == 0 {
+                format!("Making flashcards from section {} of {}", index + 1, total_chunks)
+            } else {
+                format!("Adding fresh practice from section {} of {}", index + 1, total_chunks)
+            };
+            emit_ai_progress(&app, progress, &detail);
+            let card_limit = FLASHCARD_BATCH_CARD_LIMIT.min(card_budget - cards.len());
+            let recent_cards = cards.iter().rev().take(18).filter_map(|card| card.get("front").and_then(|value| value.as_str())).collect::<Vec<_>>().join(" | ");
+            let prompt = flashcard_generation_prompt(
+                request_instruction,
+                &guidance,
+                chunk,
+                &syllabus,
+                card_limit,
+                expanded_math_practice && batch_index > 0,
+                &recent_cards,
+            );
+            let batch = match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
             Ok(batch) => batch,
             Err(error) if !cpu_retry_used && should_retry_flashcard_batch_on_cpu(&error) => {
                 // A GPU can pass the startup probe yet fail on a larger real
@@ -1992,14 +2005,15 @@ fn generate_flashcards_text_blocking(
                 eprintln!("[SoFlo AI] skipped incomplete flashcard section {}: {error}", index + 1);
                 continue;
             }
-        };
-        for card in batch {
-            if cards.len() >= card_budget {
-                break;
-            }
-            let key = flashcard_card_key(&card);
-            if seen.insert(key) {
-                cards.push(card);
+            };
+            for card in batch {
+                if cards.len() >= card_budget {
+                    break;
+                }
+                let key = flashcard_card_key(&card);
+                if seen.insert(key) {
+                    cards.push(card);
+                }
             }
         }
     }
@@ -2018,13 +2032,45 @@ fn flashcard_generation_prompt(
     source: &str,
     syllabus: &str,
     card_limit: usize,
+    fresh_practice_round: bool,
+    prior_card_fronts: &str,
 ) -> String {
     let syllabus_section = if syllabus.trim().is_empty() {
         String::new()
     } else {
         format!("\n\nCLASS SYLLABUS (supporting context only; use it to align scope and terminology, never invent answers or turn schedules and policies into cards unless the study material asks for them):\n{syllabus}")
     };
-    format!("{request_instruction} This is one section of a larger document. Create at most {card_limit} complete, non-duplicate flashcards from this section only. Other sections are handled separately, so do not try to cover the entire document in one answer. Extra study guidance: {guidance}\n\nINPUT:\n{source}{syllabus_section}")
+    let fresh_practice = if fresh_practice_round {
+        "\n\nThis is an additional math-practice round requested by the student. Create NEW problems that practice the same methods represented in this section, using different valid numbers, signs, expressions, or conditions. Make them slightly more challenging when the source supports it. Every new problem must be solvable from the material, must include all needed values, and must have a verified direct answer. Do not repeat source questions verbatim or reuse any listed earlier card front."
+    } else {
+        ""
+    };
+    let earlier_cards = if prior_card_fronts.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nEARLIER CARD FRONTS TO AVOID REPEATING:\n{prior_card_fronts}")
+    };
+    format!("{request_instruction} This is one section of a larger document. Create up to {card_limit} complete, non-duplicate flashcards from this section only. Other sections are handled separately, so do not try to cover the entire document in one answer. Use every worthwhile example, rule, or distinction in this section before stopping. Extra study guidance: {guidance}{fresh_practice}{earlier_cards}\n\nINPUT:\n{source}{syllabus_section}")
+}
+
+fn flashcard_expansion_requested(guidance: &str) -> bool {
+    let guidance = guidance.to_ascii_lowercase();
+    [
+        "more questions",
+        "extra questions",
+        "additional questions",
+        "more practice",
+        "extra practice",
+        "additional practice",
+        "more problems",
+        "extra problems",
+        "additional problems",
+        "different numbers",
+        "fresh variations",
+        "new variations",
+    ]
+    .iter()
+    .any(|phrase| guidance.contains(phrase))
 }
 
 fn flashcard_batch_completion(
@@ -2171,7 +2217,7 @@ fn looks_like_math_material(source: &str) -> bool {
 
 fn flashcard_system_instruction(math_mode: bool) -> &'static str {
     if math_mode {
-        "You create concise college math flashcards. Return only one complete valid JSON array of objects with non-empty string fields front and back. The user request gives the maximum number of cards; never exceed it, pad it, or begin another array. Preserve each supplied problem's variables, values, signs, exponents, units, and answer exactly. Make problem-first cards: the front is one specific question or expression, and the back begins with its direct answer followed by one to four concise work steps only when the source provides or clearly supports them. When an answer key gives only an answer, do not invent work. Keep equations readable with plain Unicode notation such as x², √, π, ≤, ≥, ≠, →, ×, ÷, and a/b. Never use Markdown, LaTex delimiters, code fences, or commentary. Do not collapse many distinct practice questions into one generic rule card. Include useful concept and rule cards too, but retain the individual practice problems and their answers."
+        "You create concise college math flashcards. Return only one complete valid JSON array of objects with non-empty string fields front and back. The user request gives the maximum number of cards; never exceed it, pad it, or begin another array. In normal source-coverage rounds, preserve each supplied problem's variables, values, signs, exponents, units, and answer exactly. In an explicitly labeled additional-practice round, make new but equivalent solvable variations with different valid values while retaining the same mathematical method; verify every answer. Make problem-first cards: the front is one specific question or expression, and the back begins with its direct answer followed by one to four concise work steps only when the source provides or clearly supports them. When an answer key gives only an answer, do not invent work. Keep equations readable with plain Unicode notation such as x², √, π, ≤, ≥, ≠, →, ×, ÷, and a/b. Never use Markdown, LaTex delimiters, code fences, or commentary. Do not collapse many distinct practice questions into one generic rule card. Include useful concept and rule cards too, but retain the individual practice problems and their answers."
     } else {
         "You create concise college flashcards. Return only one complete valid JSON array of objects with non-empty string fields front and back. The user request gives the maximum number of cards; never exceed it, pad it, or begin another array. The front must be a precise question or term under 16 words. The back must be a direct answer under 36 words; use short phrases or compact bullet-like clauses, never a paragraph. Focus on definitions, claims, events, formulas, and distinctions in the supplied materials. If the user supplies only a topic or instruction, use accurate general academic knowledge and make the cards directly about that request. Do not use Markdown or commentary."
     }
@@ -4882,6 +4928,181 @@ pub fn save_document(
     get_document(database, input.id)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDocumentDocxInput {
+    title: String,
+    content: String,
+    content_plain: String,
+}
+
+fn docx_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn docx_run(text: &str, marks: Option<&Vec<serde_json::Value>>) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let has_mark = |kind: &str| marks.is_some_and(|items| items.iter().any(|mark| mark.get("type").and_then(|value| value.as_str()) == Some(kind)));
+    let mut properties = String::new();
+    if has_mark("bold") { properties.push_str("<w:b/>"); }
+    if has_mark("italic") { properties.push_str("<w:i/>"); }
+    if has_mark("underline") { properties.push_str("<w:u w:val=\"single\"/>"); }
+    if has_mark("strike") { properties.push_str("<w:strike/>"); }
+    if has_mark("superscript") { properties.push_str("<w:vertAlign w:val=\"superscript\"/>"); }
+    if has_mark("subscript") { properties.push_str("<w:vertAlign w:val=\"subscript\"/>"); }
+    if has_mark("code") { properties.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/><w:shd w:val=\"clear\" w:fill=\"EEEEEE\"/>"); }
+    format!("<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>", if properties.is_empty() { String::new() } else { format!("<w:rPr>{properties}</w:rPr>") }, docx_escape(text))
+}
+
+fn docx_inline(node: &serde_json::Value) -> String {
+    let node_type = node.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+    match node_type {
+        "text" => docx_run(
+            node.get("text").and_then(|value| value.as_str()).unwrap_or_default(),
+            node.get("marks").and_then(|value| value.as_array()),
+        ),
+        "hardBreak" => "<w:r><w:br/></w:r>".into(),
+        "citationPlaceholder" => docx_run(node.get("attrs").and_then(|value| value.get("label")).and_then(|value| value.as_str()).unwrap_or("Citation detail"), None),
+        _ => node
+            .get("content")
+            .and_then(|value| value.as_array())
+            .map(|children| children.iter().map(docx_inline).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn docx_paragraph(content: &serde_json::Value, properties: &str, prefix: &str) -> String {
+    let children = content.as_array().map(|items| items.iter().map(docx_inline).collect::<String>()).unwrap_or_default();
+    let prefix = if prefix.is_empty() { String::new() } else { docx_run(prefix, None) };
+    format!("<w:p>{properties}{prefix}{children}</w:p>")
+}
+
+fn docx_list_item(node: &serde_json::Value, prefix: &str, output: &mut String) {
+    let Some(children) = node.get("content").and_then(|value| value.as_array()) else {
+        output.push_str(&docx_paragraph(&serde_json::Value::Null, "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>", prefix));
+        return;
+    };
+    let mut first = true;
+    for child in children {
+        let node_type = child.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+        if node_type == "paragraph" {
+            output.push_str(&docx_paragraph(child.get("content").unwrap_or(&serde_json::Value::Null), "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>", if first { prefix } else { "" }));
+            first = false;
+        } else {
+            docx_blocks(child, output);
+        }
+    }
+}
+
+fn docx_table(node: &serde_json::Value, output: &mut String) {
+    output.push_str("<w:tbl><w:tblPr><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:left w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:right w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"B0B0B0\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"B0B0B0\"/></w:tblBorders></w:tblPr>");
+    for row in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+        output.push_str("<w:tr>");
+        for cell in row.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+            let is_header = cell.get("type").and_then(|value| value.as_str()) == Some("tableHeader");
+            output.push_str("<w:tc>");
+            if is_header { output.push_str("<w:tcPr><w:shd w:val=\"clear\" w:fill=\"E7E7E7\"/></w:tcPr>"); }
+            let mut wrote_paragraph = false;
+            for block in cell.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+                if block.get("type").and_then(|value| value.as_str()) == Some("paragraph") {
+                    output.push_str(&docx_paragraph(block.get("content").unwrap_or(&serde_json::Value::Null), "", ""));
+                    wrote_paragraph = true;
+                }
+            }
+            if !wrote_paragraph { output.push_str("<w:p/>"); }
+            output.push_str("</w:tc>");
+        }
+        output.push_str("</w:tr>");
+    }
+    output.push_str("</w:tbl>");
+}
+
+fn docx_blocks(node: &serde_json::Value, output: &mut String) {
+    let node_type = node.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+    match node_type {
+        "doc" => for child in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() { docx_blocks(child, output); },
+        "paragraph" => output.push_str(&docx_paragraph(node.get("content").unwrap_or(&serde_json::Value::Null), "", "")),
+        "heading" => {
+            let level = node.get("attrs").and_then(|value| value.get("level")).and_then(|value| value.as_i64()).unwrap_or(1).clamp(1, 6);
+            output.push_str(&docx_paragraph(node.get("content").unwrap_or(&serde_json::Value::Null), &format!("<w:pPr><w:pStyle w:val=\"Heading{}\"/></w:pPr>", level), ""));
+        }
+        "blockquote" => for child in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+            if child.get("type").and_then(|value| value.as_str()) == Some("paragraph") {
+                output.push_str(&docx_paragraph(child.get("content").unwrap_or(&serde_json::Value::Null), "<w:pPr><w:ind w:left=\"720\"/><w:pBdr><w:left w:val=\"single\" w:sz=\"12\" w:color=\"888888\" w:space=\"120\"/></w:pBdr></w:pPr>", ""));
+            } else { docx_blocks(child, output); }
+        },
+        "codeBlock" => output.push_str(&docx_paragraph(node.get("content").unwrap_or(&serde_json::Value::Null), "<w:pPr><w:shd w:val=\"clear\" w:fill=\"F0F0F0\"/></w:pPr>", "")),
+        "bulletList" => for item in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() { docx_list_item(item, "• ", output); },
+        "orderedList" => for (index, item) in node.get("content").and_then(|value| value.as_array()).into_iter().flatten().enumerate() { docx_list_item(item, &format!("{}. ", index + 1), output); },
+        "taskList" => for item in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+            let checked = item.get("attrs").and_then(|value| value.get("checked")).and_then(|value| value.as_bool()).unwrap_or(false);
+            docx_list_item(item, if checked { "☑ " } else { "☐ " }, output);
+        },
+        "listItem" | "taskItem" => docx_list_item(node, "• ", output),
+        "table" => docx_table(node, output),
+        "horizontalRule" => output.push_str("<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"8\" w:color=\"808080\"/></w:pBdr></w:pPr></w:p>"),
+        _ => for child in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() { docx_blocks(child, output); },
+    }
+}
+
+fn docx_plain_blocks(plain: &str) -> String {
+    let mut output = String::new();
+    for line in plain.replace('\r', "").lines() {
+        output.push_str(&docx_paragraph(&serde_json::json!([{ "type": "text", "text": line }]), "", ""));
+    }
+    if output.is_empty() { output.push_str("<w:p/>"); }
+    output
+}
+
+fn docx_document_xml(content: &str, content_plain: &str) -> String {
+    let mut blocks = String::new();
+    if let Ok(document) = serde_json::from_str::<serde_json::Value>(content) {
+        docx_blocks(&document, &mut blocks);
+    }
+    if blocks.is_empty() { blocks = docx_plain_blocks(content_plain); }
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{blocks}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>")
+}
+
+fn document_export_filename(title: &str) -> String {
+    let name = title.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') { character } else { '_' }).collect::<String>();
+    let name = name.trim_matches([' ', '_', '-']);
+    if name.is_empty() { "SoFlo document".into() } else { name.into() }
+}
+
+fn write_document_docx(path: &Path, title: &str, content: &str, content_plain: &str) -> CommandResult<()> {
+    let file = fs::File::create(path).map_err(|_| "SoFlo could not create the Word document.".to_string())?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut write_part = |name: &str, value: String| -> CommandResult<()> {
+        archive.start_file(name, options).map_err(|_| "SoFlo could not create the Word document.".to_string())?;
+        archive.write_all(value.as_bytes()).map_err(|_| "SoFlo could not write the Word document.".to_string())
+    };
+    write_part("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/><Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/><Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/></Types>".into())?;
+    write_part("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" Target=\"docProps/app.xml\"/></Relationships>".into())?;
+    write_part("docProps/core.xml", format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{}</dc:title><dc:creator>SoFlo</dc:creator></cp:coreProperties>", docx_escape(title)))?;
+    write_part("docProps/app.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>SoFlo</Application></Properties>".into())?;
+    write_part("word/styles.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"/><w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:rPr><w:b/><w:sz w:val=\"32\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading2\"><w:name w:val=\"heading 2\"/><w:rPr><w:b/><w:sz w:val=\"28\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading3\"><w:name w:val=\"heading 3\"/><w:rPr><w:b/><w:sz w:val=\"24\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading4\"><w:name w:val=\"heading 4\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading5\"><w:name w:val=\"heading 5\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading6\"><w:name w:val=\"heading 6\"/></w:style></w:styles>".into())?;
+    write_part("word/document.xml", docx_document_xml(content, content_plain))?;
+    archive.finish().map_err(|_| "SoFlo could not finish the Word document.".to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_document_docx(input: ExportDocumentDocxInput) -> CommandResult<String> {
+    let downloads = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?).join("Downloads");
+    fs::create_dir_all(&downloads).map_err(|_| "SoFlo could not open Downloads to save the Word document.".to_string())?;
+    let path = downloads.join(format!("{}.docx", document_export_filename(&input.title)));
+    write_document_docx(&path, &input.title, &input.content, &input.content_plain)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn set_document_deleted(
     database: State<'_, Database>,
@@ -5361,6 +5582,7 @@ pub async fn ask_study_tutor(
     student_work: String,
     message: String,
     history: String,
+    cards_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         if message.trim().is_empty() { return Err("Ask your tutor a question first.".into()); }
@@ -5370,14 +5592,52 @@ pub async fn ask_study_tutor(
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(75)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
         let math_mode = looks_like_math_material(&format!("{front}\n{back}\n{question}"));
         let system = if math_mode {
-            "You are SoFlo's patient, interactive math tutor. Continue the conversation naturally. When a student is stuck, identify the exact operation or rule that matters, separate the work into 2 to 4 small readable steps, then ask one short check-in question. When they give an answer, compare it to their work, affirm what is right, correct the first real mistake, and give one slightly harder comparable problem. Use readable Unicode math and short line breaks. Do not give a final answer before they attempt it unless they explicitly ask. If they request another or changed problem, make one equivalent solvable variation with all values supplied and do not include its answer. Stay grounded in the active flashcard concept."
+            "You are SoFlo's patient, interactive math tutor. Your only job is to help the student think. NEVER give, state, confirm, reveal, or write the final answer to the active problem, even if the student directly asks. Never finish the last arithmetic, simplification, or solving step for them. Instead identify the next operation or rule, show at most the setup before the final result, and ask one short check-in question. Correct only the first real mistake in their shown work. Keep every response concise, readable, and grounded in the active flashcard and session context."
         } else {
-            "You are SoFlo's patient study tutor. Help the student understand the active flashcard with concise, accurate explanations, examples, and questions. Guide them instead of simply giving away an answer unless they explicitly ask for it. Stay grounded in the active flashcard."
+            "You are SoFlo's patient study tutor. Your only job is to help the student think. NEVER give, state, confirm, reveal, or write the active flashcard answer, even if the student directly asks. Use concise explanations, a useful hint, a related example, or one check-in question that lets the student reach it themselves. Stay grounded in the active flashcard and session context."
         };
-        let prompt = format!("FLASHCARD FRONT:\n{}\n\nFLASHCARD BACK:\n{}\n\nACTIVE QUESTION:\n{}\n\nSTUDENT WORK SO FAR:\n{}\n\nRECENT TUTOR DIALOGUE:\n{}\n\nSTUDENT'S NEW MESSAGE:\n{}", front.trim(), back.trim(), question.trim(), student_work.trim(), history.trim(), message.trim());
+        let card_memory = cards_context.trim().chars().take(8_000).collect::<String>();
+        let recent_history = history.trim().chars().take(6_000).collect::<String>();
+        let prompt = format!("PRIVATE ACTIVE FLASHCARD (its back is reference-only; do not disclose it):\nFRONT: {}\nBACK: {}\n\nACTIVE QUESTION:\n{}\n\nSTUDENT WORK SO FAR:\n{}\n\nSESSION FLASHCARD MEMORY:\n{}\n\nRECENT TUTOR DIALOGUE:\n{}\n\nSTUDENT'S NEW MESSAGE:\n{}", front.trim(), back.trim(), question.trim(), student_work.trim(), card_memory, recent_history, message.trim());
         let output = local_chat_text(&client, port, system, &prompt, 900)?;
         touch_ai_server();
         Ok(output.trim().to_string())
+    }).await.map_err(|_| "SoFlo's tutor task stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+pub async fn generate_study_tutor_practice(
+    app: tauri::AppHandle,
+    model_path: String,
+    front: String,
+    back: String,
+    question: String,
+    history: String,
+    cards_context: String,
+    request: String,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.trim().is_empty() { return Err("Ask for a practice problem first.".into()); }
+        let resolved = resolve_ai_model_path(&app, &model_path)?;
+        emit_ai_progress(&app, 18, "Making temporary practice");
+        let port = ensure_ai_server(&resolved, &app)?;
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(75)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+        let system = "You create temporary study practice for SoFlo's tutor. Return only one valid JSON object with exactly one key, problems. problems is an array of 1 to 4 objects; every object has exactly the non-empty string keys question and answer. The answer is private for SoFlo's checker and must never appear in the question. Create fresh, solvable questions that use the active flashcard's exact skill, with different valid numbers, values, or wording where possible. Make them slightly harder only when the source supports it. Do not create flashcards, do not persist anything, do not add commentary, and do not use Markdown fences.";
+        let card_memory = cards_context.trim().chars().take(8_000).collect::<String>();
+        let recent_history = history.trim().chars().take(6_000).collect::<String>();
+        let prompt = format!("ACTIVE FLASHCARD:\nFRONT: {}\nBACK: {}\n\nCURRENT QUESTION:\n{}\n\nSESSION FLASHCARD MEMORY:\n{}\n\nRECENT TUTOR DIALOGUE:\n{}\n\nSTUDENT REQUEST:\n{}", front.trim(), back.trim(), question.trim(), card_memory, recent_history, request.trim());
+        let output = local_chat_json_object(&client, port, system, &prompt, 1_200)?;
+        touch_ai_server();
+        let object = json_object_from_response(&output).ok_or_else(|| "SoFlo could not prepare temporary practice questions.".to_string())?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&object).map_err(|_| "SoFlo could not read the temporary practice questions.".to_string())?;
+        let problems = parsed.get("problems").and_then(|value| value.as_array()).ok_or_else(|| "SoFlo could not prepare temporary practice questions.".to_string())?;
+        let sanitized = problems.iter().filter_map(|problem| {
+            let question = problem.get("question")?.as_str()?.trim();
+            let answer = problem.get("answer")?.as_str()?.trim();
+            (!question.is_empty() && !answer.is_empty()).then(|| serde_json::json!({"question": question, "answer": answer}))
+        }).take(4).collect::<Vec<_>>();
+        if sanitized.is_empty() { return Err("SoFlo could not prepare temporary practice questions.".into()); }
+        serde_json::to_string(&serde_json::json!({ "problems": sanitized })).map_err(|_| "SoFlo could not save the temporary practice questions.".into())
     }).await.map_err(|_| "SoFlo's tutor task stopped unexpectedly.".to_string())?
 }
 
@@ -8540,13 +8800,13 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
+        available_loopback_port, fallback_study_web_plan, flashcard_expansion_requested, flashcard_generation_prompt, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
         course_calendar_plan_uses_source_dates, course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_analysis_source, lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
-        usable_lecture_notes,
+        usable_lecture_notes, write_document_docx,
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
         StudyWebSemanticPlan, StudyWebSourceCard, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
@@ -8679,6 +8939,40 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0]["front"], "2 + 2");
         assert_eq!(cards[1]["back"], "meaning");
+    }
+
+    #[test]
+    fn expands_math_practice_only_when_requested_and_keeps_new_prompts_distinct() {
+        assert!(flashcard_expansion_requested("Make more questions with different numbers for extra practice."));
+        assert!(!flashcard_expansion_requested("Cover the review guide carefully."));
+        let prompt = flashcard_generation_prompt(
+            "Use the supplied material.",
+            "Make more questions with different numbers.",
+            "Solve 2x + 3 = 11.",
+            "",
+            10,
+            true,
+            "Solve 2x + 3 = 11",
+        );
+        assert!(prompt.contains("additional math-practice round"));
+        assert!(prompt.contains("different valid numbers"));
+        assert!(prompt.contains("EARLIER CARD FRONTS"));
+    }
+
+    #[test]
+    fn writes_a_word_compatible_openxml_document() {
+        let path = std::env::temp_dir().join(format!("soflo-docx-test-{}.docx", uuid::Uuid::new_v4()));
+        let content = r#"{"type":"doc","content":[{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study & Review"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Important"},{"type":"text","text":" details"}]}]}"#;
+        write_document_docx(&path, "Review", content, "").expect("write docx");
+        let file = std::fs::File::open(&path).expect("open docx");
+        let mut archive = zip::ZipArchive::new(file).expect("openxml zip");
+        assert!(archive.by_name("[Content_Types].xml").is_ok());
+        let mut document = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").expect("document xml"), &mut document).expect("read document xml");
+        assert!(document.contains("Heading2"));
+        assert!(document.contains("Study &amp; Review"));
+        assert!(document.contains("<w:b/>"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1231,6 +1231,19 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     setPdfMessage('Opening your PDF export dialog…')
     try { globalThis.print() } catch { setPdfMessage('SoFlo could not open the PDF export dialog.') }
   }
+  const exportDocx = async () => {
+    setPdfMessage('Creating a Microsoft Word document…')
+    try {
+      const path = await api.exportDocumentDocx({
+        title: document.title || 'SoFlo document',
+        content: JSON.stringify(editor.getJSON()),
+        contentPlain: editor.getText(),
+      })
+      setPdfMessage(`Word document saved to ${path}.`)
+    } catch (error) {
+      setPdfMessage(error instanceof Error ? error.message : 'SoFlo could not export this Word document.')
+    }
+  }
   const importPdf = async () => {
     const source = await open({ title: 'Import document into this paper', multiple: false, directory: false, filters: [{ name: 'Documents', extensions: ['pdf', 'doc', 'docx', 'pptx'] }] })
     if (!source || Array.isArray(source)) return
@@ -1666,7 +1679,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       <div className="editor-actions">{onDuplicate && <button className="editor-action" onClick={onDuplicate}>Duplicate</button>}<button className="editor-action danger" onClick={onDelete}>{deleteLabel}</button></div>
     </header>}
     {!versionHistoryOpen && <div className="editor-toolbar-wrap">
-    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onPaperContext={openPaperContext} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
+    <EditorToolbar editor={editor} spellcheck={spellcheck} aiEnabled={aiEnabled} aiGrammarEnabled={aiGrammarEnabled} grammarReviewing={grammarReviewing} researchReviewing={researchReviewing} onSpellcheckChange={onSpellcheckChange} onAiGrammarEnabledChange={onAiGrammarEnabledChange} onGrammarReview={() => void reviewGrammar(false)} onResearchAndGrade={() => void runResearchAndGrade()} onAiThesaurus={openThesaurus} onPaperContext={openPaperContext} onVersionHistory={() => void openVersionHistory()} onExportPdf={exportPdf} onExportDocx={() => void exportDocx()} onImportPdf={() => void importPdf()} onFind={() => window.dispatchEvent(new Event('soflo:open-find'))} onOpenLinkDialog={openLinkDialog} onOpenImageDialog={() => setImageDialog({ src: '' })} onOpenTableDialog={() => setTableDialog({ rows: 3, cols: 3, withHeaderRow: true })} />
     </div>}
     {editingRegion && <div className="header-footer-context-menu" role="menu" aria-label={`${editingRegion.region === 'header' ? 'Header' : 'Footer'} tools`} style={{ left: Math.min(editingRegion.x, window.innerWidth - 228), top: Math.min(editingRegion.y + 10, window.innerHeight - 174) }} onMouseDown={(event) => event.preventDefault()}><span>{editingRegion.region === 'header' ? `Header · page ${editingRegion.page}` : `Footer · page ${editingRegion.page}`}</span><button type="button" onClick={() => insertRunningField('page-number')}>Insert page number</button><button type="button" onClick={() => insertRunningField('page-x-of-y')}>Insert Page X of Y</button><button type="button" className={(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'active' : ''} onClick={toggleRunningRepeat}>{(editingRegion.region === 'header' ? repeatHeader : repeatFooter) ? 'Edit each page separately' : 'Make same on every page'}</button></div>}
     {findOpen && <div className="find-bar"><Search size={15} /><input id="find-input" value={findValue} onChange={(event) => runFind(event.target.value)} placeholder="Find in document" /><span>{findValue ? 'Use Enter to find next' : ''}</span><button className="icon-button tiny" onClick={() => setFindOpen(false)} aria-label="Close find">×</button></div>}
@@ -1723,12 +1736,13 @@ function ContextMenuAction({ label, shortcut, disabled = false, onClick }: { lab
   return <button type="button" role="menuitem" disabled={disabled} onClick={onClick}><span>{label}</span><kbd>{shortcut}</kbd></button>
 }
 
-function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onPaperContext, onVersionHistory, onExportPdf, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onPaperContext: () => void; onVersionHistory: () => void; onExportPdf: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
+function EditorToolbar({ editor, spellcheck, aiEnabled, aiGrammarEnabled, grammarReviewing, researchReviewing, onSpellcheckChange, onAiGrammarEnabledChange, onGrammarReview, onResearchAndGrade, onAiThesaurus, onPaperContext, onVersionHistory, onExportPdf, onExportDocx, onImportPdf, onFind, onOpenLinkDialog, onOpenImageDialog, onOpenTableDialog }: { editor: NonNullable<ReturnType<typeof useEditor>>; spellcheck: boolean; aiEnabled: boolean; aiGrammarEnabled: boolean; grammarReviewing: boolean; researchReviewing: boolean; onSpellcheckChange: (value: boolean) => void; onAiGrammarEnabledChange: (value: boolean) => void; onGrammarReview: () => void; onResearchAndGrade: () => void; onAiThesaurus: () => void; onPaperContext: () => void; onVersionHistory: () => void; onExportPdf: () => void; onExportDocx: () => void; onImportPdf: () => void; onFind: () => void; onOpenLinkDialog: () => void; onOpenImageDialog: () => void; onOpenTableDialog: () => void }) {
   const pasteWithoutFormatting = async () => {
     try { const plain = await navigator.clipboard.readText(); editor.chain().focus().insertContent(plain).run() } catch { /* The platform's Ctrl+Shift+V fallback remains available. */ }
   }
   return <div className="editor-toolbar" role="toolbar" aria-label="Text formatting">
-    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export PDF</button><button onClick={onImportPdf}><Import size={15} />Import document</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <ToolbarMenu label="Document" icon={<Menu size={16} />} iconOnly><button onClick={onImportPdf}><Import size={15} />Import document</button><button onClick={onVersionHistory}><RefreshCw size={15} />Version history</button><hr /><button onClick={() => onSpellcheckChange(!spellcheck)}><SpellCheck2 size={15} />{spellcheck ? 'Disable spellcheck' : 'Enable spellcheck'}</button></ToolbarMenu>
+    <ToolbarMenu label="Export" icon={<FileDown size={16} />} iconOnly><button onClick={onExportPdf}><FileDown size={15} />Export as PDF</button><button onClick={onExportDocx}><FileText size={15} />Export as Word (.docx)</button></ToolbarMenu>
     <Divider />
     <ToolbarMenu label="AI writing" icon={<Sparkles size={16} />} iconOnly disabled={!aiEnabled} popoverClassName="ai-writing-popover"><button onClick={() => onAiGrammarEnabledChange(!aiGrammarEnabled)}>{aiGrammarEnabled ? '✓ AI spelling & grammar' : 'AI spelling & grammar off'}</button><button onClick={onPaperContext}>AI Paper Context</button><button disabled={!aiGrammarEnabled || grammarReviewing} onClick={onGrammarReview}>{grammarReviewing ? 'Checking writing…' : 'AI Review'}</button><button disabled={researchReviewing} onClick={onResearchAndGrade}>{researchReviewing ? 'Researching your paper…' : 'AI Research & Grade'}</button><button onClick={onAiThesaurus}>AI Thesaurus</button></ToolbarMenu>
     <Divider />

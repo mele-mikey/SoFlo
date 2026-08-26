@@ -18,18 +18,14 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { evaluate } from "mathjs";
 import { api } from "../../lib/api";
 import type { Flashcard, FlashcardSetDetail } from "../../lib/types";
+import { equivalentMath } from "./mathPractice";
 import {
-  equivalentMath,
-  finiteMathValue,
-  isStandaloneMathExpression,
-  mathExpression,
-  normalizedMath,
-  parseMathInterval,
-  type MathInterval,
-} from "./mathPractice";
+  temporaryPracticeFromResponse,
+  wantsTemporaryPractice,
+  type TemporaryPracticeProblem,
+} from "./studyTutor";
 import {
   createQuestion,
   createTest,
@@ -64,6 +60,15 @@ interface StudyViewProps {
     studentWork: string,
     message: string,
     history: string,
+    cardsContext: string,
+  ) => Promise<string>;
+  onGenerateStudyTutorPractice: (
+    front: string,
+    back: string,
+    question: string,
+    history: string,
+    cardsContext: string,
+    request: string,
   ) => Promise<string>;
   onBack: () => void;
   onModeChange: (mode: StudyViewProps["mode"]) => void;
@@ -77,6 +82,7 @@ type RecordResponse = (
 ) => void;
 
 type TeachQuestion = { question: string; target: string; hint: string };
+type TutorMessage = { id: string; role: "user" | "tutor"; text: string; pending?: boolean };
 type TeachGrade = {
   score: number;
   verdict: "strong" | "good" | "developing" | "review";
@@ -285,6 +291,7 @@ export function StudyView({
   onGenerateTeachQuestion,
   onGradeTeachAnswer,
   onAskStudyTutor,
+  onGenerateStudyTutorPractice,
   onBack,
   onModeChange,
 }: StudyViewProps) {
@@ -420,7 +427,7 @@ export function StudyView({
           {mastery.mastered ?? 0} mastered · {mastery.needsWork ?? 0} need work
         </span>
       </header>
-      {mathSet && <MathPractice cards={cards} onRecord={record} />}
+      {mathSet && <MathPractice key={cards.map((card) => `${card.id}:${card.updatedAt}`).join("|")} cards={cards} onRecord={record} onAskTutor={onAskStudyTutor} onGenerateTutorPractice={onGenerateStudyTutorPractice} />}
       {!mathSet && mode === "flashcards" && (
         <Flashcards cards={cards} onRecord={record} />
       )}
@@ -446,84 +453,45 @@ export function StudyView({
   );
 }
 
-function MathGraph({ expression }: { expression: string }) {
-  const plot = expression.replace(/^\s*(?:y\s*=)?\s*/i, "");
-  const points: string[] = [];
-  for (let pixel = 0; pixel <= 320; pixel += 2) {
-    const x = (pixel - 160) / 16;
-    try {
-      const y = Number(evaluate(normalizedMath(plot), { x }));
-      if (Number.isFinite(y) && Math.abs(y) < 100)
-        points.push(`${pixel},${100 - y * 10}`);
-    } catch {
-      /* no curve for a non-numeric expression */
-    }
-  }
-  return (
-    <svg
-      className="math-graph"
-      viewBox="0 0 320 200"
-      role="img"
-      aria-label={`Graph of ${expression}`}
-    >
-      <path
-        className="math-grid"
-        d="M0 20H320M0 60H320M0 100H320M0 140H320M0 180H320M40 0V200M80 0V200M120 0V200M160 0V200M200 0V200M240 0V200M280 0V200"
-      />
-      <path className="math-axis" d="M0 100H320M160 0V200" />
-      {points.length > 1 && (
-        <polyline className="math-curve" points={points.join(" ")} />
-      )}
-    </svg>
-  );
-}
-function IntervalNumberLine({ interval }: { interval: MathInterval }) {
-  const lower = finiteMathValue(interval.lower);
-  const upper = finiteMathValue(interval.upper);
-  if (lower === null || upper === null || lower >= upper) return null;
-  const span = Math.max(1, upper - lower);
-  const minimum = Math.floor(Math.min(-5, lower - Math.max(2, span * 0.35)));
-  const maximum = Math.ceil(Math.max(5, upper + Math.max(2, span * 0.35)));
-  const toX = (value: number) => 30 + ((value - minimum) / (maximum - minimum)) * 260;
-  const left = toX(lower);
-  const right = toX(upper);
-  const ticks = Array.from({ length: 9 }, (_, index) => minimum + ((maximum - minimum) * index) / 8);
-  const label = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
-  return <svg className="math-number-line" viewBox="0 0 320 110" role="img" aria-label={`Number line for ${interval.lower} ${interval.lowerInclusive ? "less than or equal to" : "less than"} ${interval.variable} ${interval.upperInclusive ? "less than or equal to" : "less than"} ${interval.upper}`}><path className="math-axis" d="M18 56H302M18 56l8-5M18 56l8 5M302 56l-8-5M302 56l-8 5" />{ticks.map((value) => { const x = toX(value); return <g key={value}><path className="math-axis" d={`M${x} 50V62`} /><text x={x} y="79" textAnchor="middle">{label(value)}</text></g> })}<path className="math-curve" d={`M${left} 56H${right}`} /><circle cx={left} cy="56" r="6" className={interval.lowerInclusive ? "math-number-dot closed" : "math-number-dot"} /><circle cx={right} cy="56" r="6" className={interval.upperInclusive ? "math-number-dot closed" : "math-number-dot"} /></svg>;
-}
-
 function MathPractice({
   cards,
   onRecord,
+  onAskTutor,
+  onGenerateTutorPractice,
 }: {
   cards: Flashcard[];
   onRecord: RecordResponse;
+  onAskTutor: StudyViewProps["onAskStudyTutor"];
+  onGenerateTutorPractice: StudyViewProps["onGenerateStudyTutorPractice"];
 }) {
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState("");
   const [checked, setChecked] = useState<boolean | null>(null);
-  const card = cards[index];
-  useEffect(() => {
-    setIndex(0);
-    setAnswer("");
-    setChecked(null);
-  }, [cards]);
+  const [temporaryProblems, setTemporaryProblems] = useState<TemporaryPracticeProblem[]>([]);
+  const sessionCards = useMemo(() => [
+    ...cards.map((card) => ({ id: card.id, front: card.front, back: card.back, temporary: false })),
+    ...temporaryProblems.map((problem, position) => ({ id: `temporary-${position}-${problem.question}`, front: problem.question, back: problem.answer, temporary: true })),
+  ], [cards, temporaryProblems]);
+  const card = sessionCards[index];
   if (!card)
     return (
       <StudyEmpty text="Add math cards to start a math practice session." />
     );
-  const prompt = mathExpression(card.front);
-  const promptIsExpression = isStandaloneMathExpression(card.front);
-  const target = mathExpression(card.back) || card.back.trim();
-  const interval = parseMathInterval(target) ?? parseMathInterval(prompt);
-  const workspaceExpression = promptIsExpression ? prompt : "";
+  const target = card.back.trim();
   const check = () => {
     const correct = equivalentMath(answer, target);
     setChecked(correct);
-    onRecord(card.id, correct, "mathPractice", answer);
+    if (!card.temporary) onRecord(card.id, correct, "mathPractice", answer);
   };
   const next = () => {
-    setIndex((current) => (current + 1) % cards.length);
+    setIndex((current) => (current + 1) % sessionCards.length);
+    setAnswer("");
+    setChecked(null);
+  };
+  const addTemporaryProblems = (problems: TemporaryPracticeProblem[]) => {
+    if (!problems.length) return;
+    setIndex(cards.length + temporaryProblems.length);
+    setTemporaryProblems((current) => [...current, ...problems]);
     setAnswer("");
     setChecked(null);
   };
@@ -539,16 +507,14 @@ function MathPractice({
           </p>
         </div>
         <span>
-          {index + 1} / {cards.length}
+          {index + 1} / {sessionCards.length}
         </span>
       </header>
       <div className="math-practice-grid">
         <article className="math-problem">
           <small>PROBLEM</small>
           <p><MathText>{card.front}</MathText></p>
-          {prompt && <div className="math-problem-expression">
-            <MathFormula value={prompt} display />
-          </div>}
+          {card.temporary && <p className="math-temporary-label">Temporary tutor practice — it will disappear when you leave this study session.</p>}
           <label>
             Your answer
             <input
@@ -588,9 +554,7 @@ function MathPractice({
                 {checked ? (
                   "Your expression is equivalent."
                 ) : (
-                  <>
-                    Expected: <MathFormula value={target} />
-                  </>
+                  "Use the tutor for the next step, then try again."
                 )}
               </span>
             </div>
@@ -608,17 +572,17 @@ function MathPractice({
             </button>
           </footer>
         </article>
-        <aside className="math-workspace">
-          <header>
-            <small>{interval ? "NUMBER LINE" : workspaceExpression ? "FUNCTION GRAPH" : "MATH WORKSPACE"}</small>
-            <strong>
-              {interval ? <MathFormula value={target} /> : workspaceExpression ? <MathFormula value={workspaceExpression} /> : "Use the problem and answer field to work it out."}
-            </strong>
-          </header>
-          {interval ? <IntervalNumberLine interval={interval} /> : workspaceExpression ? <MathGraph expression={workspaceExpression} /> : <div className="math-workspace-empty">A graph appears for a function or equation.</div>}
-          <p>
-            {interval ? "Open circles are strict; filled circles include the boundary." : workspaceExpression ? <>Graphs evaluate numeric functions of <em>x</em>.</> : "Type your solution using the math keypad when helpful."}
-          </p>
+        <aside className="math-workspace math-tutor-workspace">
+          <StudyTutor
+            key={cards.map((item) => `${item.id}:${item.updatedAt}`).join("|")}
+            card={card}
+            cards={cards}
+            question={card.front}
+            studentWork={answer}
+            onAsk={onAskTutor}
+            onGeneratePractice={onGenerateTutorPractice}
+            onTemporaryProblems={addTemporaryProblems}
+          />
         </aside>
       </div>
     </section>
@@ -1144,7 +1108,9 @@ function TeachItBack({
           </div>
         )}
         <StudyTutor
+          key={cards.map((item) => `${item.id}:${item.updatedAt}`).join("|")}
           card={card}
+          cards={cards}
           question={question?.question ?? ""}
           studentWork={answer}
           onAsk={onAskTutor}
@@ -1154,111 +1120,50 @@ function TeachItBack({
   );
 }
 
-function StudyTutor({
-  card,
-  question,
-  studentWork,
-  onAsk,
-}: {
-  card: Flashcard;
-  question: string;
-  studentWork: string;
-  onAsk: StudyViewProps["onAskStudyTutor"];
-}) {
-  const [messages, setMessages] = useState<
-    { role: "user" | "tutor"; text: string }[]
-  >([]);
+function compactTutorCardContext(cards: Pick<Flashcard, "front" | "back">[]) {
+  return cards.slice(0, 24).map((item, index) => `CARD ${index + 1}\nFront: ${item.front.trim()}\nBack: ${item.back.trim()}`).join("\n\n").slice(0, 8_000);
+}
+
+function StudyTutor({ card, cards, question, studentWork, onAsk, onGeneratePractice, onTemporaryProblems }: { card: Pick<Flashcard, "id" | "front" | "back">; cards: Flashcard[]; question: string; studentWork: string; onAsk: StudyViewProps["onAskStudyTutor"]; onGeneratePractice?: StudyViewProps["onGenerateStudyTutorPractice"]; onTemporaryProblems?: (problems: TemporaryPracticeProblem[]) => void }) {
+  const [messages, setMessages] = useState<TutorMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    setMessages([]);
-    setDraft("");
-  }, [card.id, question]);
+  const [typing, setTyping] = useState(false);
+  const cardsContext = useMemo(() => compactTutorCardContext(cards), [cards]);
   const send = async () => {
     const message = draft.trim();
     if (!message || loading) return;
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const nextHistory = [...messages, { id, role: "user" as const, text: message }].slice(-12);
+    const history = JSON.stringify(nextHistory.map(({ role, text }) => ({ role, text })));
     setDraft("");
-    setMessages((current) => [...current, { role: "user", text: message }]);
+    setTyping(false);
+    setMessages((current) => [...current.slice(-11), { id, role: "user", text: message, pending: true }]);
     setLoading(true);
     try {
-      const history = JSON.stringify([
-        ...messages,
-        { role: "user", text: message },
-      ]);
-      const reply = await onAsk(
-        card.front,
-        card.back,
-        question,
-        studentWork,
-        message,
-        history,
-      );
-      setMessages((current) => [
-        ...current,
-        {
-          role: "tutor",
-          text: reply || "Try writing the next step you think belongs here.",
-        },
-      ]);
+      let reply: string;
+      if (onGeneratePractice && onTemporaryProblems && wantsTemporaryPractice(message)) {
+        const problems = temporaryPracticeFromResponse(await onGeneratePractice(card.front, card.back, question, history, cardsContext, message));
+        if (!problems.length) throw new Error("The tutor could not make temporary practice questions from this card.");
+        onTemporaryProblems(problems);
+        reply = `Added ${problems.length} temporary practice ${problems.length === 1 ? "question" : "questions"}. They are not saved to your flashcards, and the first one is ready now.`;
+      } else {
+        reply = await onAsk(card.front, card.back, question, studentWork, message, history, cardsContext);
+      }
+      setMessages((current) => [...current.map((item) => item.id === id ? { ...item, pending: false } : item), { id: `${id}-reply`, role: "tutor" as const, text: reply || "Try writing the next step you think belongs here." }].slice(-12));
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          role: "tutor",
-          text:
-            error instanceof Error
-              ? error.message
-              : "The tutor could not respond right now.",
-        },
-      ]);
-    } finally {
-      setLoading(false);
-    }
+      setMessages((current) => [...current.map((item) => item.id === id ? { ...item, pending: false } : item), { id: `${id}-error`, role: "tutor" as const, text: error instanceof Error ? error.message : "The tutor could not respond right now." }].slice(-12));
+    } finally { setLoading(false); }
   };
-  return (
-    <section className="study-tutor">
-      <header>
-        <span>
-          <MessageCircle size={15} /> General AI tutor
-        </span>
-        <small>Ask about this card or your work.</small>
-      </header>
-      {messages.length > 0 && (
-        <div className="study-tutor-messages">
-          {messages.map((message, index) => (
-            <p key={index} className={message.role}>
-              <MathText>{message.text}</MathText>
-            </p>
-          ))}
-          {loading && (
-            <p className="tutor-loading">
-              <LoaderCircle size={14} /> Thinking…
-            </p>
-          )}
-        </div>
-      )}
-      <div>
-        <textarea
-          value={draft}
-          rows={2}
-          disabled={loading}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-              void send();
-          }}
-          placeholder="Help me with this step…"
-        />
-        <button
-          className="button button-soft button-small ai-action"
-          disabled={loading || !draft.trim()}
-          onClick={() => void send()}
-        >
-          <Send size={14} /> Ask
-        </button>
-      </div>
-    </section>
-  );
+  return <section className="study-tutor">
+    <header><span><MessageCircle size={15} /> General AI tutor</span><small>{loading ? "Thinking…" : typing ? "Typing…" : "Hints only — never reveals the answer."}</small></header>
+    <div className="study-tutor-messages" aria-live="polite">
+      {messages.length === 0 && <p className="tutor-intro">Ask for a hint, show your work, or ask for more temporary practice questions.</p>}
+      {messages.map((message) => <p key={message.id} className={`${message.role}${message.pending ? " user-pending" : ""}`}><MathText>{message.text}</MathText></p>)}
+      {loading && <p className="tutor-loading"><span className="tutor-typing-dots" aria-hidden="true"><i /><i /><i /></span>Thinking through the next step…</p>}
+    </div>
+    <div><textarea value={draft} rows={2} disabled={loading} onFocus={() => setTyping(true)} onBlur={() => setTyping(false)} onChange={(event) => { setDraft(event.target.value); setTyping(Boolean(event.target.value.trim())) }} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void send() }} placeholder="Ask for a hint or more practice…" /><button className="button button-soft button-small ai-action" disabled={loading || !draft.trim()} onClick={() => void send()}><Send size={14} /> Ask</button></div>
+  </section>;
 }
 
 function Learn({
