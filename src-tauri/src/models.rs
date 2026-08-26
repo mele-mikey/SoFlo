@@ -630,6 +630,26 @@ pub struct CreateFlashcardSetInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateFlashcardCardInput {
+    pub front: String,
+    pub back: String,
+    pub notes: Option<String>,
+    pub image_path: Option<String>,
+    pub position: i32,
+    pub is_starred: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFlashcardSetWithCardsInput {
+    pub class_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub cards: Vec<CreateFlashcardCardInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveFlashcardSetInput {
     pub id: String,
     pub title: String,

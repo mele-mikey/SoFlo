@@ -4594,7 +4594,7 @@ fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
     })
 }
 
-fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str, prior_generated_notes: Option<&str>) -> CommandResult<bool> {
+fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str, prior_generated_notes: Option<&str>, replace_written_paper: bool) -> CommandResult<bool> {
     let mut connection = database.open()?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
     let (title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
@@ -4610,12 +4610,16 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
     let mut content_value = serde_json::from_str::<serde_json::Value>(&current_content)
         .unwrap_or_else(|_| serde_json::json!({ "type": "doc", "content": [] }));
     if let Some(nodes) = content_value.get_mut("content").and_then(|items| items.as_array_mut()) {
-        if !nodes.is_empty() { nodes.push(serde_json::json!({ "type": "horizontalRule" })); }
-        nodes.extend(generated_nodes);
+        if replace_written_paper {
+            *nodes = generated_nodes;
+        } else {
+            if !nodes.is_empty() { nodes.push(serde_json::json!({ "type": "horizontalRule" })); }
+            nodes.extend(generated_nodes);
+        }
     }
     let content = serde_json::to_string(&content_value).map_err(|error| error.to_string())?;
     let generated_plain = lecture_markdown_to_plain_text(detailed_notes);
-    let plain = if current_plain.trim().is_empty() { generated_plain } else { format!("{}\n\n{}", current_plain.trim_end(), generated_plain) };
+    let plain = if replace_written_paper || current_plain.trim().is_empty() { generated_plain } else { format!("{}\n\n{}", current_plain.trim_end(), generated_plain) };
     if plain.is_empty() { return Ok(false); }
     transaction.execute(
         "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
@@ -4771,7 +4775,7 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     update_recording_status(&progress_connection, lecture_id, "analyzing", "Finding optional additions for your own notes...")?;
     emit_lecture_recording_update(app, database, lecture_id);
     let note_suggestions = create_lecture_note_suggestions(&client, port, &progress_connection, lecture_id, &lecture_context, &detailed_notes).unwrap_or_default();
-    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes, prior_detailed_notes.as_deref())?;
+    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes, prior_detailed_notes.as_deref(), organizing_written_notes)?;
     let connection = database.open()?;
     connection.execute("UPDATE lecture_analyses SET status='complete', overview=?1, key_points_json=?2, concepts_json=?3, questions_json=?4, next_steps_json=?5, detailed_notes=?6, note_suggestions_json=?7, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?8", params![value.get("overview").and_then(|item| item.as_str()).unwrap_or_default().trim(), serde_json::to_string(&array("keyPoints")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("concepts")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("questions")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("nextSteps")).unwrap_or_else(|_| "[]".into()), detailed_notes, serde_json::to_string(&note_suggestions).unwrap_or_else(|_| "[]".into()), lecture_id]).map_err(|error| error.to_string())?;
     touch_ai_server();
@@ -5145,6 +5149,42 @@ pub fn create_flashcard_set(
             params![id, input.class_id, input.title.trim(), input.description],
         )
         .map_err(|error| error.to_string())?;
+    get_flashcard_set(database, id)
+}
+
+fn create_flashcard_set_with_cards_in(
+    connection: &mut Connection,
+    input: CreateFlashcardSetWithCardsInput,
+) -> CommandResult<String> {
+    if input.cards.is_empty() {
+        return Err("Add at least one complete flashcard before creating the set.".into());
+    }
+    if input.cards.iter().any(|card| card.front.trim().is_empty() || card.back.trim().is_empty()) {
+        return Err("Every flashcard needs both a question and an answer.".into());
+    }
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1, ?2, ?3, ?4)",
+        params![id, input.class_id, input.title.trim(), input.description],
+    ).map_err(|error| error.to_string())?;
+    for card in input.cards {
+        transaction.execute(
+            "INSERT INTO flashcards (id, set_id, front, back, notes, image_path, position, is_starred) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![Uuid::new_v4().to_string(), id, card.front.trim(), card.back.trim(), card.notes, card.image_path, card.position, card.is_starred as i32],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn create_flashcard_set_with_cards(
+    database: State<'_, Database>,
+    input: CreateFlashcardSetWithCardsInput,
+) -> CommandResult<FlashcardSetDetail> {
+    let mut connection = database.open()?;
+    let id = create_flashcard_set_with_cards_in(&mut connection, input)?;
     get_flashcard_set(database, id)
 }
 
@@ -5563,7 +5603,7 @@ fn source_calendar_year(text: &str) -> Option<i32> {
 }
 
 fn explicit_course_dates_with_year(text: &str, source_year: Option<i32>) -> Vec<(String, String)> {
-    text.split(|character: char| !(character.is_ascii_digit() || character == '/' || character == '-'))
+    let mut dates = text.split(|character: char| !(character.is_ascii_digit() || character == '/' || character == '-'))
         .filter_map(|token| {
             let separator = if token.contains('/') { '/' } else if token.contains('-') { '-' } else { return None };
             let values = token.split(separator).collect::<Vec<_>>();
@@ -5572,7 +5612,59 @@ fn explicit_course_dates_with_year(text: &str, source_year: Option<i32>) -> Vec<
             let (year, month, day) = if values.len() == 2 { (source_year?, first as u32, second) } else { let third = values[2].parse::<u32>().ok()?; if values[0].len() == 4 { (first, second, third) } else { (values[2].parse::<i32>().ok()?, first as u32, second) } };
             chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| (date.to_string(), token.to_string()))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let month_number = |value: &str| match value.trim_matches(|character: char| !character.is_ascii_alphabetic()).to_ascii_lowercase().as_str() {
+        "jan" | "january" => Some(1), "feb" | "february" => Some(2), "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4), "may" => Some(5), "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7), "aug" | "august" => Some(8), "sep" | "sept" | "september" => Some(9),
+        "oct" | "october" => Some(10), "nov" | "november" => Some(11), "dec" | "december" => Some(12), _ => None,
+    };
+    let mut seen = dates.iter().map(|(date, raw)| format!("{date}|{raw}")).collect::<HashSet<_>>();
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    for (index, word) in words.iter().enumerate() {
+        let Some(month) = month_number(word) else { continue; };
+        let Some(day_word) = words.get(index + 1) else { continue; };
+        let digits = day_word.trim_matches(|character: char| !character.is_ascii_alphanumeric())
+            .trim_end_matches(|character: char| character.is_ascii_alphabetic());
+        let Ok(day) = digits.parse::<u32>() else { continue; };
+        let year = words.get(index + 2)
+            .map(|value| value.trim_matches(|character: char| !character.is_ascii_digit()))
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| (2020..=2100).contains(value))
+            .or(source_year);
+        let Some(year) = year else { continue; };
+        let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) else { continue; };
+        let raw = format!("{} {}", word.trim_matches(|character: char| !character.is_ascii_alphabetic()), digits);
+        let entry = (date.to_string(), raw);
+        if seen.insert(format!("{}|{}", entry.0, entry.1)) { dates.push(entry); }
+    }
+    dates
+}
+
+fn course_calendar_source_excerpt(source: &CourseCalendarSource) -> String {
+    // The compact local model cannot reliably read several entire textbooks or
+    // note packets at once. Give it the term context plus every date/deadline
+    // candidate, retaining enough surrounding text to name the work faithfully.
+    const MAX_CHARS: usize = 8_000;
+    let source_year = source_calendar_year(&source.content_plain);
+    let mut kept = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, line) in source.content_plain.replace('\u{000c}', "\n").lines().enumerate() {
+        let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() { continue; }
+        let lower = text.to_ascii_lowercase();
+        let relevant = index < 16
+            || !explicit_course_dates_with_year(&text, source_year).is_empty()
+            || ["due", "deadline", "assignment", "exam", "quiz", "final", "project", "paper", "presentation", "schedule", "week ", "reading"].iter().any(|keyword| lower.contains(keyword));
+        if relevant && seen.insert(text.clone()) { kept.push(text); }
+    }
+    let mut excerpt = format!("SOURCE: {}\n", source.title);
+    for line in kept {
+        if excerpt.len() + line.len() + 1 > MAX_CHARS { break; }
+        excerpt.push_str(&line);
+        excerpt.push('\n');
+    }
+    excerpt
 }
 
 fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) -> CourseCalendarAiPlan {
@@ -5601,7 +5693,9 @@ fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) 
 fn course_calendar_plan_uses_source_dates(plan: &CourseCalendarAiPlan, sources: &[CourseCalendarSource]) -> bool {
     plan.items.iter().all(|item| {
         let Some(source) = sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())) else { return false; };
-        explicit_course_dates(&source.content_plain).into_iter().any(|(date, _)| date == item.due_date.chars().take(10).collect::<String>())
+        explicit_course_dates_with_year(&source.content_plain, source_calendar_year(&source.content_plain))
+            .into_iter()
+            .any(|(date, _)| date == item.due_date.chars().take(10).collect::<String>())
     })
 }
 
@@ -5624,7 +5718,7 @@ pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, 
             }
         }
         if planner_sources.is_empty() { planner_sources = sources.clone(); }
-        let source_text = planner_sources.iter().map(|source| format!("SOURCE: {}\n{}", source.title, source.content_plain.chars().take(25_000).collect::<String>())).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
+        let source_text = planner_sources.iter().map(course_calendar_source_excerpt).collect::<Vec<_>>().join("\n\n--- NEXT DOCUMENT ---\n\n");
         let today = chrono::Local::now().date_naive().to_string();
         emit_ai_progress(&app_for_ai, 48, "Finding supported deadlines");
         let prompt = format!("Extract concrete dated course events from the documents: assignment deadlines, exams, scheduled class activities, and explicitly dated course work. A calendar item is allowed only when its date appears in its matching source document. If a syllabus gives a term year (for example, Fall 2026), you may apply that source-provided year to a short schedule date such as 9/1; never use today's date or guess a year. Put undated readings, study material, and assignments only in game_plan as clear steps for the student, never in items. Return one valid JSON object only, with no Markdown and no prose outside it: {{\"items\":[{{\"source_title\":\"exact source name\",\"title\":\"short task\",\"due_date\":\"YYYY-MM-DD\",\"description\":\"what to do\",\"urgency\":\"critical|high|upcoming|later\",\"source_excerpt\":\"short supporting text\"}}],\"game_plan\":[{{\"action\":\"specific imperative action\",\"context\":\"source-backed reason it comes first, without a made-up date\"}}]}}. Return at most 60 items and 8 game-plan steps.\n\n{source_text}");
@@ -8452,7 +8546,7 @@ mod tests {
     use super::{
         available_loopback_port, fallback_study_web_plan, flashcard_system_instruction,
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        course_calendar_plan_uses_source_dates, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
+        course_calendar_plan_uses_source_dates, course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
         lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
@@ -8490,12 +8584,50 @@ mod tests {
     }
 
     #[test]
+    fn reads_long_month_dates_using_the_source_term_year() {
+        let dates = explicit_course_dates("ENGL 101 Fall 2026. Final Exam: Tuesday, December 8th at 8:30.");
+        assert!(dates.iter().any(|(date, raw)| date == "2026-12-08" && raw == "December 8"));
+    }
+
+    #[test]
+    fn compacts_calendar_sources_without_losing_dated_course_work() {
+        let filler = (0..800).map(|index| format!("General note {index} with no date.")).collect::<Vec<_>>().join("\n");
+        let source = CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: format!("Fall 2026\n{filler}\nFinal Exam: December 8th at 8:30."), source_path: None, created_at: String::new() };
+        let excerpt = course_calendar_source_excerpt(&source);
+        assert!(excerpt.len() <= 8_000);
+        assert!(excerpt.contains("Final Exam: December 8th"));
+    }
+
+    #[test]
+    fn saves_generated_flashcard_sets_atomically() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory database");
+        connection.execute_batch("CREATE TABLE flashcard_sets (id TEXT PRIMARY KEY, class_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE flashcards (id TEXT PRIMARY KEY, set_id TEXT NOT NULL, front TEXT NOT NULL, back TEXT NOT NULL, notes TEXT, image_path TEXT, position INTEGER NOT NULL, is_starred INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").expect("flashcard schema");
+        let input = crate::models::CreateFlashcardSetWithCardsInput {
+            class_id: "class".into(), title: "Algebra".into(), description: Some("Generated".into()),
+            cards: vec![
+                crate::models::CreateFlashcardCardInput { front: "x^2".into(), back: "x squared".into(), notes: None, image_path: None, position: 0, is_starred: false },
+                crate::models::CreateFlashcardCardInput { front: "x^3".into(), back: "x cubed".into(), notes: None, image_path: None, position: 1, is_starred: false },
+            ],
+        };
+        let id = create_flashcard_set_with_cards_in(&mut connection, input).expect("complete set");
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM flashcards WHERE set_id=?1", [&id], |row| row.get(0)).expect("card count");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn rejects_calendar_dates_the_source_does_not_contain() {
         let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Exam 1: 09/20/2026".into(), source_path: None, created_at: String::new() }];
         let valid = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-09-20".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
         let fabricated = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-08-21".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
         assert!(course_calendar_plan_uses_source_dates(&valid, &sources));
         assert!(!course_calendar_plan_uses_source_dates(&fabricated, &sources));
+    }
+
+    #[test]
+    fn accepts_source_backed_long_month_calendar_dates() {
+        let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Fall 2026\nFinal Exam: Tuesday, December 8th at 8:30.".into(), source_path: None, created_at: String::new() }];
+        let plan = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Final Exam".into(), due_date: "2026-12-08".into(), description: String::new(), urgency: "upcoming".into(), source_excerpt: "Final Exam: Tuesday, December 8th at 8:30.".into() }], game_plan: vec![] };
+        assert!(course_calendar_plan_uses_source_dates(&plan, &sources));
     }
 
 

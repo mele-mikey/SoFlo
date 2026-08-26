@@ -597,8 +597,7 @@ function App() {
   const importSet = async (targetClassId: string, title: string, text: string) => {
     const rows = parseFlashcardRows(text)
     if (!rows.length) throw new Error('Add one term and definition per row. SoFlo accepts tab-separated, CSV, and TSV files.')
-    const created = await api.createSet({ classId: targetClassId, title: title.trim() || 'Imported flashcards', description: 'Imported flashcards.' })
-    await Promise.all(rows.map(([front, back], position) => api.saveCard({ setId: created.id, front: front.trim(), back: back.trim(), position, isStarred: false })))
+    const created = await api.createSetWithCards({ classId: targetClassId, title: title.trim() || 'Imported flashcards', description: 'Imported flashcards.', cards: rows.map(([front, back], position) => ({ front: front.trim(), back: back.trim(), position, isStarred: false })) })
     await loadClassContent(targetClassId)
     setModal(null)
     navigate({ kind: 'flashcardSet', classId: targetClassId, setId: created.id })
@@ -629,8 +628,7 @@ function App() {
       const cards = generated.filter((card) => card.front?.trim() && card.back?.trim()).slice(0, maxCards)
       if (!cards.length) throw new Error('The local AI model did not return usable flashcards.')
       const sourceKinds = [request.sources.length && 'uploaded material', request.pasted.trim() && 'pasted material', request.topic.trim() && 'a topic prompt'].filter(Boolean).join(', ')
-      const set = await api.createSet({ classId: targetClassId, title: request.title.trim() || 'AI study set', description: `Created from ${sourceKinds || 'study material'}.` })
-      await Promise.all(cards.map((card, position) => api.saveCard({ setId: set.id, front: card.front!.trim(), back: card.back!.trim(), notes: `AI-generated from ${sourceKinds || 'study material'}.`, position, isStarred: false })))
+      const set = await api.createSetWithCards({ classId: targetClassId, title: request.title.trim() || 'AI study set', description: `Created from ${sourceKinds || 'study material'}.`, cards: cards.map((card, position) => ({ front: card.front!.trim(), back: card.back!.trim(), notes: `AI-generated from ${sourceKinds || 'study material'}.`, position, isStarred: false })) })
       await loadClassContent(targetClassId); setModal(null); navigate({ kind: 'flashcardSet', classId: targetClassId, setId: set.id }); showToast(`${cards.length} flashcards created.`)
       return null
     } catch (error) { console.error('SoFlo AI flashcard generation failed.', error); const message = aiFailureMessage(error); showToast(message, 'error'); return message } finally { setAiWorking(false); setAiProgress(null) }

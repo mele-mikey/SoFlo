@@ -132,6 +132,7 @@ pub fn run() {
             commands::ask_study_tutor,
             commands::list_flashcard_sets,
             commands::create_flashcard_set,
+            commands::create_flashcard_set_with_cards,
             commands::get_flashcard_set,
             commands::save_flashcard_set,
             commands::set_flashcard_set_study_kind,
