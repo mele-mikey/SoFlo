@@ -4698,7 +4698,8 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let source_notes = if cleaned_transcript.trim().is_empty() {
+    let organizing_written_notes = cleaned_transcript.trim().is_empty();
+    let source_notes = if organizing_written_notes {
         connection.query_row("SELECT content_plain FROM lectures WHERE id=?1", [lecture_id], |row| row.get::<_, String>(0))
             .map_err(|_| "That lecture could not be found.".to_string())?
     } else { cleaned_transcript.clone() };
@@ -4712,19 +4713,35 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
         let progress_connection = database.open()?;
         update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Building detailed study notes: part {} of {}...", index + 1, chunks.len()))?;
         emit_lecture_recording_update(app, database, lecture_id);
-        let system = "You are SoFlo's meticulous lecture note-taker. Turn this chronological portion of one lecture into dense, complete study notes that a student could rely on instead of rewatching it. Preserve every academic detail: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Keep the order of the lecture. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. This is one continuation inside a larger note document: do not add a document title, an H1 heading, a divider, timestamp, speaker label, or a recap of an earlier part. Do not turn every spoken moment into a section; merge related material into a few clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, and fenced ```python code blocks for every Python example. Never put code in ordinary prose.";
+        let system = if organizing_written_notes {
+            "You are SoFlo's meticulous lecture note organizer. Reorganize the student's existing lecture-paper notes into clear, complete study notes without losing any academic information. Preserve definitions, reasoning, worked examples, corrections, assignments, due dates, and uncertainty. Do not invent information and do not merely echo the source as one paragraph. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs, bullets, numbered steps, and tables only when useful. Do not add a document title, an H1 heading, a divider, timestamps, or speaker labels."
+        } else {
+            "You are SoFlo's meticulous lecture note-taker. Turn this chronological portion of one lecture into dense, complete study notes that a student could rely on instead of rewatching it. Preserve every academic detail: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Keep the order of the lecture. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. This is one continuation inside a larger note document: do not add a document title, an H1 heading, a divider, timestamp, speaker label, or a recap of an earlier part. Do not turn every spoken moment into a section; merge related material into a few clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, and fenced ```python code blocks for every Python example. Never put code in ordinary prose."
+        };
         let prompt = format!("LECTURE CONTEXT\n{}\n\nLECTURE PART {} OF {} — continue directly from the prior part when applicable.\n\n{}", lecture_context, index + 1, chunks.len(), chunk);
+        let usable = |value: String| {
+            if organizing_written_notes {
+                let notes = normalize_lecture_notes_part(&value);
+                (!notes.trim().is_empty() && !is_visual_line_echo(chunk, &notes)).then_some(notes)
+            } else {
+                usable_lecture_notes(&value, chunk)
+            }
+        };
         let note = local_chat_text(&client, port, system, &prompt, 2_000)
             .ok()
-            .and_then(|value| usable_lecture_notes(&value, chunk));
+            .and_then(usable);
         // A retry gives a temporarily busy local model a shorter, simpler
         // instruction before we mark analysis as failed. We never substitute
         // the raw transcript for an AI note draft.
         let note = note.or_else(|| {
-            let retry_system = "Create structured study notes from this lecture excerpt. Use H2/H3 headings, short paragraphs, and bullets. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, a divider, or raw transcript text.";
+            let retry_system = if organizing_written_notes {
+                "Format these existing lecture notes into structured Markdown. Preserve their information, use H2/H3 headings and concise bullets or numbered steps, and do not add a title, divider, timestamps, or invented content."
+            } else {
+                "Create structured study notes from this lecture excerpt. Use H2/H3 headings, short paragraphs, and bullets. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, a divider, or raw transcript text."
+            };
             local_chat_text(&client, port, retry_system, &prompt, 1_400)
                 .ok()
-                .and_then(|value| usable_lecture_notes(&value, chunk))
+                .and_then(usable)
         }).ok_or_else(|| format!("SoFlo could not turn lecture part {} into study notes. Your existing lecture paper was left unchanged.", index + 1))?;
         notes.push(note);
     }
@@ -5390,7 +5407,55 @@ fn repairs_fragmented_pdf_spacing(source: &str, formatted: &str) -> bool {
     original_fragments > 0 && formatted_fragments.saturating_mul(3) <= original_fragments
 }
 
+fn ensure_course_calendar_schema(connection: &Connection) -> CommandResult<()> {
+    // Some early builds recorded a migrated schema version before the manual
+    // events table was present. Repair that local-library state on demand so
+    // a missing optional table cannot prevent the calendar tab from opening.
+    connection.execute_batch(r#"
+        CREATE TABLE IF NOT EXISTS course_calendar_sources (
+            id TEXT PRIMARY KEY NOT NULL,
+            class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            content_plain TEXT NOT NULL,
+            source_path TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS course_calendar_items (
+            id TEXT PRIMARY KEY NOT NULL,
+            class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL REFERENCES course_calendar_sources(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            urgency TEXT NOT NULL DEFAULT 'upcoming',
+            completed INTEGER NOT NULL DEFAULT 0,
+            source_excerpt TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS course_calendar_plans (
+            class_id TEXT PRIMARY KEY NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+            game_plan TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS course_calendar_manual_items (
+            id TEXT PRIMARY KEY NOT NULL,
+            class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            start_time TEXT,
+            description TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '#8B7CF6',
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_course_calendar_items_class_due ON course_calendar_items(class_id, due_date);
+        CREATE INDEX IF NOT EXISTS idx_course_calendar_manual_items_class_due ON course_calendar_manual_items(class_id, due_date, archived);
+    "#).map_err(|error| error.to_string())
+}
+
 fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
+    ensure_course_calendar_schema(connection)?;
     let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
     let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     let mut items_statement = connection.prepare("SELECT id, class_id, source_id, title, due_date, description, urgency, completed, source_excerpt FROM course_calendar_items WHERE class_id=?1 ORDER BY due_date, completed, title").map_err(|error| error.to_string())?;
@@ -5406,6 +5471,7 @@ fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> Comma
 #[tauri::command]
 pub fn get_course_calendar(database: State<'_, Database>, class_id: String) -> CommandResult<CourseCalendarDetail> {
     let connection = database.open()?;
+    ensure_course_calendar_schema(&connection)?;
     let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
     if source_count == 0 {
         connection.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;

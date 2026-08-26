@@ -1166,7 +1166,7 @@ mod tests {
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 23);
         let set_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
             statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
@@ -1194,7 +1194,7 @@ mod tests {
             let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("study web table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
-        for table in ["course_calendar_sources", "course_calendar_items", "course_calendar_plans"] {
+        for table in ["course_calendar_sources", "course_calendar_items", "course_calendar_plans", "course_calendar_manual_items"] {
             let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("course calendar table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
@@ -1236,7 +1236,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>().expect("analysis column names");
         assert!(columns.contains(&"note_suggestions_json".to_string()));
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 23);
         drop(connection);
         drop(repaired);
         let _ = fs::remove_dir_all(directory);
@@ -1255,7 +1255,7 @@ mod tests {
         let connection = upgraded.open().expect("open upgraded database");
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
-        assert_eq!(version, 21);
+        assert_eq!(version, 23);
         assert_eq!(exists, 1);
         drop(connection);
         drop(upgraded);
