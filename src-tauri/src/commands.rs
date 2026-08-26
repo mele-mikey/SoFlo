@@ -4698,11 +4698,15 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    if cleaned_transcript.trim().is_empty() { return Err("There is no transcript to analyze yet.".into()); }
+    let source_notes = if cleaned_transcript.trim().is_empty() {
+        connection.query_row("SELECT content_plain FROM lectures WHERE id=?1", [lecture_id], |row| row.get::<_, String>(0))
+            .map_err(|_| "That lecture could not be found.".to_string())?
+    } else { cleaned_transcript.clone() };
+    if source_notes.trim().is_empty() { return Err("Write a little in the lecture paper or finish a transcript before organizing it.".into()); }
     connection.execute("INSERT INTO lecture_analyses (lecture_id, status, raw_transcript, cleaned_transcript) VALUES (?1,'analyzing',?2,?3) ON CONFLICT(lecture_id) DO UPDATE SET status='analyzing', raw_transcript=excluded.raw_transcript, cleaned_transcript=excluded.cleaned_transcript, updated_at=CURRENT_TIMESTAMP", params![lecture_id, raw_transcript, cleaned_transcript]).map_err(|error| error.to_string())?;
     let port = ensure_ai_server(&model_path, app)?;
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let chunks = split_source_for_ai(&cleaned_transcript, AI_SOURCE_CHUNK_CHARS);
+    let chunks = split_source_for_ai(&source_notes, AI_SOURCE_CHUNK_CHARS);
     let mut notes = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
         let progress_connection = database.open()?;
