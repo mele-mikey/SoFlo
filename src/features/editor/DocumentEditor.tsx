@@ -935,6 +935,11 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     })
   }
   const content = useMemo(() => safeContent(document.content), [document.content])
+  // Tiptap owns its document after creation. Keep the exact content it last
+  // emitted so a same-document change that came from the app (such as lecture
+  // AI appending formatted notes) is applied, while ordinary typing is not
+  // needlessly reloaded underneath the cursor.
+  const editorContentRef = useRef(JSON.stringify(content))
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] }, codeBlock: { HTMLAttributes: { class: 'code-block' } } }),
@@ -952,7 +957,9 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     onUpdate: ({ editor: nextEditor }) => {
       const now = Date.now()
       grammarLastInputAt.current = now
-      onChange(JSON.stringify(nextEditor.getJSON()), nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
+      const nextContent = JSON.stringify(nextEditor.getJSON())
+      editorContentRef.current = nextContent
+      onChange(nextContent, nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
     },
     onSelectionUpdate: ({ editor: nextEditor }) => {
       const activeIssue = selectedGrammarIssueRef.current
@@ -993,9 +1000,18 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     return () => pageWrap.removeEventListener('wheel', handlePaperZoom)
   }, [editor, paperZoom, handlePaperZoom])
   useEffect(() => {
-    if (!editor || currentId.current === document.id) return
+    if (!editor) return
+    const nextContent = safeContent(document.content)
+    const nextContentSignature = JSON.stringify(nextContent)
+    if (currentId.current === document.id && editorContentRef.current === nextContentSignature) return
+    const updatedActiveDocument = currentId.current === document.id
     currentId.current = document.id
-    editor.commands.setContent(safeContent(document.content), { emitUpdate: false })
+    editorContentRef.current = nextContentSignature
+    editor.commands.setContent(nextContent, { emitUpdate: false })
+    if (updatedActiveDocument) {
+      editor.commands.setTextSelection(editor.state.doc.content.size)
+      editor.commands.scrollIntoView()
+    }
     setGrammarIssues([])
     grammarIssuesRef.current = []
     setLectureSuggestionIssues([])

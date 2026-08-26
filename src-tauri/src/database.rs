@@ -581,7 +581,10 @@ impl Database {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 21 {
+        // Keep this in sync with the final migration below. Returning at 21
+        // stranded existing libraries before the manual Course Calendar table
+        // and the flashcard study_kind column were added.
+        if version >= 23 {
             return Ok(());
         }
         if version < 1 {
@@ -1257,6 +1260,30 @@ mod tests {
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
         assert_eq!(version, 23);
         assert_eq!(exists, 1);
+        drop(connection);
+        drop(upgraded);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn upgrades_a_version_21_library_with_calendar_and_math_schema() {
+        let directory = std::env::temp_dir().join(format!("soflo-v21-upgrade-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("soflo.sqlite3");
+        let database = Database::new(path.clone()).expect("create database");
+        let connection = database.open().expect("open database");
+        connection.execute_batch("DROP TABLE course_calendar_manual_items; PRAGMA user_version = 21;").expect("simulate version 21 library");
+        drop(connection);
+        drop(database);
+        let upgraded = Database::new(path).expect("upgrade database");
+        let connection = upgraded.open().expect("open upgraded database");
+        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let manual_exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='course_calendar_manual_items'", [], |row| row.get(0)).expect("manual calendar table lookup");
+        let columns = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns")
+            .query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows")
+            .collect::<Result<Vec<_>, _>>().expect("flashcard set column names");
+        assert_eq!(version, 23);
+        assert_eq!(manual_exists, 1);
+        assert!(columns.contains(&"study_kind".to_string()));
         drop(connection);
         drop(upgraded);
         let _ = fs::remove_dir_all(directory);
