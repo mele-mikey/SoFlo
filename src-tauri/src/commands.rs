@@ -4594,7 +4594,7 @@ fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
     })
 }
 
-fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str, prior_generated_notes: Option<&str>, replace_written_paper: bool) -> CommandResult<bool> {
+fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str) -> CommandResult<bool> {
     let mut connection = database.open()?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
     let (title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
@@ -4602,7 +4602,6 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
         [lecture_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).map_err(|_| "That lecture could not be found.".to_string())?;
-    let _ = prior_generated_notes;
     let generated_content = lecture_markdown_to_editor_content(detailed_notes);
     let generated_nodes = serde_json::from_str::<serde_json::Value>(&generated_content).ok()
         .and_then(|value| value.get("content").and_then(|items| items.as_array()).cloned())
@@ -4610,16 +4609,13 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
     let mut content_value = serde_json::from_str::<serde_json::Value>(&current_content)
         .unwrap_or_else(|_| serde_json::json!({ "type": "doc", "content": [] }));
     if let Some(nodes) = content_value.get_mut("content").and_then(|items| items.as_array_mut()) {
-        if replace_written_paper {
-            *nodes = generated_nodes;
-        } else {
-            if !nodes.is_empty() { nodes.push(serde_json::json!({ "type": "horizontalRule" })); }
-            nodes.extend(generated_nodes);
-        }
+        // The formatted result is the new lecture paper. The exact prior paper
+        // is saved as a revision below before this replacement occurs.
+        *nodes = generated_nodes;
     }
     let content = serde_json::to_string(&content_value).map_err(|error| error.to_string())?;
     let generated_plain = lecture_markdown_to_plain_text(detailed_notes);
-    let plain = if replace_written_paper || current_plain.trim().is_empty() { generated_plain } else { format!("{}\n\n{}", current_plain.trim_end(), generated_plain) };
+    let plain = generated_plain;
     if plain.is_empty() { return Ok(false); }
     transaction.execute(
         "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
@@ -4631,6 +4627,14 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
     ).map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+fn lecture_analysis_source(written_notes: &str, cleaned_transcript: &str) -> String {
+    match (written_notes.trim(), cleaned_transcript.trim()) {
+        ("", transcript) => transcript.to_string(),
+        (paper, "") => paper.to_string(),
+        (paper, transcript) => format!("STUDENT'S EXISTING LECTURE PAPER — preserve every fact from these notes\n{paper}\n\nLECTURE TRANSCRIPT — combine it with the paper; preserve every academic detail from both sources\n{transcript}"),
+    }
 }
 
 fn create_lecture_note_suggestions(
@@ -4694,19 +4698,11 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     let model_path = resolve_ai_model_path(app, &settings.ai_model_path)?;
     let (raw_transcript, cleaned_transcript) = stored_lecture_transcripts(&connection, lecture_id)?;
     let lecture_context = lecture_analysis_context(&connection, lecture_id)?;
-    let prior_detailed_notes: Option<String> = connection
-        .query_row(
-            "SELECT detailed_notes FROM lecture_analyses WHERE lecture_id=?1",
-            [lecture_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
     let organizing_written_notes = cleaned_transcript.trim().is_empty();
-    let source_notes = if organizing_written_notes {
-        connection.query_row("SELECT content_plain FROM lectures WHERE id=?1", [lecture_id], |row| row.get::<_, String>(0))
-            .map_err(|_| "That lecture could not be found.".to_string())?
-    } else { cleaned_transcript.clone() };
+    let written_notes = connection
+        .query_row("SELECT content_plain FROM lectures WHERE id=?1", [lecture_id], |row| row.get::<_, String>(0))
+        .map_err(|_| "That lecture could not be found.".to_string())?;
+    let source_notes = lecture_analysis_source(&written_notes, &cleaned_transcript);
     if source_notes.trim().is_empty() { return Err("Write a little in the lecture paper or finish a transcript before organizing it.".into()); }
     connection.execute("INSERT INTO lecture_analyses (lecture_id, status, raw_transcript, cleaned_transcript) VALUES (?1,'analyzing',?2,?3) ON CONFLICT(lecture_id) DO UPDATE SET status='analyzing', raw_transcript=excluded.raw_transcript, cleaned_transcript=excluded.cleaned_transcript, updated_at=CURRENT_TIMESTAMP", params![lecture_id, raw_transcript, cleaned_transcript]).map_err(|error| error.to_string())?;
     let port = ensure_ai_server(&model_path, app)?;
@@ -4718,9 +4714,9 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
         update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Building detailed study notes: part {} of {}...", index + 1, chunks.len()))?;
         emit_lecture_recording_update(app, database, lecture_id);
         let system = if organizing_written_notes {
-            "You are SoFlo's meticulous lecture note organizer. Reorganize the student's existing lecture-paper notes into clear, complete study notes without losing any academic information. Preserve definitions, reasoning, worked examples, corrections, assignments, due dates, and uncertainty. Do not invent information and do not merely echo the source as one paragraph. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs, bullets, numbered steps, and tables only when useful. Do not add a document title, an H1 heading, a divider, timestamps, or speaker labels."
+            "You are SoFlo's meticulous lecture note organizer. Reorganize the student's existing lecture-paper notes into the complete replacement lecture paper. Preserve every academic fact, definition, reasoning step, worked example, correction, assignment, due date, and uncertainty. Do not invent information and do not merely echo the source as one paragraph. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs, bullets, numbered steps, and tables only when useful. Do not add a document title, an H1 heading, a divider, timestamps, or speaker labels."
         } else {
-            "You are SoFlo's meticulous lecture note-taker. Turn this chronological portion of one lecture into dense, complete study notes that a student could rely on instead of rewatching it. Preserve every academic detail: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Keep the order of the lecture. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. This is one continuation inside a larger note document: do not add a document title, an H1 heading, a divider, timestamp, speaker label, or a recap of an earlier part. Do not turn every spoken moment into a section; merge related material into a few clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, and fenced ```python code blocks for every Python example. Never put code in ordinary prose."
+            "You are SoFlo's meticulous lecture note-taker. Turn the supplied student paper and transcript into the complete replacement lecture paper. Preserve every academic detail from both sources: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Existing student notes may contain details the transcript misses, so retain them. Keep the lecture order where possible. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. Do not add a document title, an H1 heading, a divider, timestamp, speaker label, or recap. Do not turn every spoken moment into a section; merge related material into clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, tables when useful, and fenced ```python code blocks for every Python example. Never put code in ordinary prose."
         };
         let prompt = format!("LECTURE CONTEXT\n{}\n\nLECTURE PART {} OF {} — continue directly from the prior part when applicable.\n\n{}", lecture_context, index + 1, chunks.len(), chunk);
         let usable = |value: String| {
@@ -4739,9 +4735,9 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
         // the raw transcript for an AI note draft.
         let note = note.or_else(|| {
             let retry_system = if organizing_written_notes {
-                "Format these existing lecture notes into structured Markdown. Preserve their information, use H2/H3 headings and concise bullets or numbered steps, and do not add a title, divider, timestamps, or invented content."
+                "Format these existing lecture notes into the complete replacement paper. Preserve every fact, use H2/H3 headings and concise bullets or numbered steps, and do not add a title, divider, timestamps, or invented content."
             } else {
-                "Create structured study notes from this lecture excerpt. Use H2/H3 headings, short paragraphs, and bullets. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, a divider, or raw transcript text."
+                "Combine this student's notes and transcript into complete structured replacement lecture notes. Preserve every academic fact from both, use H2/H3 headings, short paragraphs, bullets, numbered steps, and tables when useful. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, divider, raw transcript text, or invented content."
             };
             local_chat_text(&client, port, retry_system, &prompt, 1_400)
                 .ok()
@@ -4775,7 +4771,7 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     update_recording_status(&progress_connection, lecture_id, "analyzing", "Finding optional additions for your own notes...")?;
     emit_lecture_recording_update(app, database, lecture_id);
     let note_suggestions = create_lecture_note_suggestions(&client, port, &progress_connection, lecture_id, &lecture_context, &detailed_notes).unwrap_or_default();
-    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes, prior_detailed_notes.as_deref(), organizing_written_notes)?;
+    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes)?;
     let connection = database.open()?;
     connection.execute("UPDATE lecture_analyses SET status='complete', overview=?1, key_points_json=?2, concepts_json=?3, questions_json=?4, next_steps_json=?5, detailed_notes=?6, note_suggestions_json=?7, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?8", params![value.get("overview").and_then(|item| item.as_str()).unwrap_or_default().trim(), serde_json::to_string(&array("keyPoints")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("concepts")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("questions")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("nextSteps")).unwrap_or_else(|_| "[]".into()), detailed_notes, serde_json::to_string(&note_suggestions).unwrap_or_else(|_| "[]".into()), lecture_id]).map_err(|error| error.to_string())?;
     touch_ai_server();
@@ -8548,7 +8544,7 @@ mod tests {
         flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
         course_calendar_plan_uses_source_dates, course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
         json_array_from_response, json_object_from_response, semester_end_date,
-        lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
+        lecture_analysis_source, lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
         should_retry_flashcard_batch_on_cpu,
         usable_lecture_notes,
         study_web_hierarchy_layout_edges,
@@ -8628,6 +8624,13 @@ mod tests {
         let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Fall 2026\nFinal Exam: Tuesday, December 8th at 8:30.".into(), source_path: None, created_at: String::new() }];
         let plan = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Final Exam".into(), due_date: "2026-12-08".into(), description: String::new(), urgency: "upcoming".into(), source_excerpt: "Final Exam: Tuesday, December 8th at 8:30.".into() }], game_plan: vec![] };
         assert!(course_calendar_plan_uses_source_dates(&plan, &sources));
+    }
+
+    #[test]
+    fn combines_existing_lecture_paper_and_transcript_without_dropping_either() {
+        let source = lecture_analysis_source("The instructor said the answer needs units.", "The worked example uses 12 meters.");
+        assert!(source.contains("answer needs units"));
+        assert!(source.contains("12 meters"));
     }
 
 

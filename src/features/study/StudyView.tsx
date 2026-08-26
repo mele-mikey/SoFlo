@@ -18,9 +18,18 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { evaluate, simplify } from "mathjs";
+import { evaluate } from "mathjs";
 import { api } from "../../lib/api";
 import type { Flashcard, FlashcardSetDetail } from "../../lib/types";
+import {
+  equivalentMath,
+  finiteMathValue,
+  isStandaloneMathExpression,
+  mathExpression,
+  normalizedMath,
+  parseMathInterval,
+  type MathInterval,
+} from "./mathPractice";
 import {
   createQuestion,
   createTest,
@@ -437,44 +446,6 @@ export function StudyView({
   );
 }
 
-function mathExpression(value: string) {
-  const latex = value.match(/\\(?:frac|sqrt|left|right)[^\n]+/);
-  if (latex) return latex[0];
-  const expression = value.match(
-    /(?:-?\d+|[A-Za-z])(?:[A-Za-z0-9()\s]*[+\-*/^=<>≤≥][A-Za-z0-9()\s+\-*/^=<>≤≥]+)+/,
-  );
-  return expression?.[0]?.trim() ?? value.trim();
-}
-function normalizedMath(value: string) {
-  return value
-    .replace(/≤/g, "<=")
-    .replace(/≥/g, ">=")
-    .replace(/×/g, "*")
-    .replace(/÷/g, "/")
-    .replace(/√/g, "sqrt")
-    .replace(/\s+/g, "");
-}
-function equivalentMath(answer: string, target: string) {
-  const left = normalizedMath(answer);
-  const right = normalizedMath(target);
-  if (!left || !right) return false;
-  try {
-    if (simplify(`(${left})-(${right})`).toString() === "0") return true;
-    for (const x of [-4, -2, -1, 0, 1, 2, 4]) {
-      const a = Number(evaluate(left, { x }));
-      const b = Number(evaluate(right, { x }));
-      if (
-        !Number.isFinite(a) ||
-        !Number.isFinite(b) ||
-        Math.abs(a - b) > 0.00001
-      )
-        return false;
-    }
-    return true;
-  } catch {
-    return left === right;
-  }
-}
 function MathGraph({ expression }: { expression: string }) {
   const plot = expression.replace(/^\s*(?:y\s*=)?\s*/i, "");
   const points: string[] = [];
@@ -506,11 +477,19 @@ function MathGraph({ expression }: { expression: string }) {
     </svg>
   );
 }
-function MathNumberLine({ expression }: { expression: string }) {
-  const match = normalizedMath(expression).match(/[A-Za-z]\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)/);
-  if (!match) return null;
-  const operator = match[1]; const value = Number(match[2]); const position = Math.max(24, Math.min(296, 160 + value * 16)); const towardRight = operator === '>' || operator === '>='; const closed = operator === '>=' || operator === '<=';
-  return <svg className="math-number-line" viewBox="0 0 320 110" role="img" aria-label={`Number line for ${expression}`}><path className="math-axis" d="M18 56H302M18 56l8-5M18 56l8 5M302 56l-8-5M302 56l-8 5" />{Array.from({ length: 11 }, (_, index) => { const x = 40 + index * 24; const label = index - 5; return <g key={label}><path className="math-axis" d={`M${x} 50V62`} /><text x={x} y="79" textAnchor="middle">{label}</text></g> })}<path className="math-curve" d={towardRight ? `M${position} 56H300` : `M20 56H${position}`} /><circle cx={position} cy="56" r="6" className={closed ? 'math-number-dot closed' : 'math-number-dot'} /><path className="math-curve" d={towardRight ? 'M300 56l-9-5M300 56l-9 5' : 'M20 56l9-5M20 56l9 5'} /></svg>;
+function IntervalNumberLine({ interval }: { interval: MathInterval }) {
+  const lower = finiteMathValue(interval.lower);
+  const upper = finiteMathValue(interval.upper);
+  if (lower === null || upper === null || lower >= upper) return null;
+  const span = Math.max(1, upper - lower);
+  const minimum = Math.floor(Math.min(-5, lower - Math.max(2, span * 0.35)));
+  const maximum = Math.ceil(Math.max(5, upper + Math.max(2, span * 0.35)));
+  const toX = (value: number) => 30 + ((value - minimum) / (maximum - minimum)) * 260;
+  const left = toX(lower);
+  const right = toX(upper);
+  const ticks = Array.from({ length: 9 }, (_, index) => minimum + ((maximum - minimum) * index) / 8);
+  const label = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
+  return <svg className="math-number-line" viewBox="0 0 320 110" role="img" aria-label={`Number line for ${interval.lower} ${interval.lowerInclusive ? "less than or equal to" : "less than"} ${interval.variable} ${interval.upperInclusive ? "less than or equal to" : "less than"} ${interval.upper}`}><path className="math-axis" d="M18 56H302M18 56l8-5M18 56l8 5M302 56l-8-5M302 56l-8 5" />{ticks.map((value) => { const x = toX(value); return <g key={value}><path className="math-axis" d={`M${x} 50V62`} /><text x={x} y="79" textAnchor="middle">{label(value)}</text></g> })}<path className="math-curve" d={`M${left} 56H${right}`} /><circle cx={left} cy="56" r="6" className={interval.lowerInclusive ? "math-number-dot closed" : "math-number-dot"} /><circle cx={right} cy="56" r="6" className={interval.upperInclusive ? "math-number-dot closed" : "math-number-dot"} /></svg>;
 }
 
 function MathPractice({
@@ -534,8 +513,10 @@ function MathPractice({
       <StudyEmpty text="Add math cards to start a math practice session." />
     );
   const prompt = mathExpression(card.front);
-  const target = mathExpression(card.back);
-  const inequality = /(?:≤|≥|<|>)/.test(prompt);
+  const promptIsExpression = isStandaloneMathExpression(card.front);
+  const target = mathExpression(card.back) || card.back.trim();
+  const interval = parseMathInterval(target) ?? parseMathInterval(prompt);
+  const workspaceExpression = promptIsExpression ? prompt : "";
   const check = () => {
     const correct = equivalentMath(answer, target);
     setChecked(correct);
@@ -551,7 +532,7 @@ function MathPractice({
       <header>
         <div>
           <p className="eyebrow">MATH PRACTICE</p>
-          <h1>Work the math, not a matching game.</h1>
+          <h1>Math practice</h1>
           <p>
             Use <code>^</code> exponents, <code>/</code> fractions,{" "}
             <code>sqrt()</code>, parentheses, functions, and inequalities.
@@ -564,10 +545,10 @@ function MathPractice({
       <div className="math-practice-grid">
         <article className="math-problem">
           <small>PROBLEM</small>
-          <p>{card.front}</p>
-          <div className="math-problem-expression">
+          <p><MathText>{card.front}</MathText></p>
+          {prompt && <div className="math-problem-expression">
             <MathFormula value={prompt} display />
-          </div>
+          </div>}
           <label>
             Your answer
             <input
@@ -595,6 +576,7 @@ function MathPractice({
               ),
             )}
           </div>
+          {answer.trim() && <div className="math-answer-preview"><small>Formatted answer</small><MathFormula value={answer} /></div>}
           {checked !== null && (
             <div
               className={
@@ -628,14 +610,14 @@ function MathPractice({
         </article>
         <aside className="math-workspace">
           <header>
-            <small>{inequality ? "NUMBER LINE" : "FUNCTION GRAPH"}</small>
+            <small>{interval ? "NUMBER LINE" : workspaceExpression ? "FUNCTION GRAPH" : "MATH WORKSPACE"}</small>
             <strong>
-              <MathFormula value={prompt} />
+              {interval ? <MathFormula value={target} /> : workspaceExpression ? <MathFormula value={workspaceExpression} /> : "Use the problem and answer field to work it out."}
             </strong>
           </header>
-          {inequality ? <MathNumberLine expression={prompt} /> : <MathGraph expression={prompt} />}
+          {interval ? <IntervalNumberLine interval={interval} /> : workspaceExpression ? <MathGraph expression={workspaceExpression} /> : <div className="math-workspace-empty">A graph appears for a function or equation.</div>}
           <p>
-            {inequality ? "Open circles are strict; filled circles include the boundary." : <>Graphs evaluate numeric functions of <em>x</em>.</>}
+            {interval ? "Open circles are strict; filled circles include the boundary." : workspaceExpression ? <>Graphs evaluate numeric functions of <em>x</em>.</> : "Type your solution using the math keypad when helpful."}
           </p>
         </aside>
       </div>
