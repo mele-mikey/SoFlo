@@ -1341,7 +1341,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       .filter((decoration) => String(decoration.spec.key ?? '').startsWith('paper-break-'))
       .map((decoration) => decoration.from)
       .sort((left, right) => left - right)
-    if (!breaks.length) return { text: editor.getText(), from: 0, to: documentSize, index: 0, adjacentContext: '' }
+    if (!breaks.length) return { text: editor.getText(), from: 0, to: documentSize, index: 0, pageCount: 1, adjacentContext: '' }
 
     const scrollArea = editor.view.dom.closest<HTMLElement>('.editor-page-wrap')
     const visibleCenter = scrollArea
@@ -1372,7 +1372,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       previous && `PREVIOUS PAGE (context only)\n${previous}`,
       next && `NEXT PAGE (context only)\n${next}`,
     ].filter(Boolean).join('\n\n')
-    return { text: editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText(), from: start, to: end, index: visiblePage, adjacentContext }
+    return { text: editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText(), from: start, to: end, index: visiblePage, pageCount: breaks.length + 1, adjacentContext }
   }
   const reviewGrammar = async (quick = false, requestedPage?: number, prefetched = false) => {
     if (!aiEnabled || !aiGrammarEnabled || !aiModelReady) return false
@@ -1397,7 +1397,28 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       const page = visiblePaperPage(requestedPage)
       const pageKey = `${page.from}:${page.to}:${page.text}`
       if (quick && reviewedGrammarPagesRef.current.has(pageKey)) return true
-      const issues = extractGrammarIssues(await onGrammarReview(page.text, quick, paperContext, page.adjacentContext), editor, !quick, page).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+
+      // AI Review is a three-page window: the page being read receives the
+      // detailed review, while the pages immediately before and after receive
+      // quick mechanics checks. The neighboring pages are real targets here,
+      // not merely sentence-boundary context, so their marks appear too.
+      const reviewTargets = [
+        { page, quick },
+        ...(!quick && requestedPage === undefined
+          ? [page.index - 1, page.index + 1]
+            .filter((index) => index >= 0 && index < page.pageCount)
+            .map((index) => ({ page: visiblePaperPage(index), quick: true }))
+          : []),
+      ]
+      const issues: GrammarIssue[] = []
+      for (const target of reviewTargets) {
+        const targetKey = `${target.page.from}:${target.page.to}:${target.page.text}`
+        if (target.quick && reviewedGrammarPagesRef.current.has(targetKey)) continue
+        const response = await onGrammarReview(target.page.text, target.quick, paperContext, target.page.adjacentContext)
+        issues.push(...extractGrammarIssues(response, editor, !target.quick, target.page)
+          .filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue))))
+        if (target.quick) reviewedGrammarPagesRef.current.add(targetKey)
+      }
       // A manual review started after a passive pass should replace that pass,
       // never be overwritten by an older background response.
       if (generation !== grammarReviewGenerationRef.current) return false
@@ -1435,6 +1456,8 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
             if (!grammarRequestRef.current) void grammarReviewRef.current(true, page.index + 1, true)
           }, 120)
         }
+      } else {
+        reviewedGrammarPagesRef.current.add(pageKey)
       }
       return issues.length > 0
     } catch (error) {
