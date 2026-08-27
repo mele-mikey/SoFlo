@@ -1,16 +1,16 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SoFlo Server",
-  "version": "1.0.0",
+  "version": "1.1.76",
   "identifier": "edu.soflo.server",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "npm --prefix server run dev",
-    "beforeBuildCommand": "npm --prefix server run build"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [{ "title": "SoFlo Server", "width": 1060, "height": 820, "minWidth": 760, "minHeight": 640, "resizable": true, "decorations": false, "transparent": false, "center": true }],
+    "windows": [{ "title": "SoFlo Server", "width": 1060, "height": 820, "minWidth": 760, "minHeight": 640, "resizable": true, "decorations": true, "transparent": false, "center": true }],
     "security": { "csp": null }
   },
   "bundle": {

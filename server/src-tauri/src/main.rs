@@ -3,7 +3,7 @@
 use std::{
     env,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command},
     sync::{Arc, Mutex},
@@ -19,13 +19,17 @@ use sha2::{Digest, Sha256};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State, WindowEvent,
+    Emitter, Manager, State, WindowEvent,
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const GATEWAY_PORT: u16 = 8321;
 const MODEL_PORT: u16 = 8322;
 const MAX_REQUEST_BYTES: u64 = 6_000_000;
+const RELEASES_API: &str = "https://api.github.com/repos/mele-mikey/SoFlo/releases/latest";
+const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/mele-mikey/SoFlo/releases/download/";
+
+fn default_check_for_updates() -> bool { true }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,13 +46,15 @@ struct ServerConfig {
     start_with_windows: bool,
     #[serde(default)]
     auto_start: bool,
+    #[serde(default = "default_check_for_updates")]
+    check_for_updates: bool,
     #[serde(default)]
     pairing_key_hash: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { model_path: String::new(), public_endpoint: String::new(), cloudflare_tunnel_token: String::new(), cloudflared_path: String::new(), start_with_windows: false, auto_start: false, pairing_key_hash: String::new() }
+        Self { model_path: String::new(), public_endpoint: String::new(), cloudflare_tunnel_token: String::new(), cloudflared_path: String::new(), start_with_windows: false, auto_start: false, check_for_updates: true, pairing_key_hash: String::new() }
     }
 }
 
@@ -64,6 +70,35 @@ struct ServerStatus {
     status_text: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerUpdateInfo {
+    version: String,
+    download_url: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerUpdateDownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u8>,
+    attempt: u8,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubReleaseAsset>,
+}
+
 struct ManagedChild {
     child: Child,
     identity: String,
@@ -75,6 +110,7 @@ struct ServerState {
     config: Arc<Mutex<ServerConfig>>,
     model: Arc<Mutex<Option<ManagedChild>>>,
     tunnel: Arc<Mutex<Option<ManagedChild>>>,
+    gateway_problem: Arc<Mutex<Option<String>>>,
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -101,6 +137,18 @@ fn token_hash(value: &str) -> String {
 fn same_token(left: &str, right: &str) -> bool {
     if left.len() != right.len() { return false; }
     left.bytes().zip(right.bytes()).fold(0_u8, |difference, (a, b)| difference | (a ^ b)) == 0
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let parse = |value: &str| value.trim_start_matches('v').split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let candidate = parse(candidate);
+    let current = parse(current);
+    for index in 0..candidate.len().max(current.len()) {
+        let left = *candidate.get(index).unwrap_or(&0);
+        let right = *current.get(index).unwrap_or(&0);
+        if left != right { return left > right; }
+    }
+    false
 }
 
 fn process_running(slot: &Mutex<Option<ManagedChild>>) -> bool {
@@ -133,6 +181,12 @@ fn cloudflared_command(config: &ServerConfig) -> Result<PathBuf, String> {
         let path = PathBuf::from(config.cloudflared_path.trim());
         if path.is_file() { return Ok(path); }
         return Err("The selected cloudflared.exe file no longer exists.".into());
+    }
+    if let Ok(current) = env::current_exe() {
+        if let Some(directory) = current.parent() {
+            let bundled = directory.join(if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" });
+            if bundled.is_file() { return Ok(bundled); }
+        }
     }
     Ok(PathBuf::from(if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" }))
 }
@@ -261,6 +315,9 @@ fn generate_pairing_key(state: State<'_, ServerState>) -> Result<String, String>
 
 #[tauri::command]
 fn start_server(state: State<'_, ServerState>) -> Result<(), String> {
+    if let Some(problem) = state.gateway_problem.lock().ok().and_then(|problem| problem.clone()) {
+        return Err(problem);
+    }
     let config = state.config.lock().map_err(|_| "SoFlo Server configuration is unavailable.".to_string())?.clone();
     if config.pairing_key_hash.is_empty() { return Err("Generate a device pairing key first. Without it, the public endpoint stays locked.".into()); }
     start_model(&state, &config)?; start_cloudflare(&state, &config)
@@ -274,17 +331,104 @@ fn get_server_status(state: State<'_, ServerState>) -> ServerStatus {
     let config = state.config.lock().ok().map(|config| config.clone()).unwrap_or_default();
     let cloudflared_available = cloudflared_command(&config).ok().is_some_and(|path| command_available(&path));
     let model_running = process_running(&state.model); let cloudflare_running = process_running(&state.tunnel);
-    let status_text = if model_running && (config.cloudflare_tunnel_token.trim().is_empty() || cloudflare_running) { "Server is ready for its paired SoFlo app.".into() } else if model_running { "Model is running locally; Cloudflare Tunnel is not connected.".into() } else { "Choose a model, configure Cloudflare, then start the server.".into() };
-    ServerStatus { gateway_port: GATEWAY_PORT, gateway_running: true, model_running, cloudflare_running, cloudflared_available, pairing_configured: !config.pairing_key_hash.is_empty(), status_text }
+    let gateway_problem = state.gateway_problem.lock().ok().and_then(|problem| problem.clone());
+    let status_text = if let Some(problem) = &gateway_problem { problem.clone() } else if model_running && (config.cloudflare_tunnel_token.trim().is_empty() || cloudflare_running) { "Server is ready for its paired SoFlo app.".into() } else if model_running { "Model is running locally; Cloudflare Tunnel is not connected.".into() } else { "Choose a model, configure Cloudflare, then start the server.".into() };
+    ServerStatus { gateway_port: GATEWAY_PORT, gateway_running: gateway_problem.is_none(), model_running, cloudflare_running, cloudflared_available, pairing_configured: !config.pairing_key_hash.is_empty(), status_text }
+}
+
+#[tauri::command]
+async fn check_for_server_update() -> Result<Option<ServerUpdateInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("SoFlo Server update check")
+            .build()
+            .map_err(|_| "SoFlo Server could not prepare its update check.".to_string())?;
+        let response = client.get(RELEASES_API)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .map_err(|_| "SoFlo Server could not check GitHub Releases right now.".to_string())?;
+        if !response.status().is_success() { return Ok(None); }
+        let release: GithubRelease = response.json().map_err(|_| "GitHub Releases returned an unreadable Server update response.".to_string())?;
+        let current = env!("CARGO_PKG_VERSION");
+        if !version_is_newer(&release.tag_name, current) { return Ok(None); }
+        let asset = release.assets.into_iter().find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.starts_with("soflo-server-setup-") && name.ends_with(".exe")
+        });
+        Ok(asset.map(|asset| ServerUpdateInfo { version: release.tag_name.trim_start_matches('v').to_string(), download_url: asset.browser_download_url }))
+    }).await.map_err(|_| "SoFlo Server's update check stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn download_and_launch_server_update(app: tauri::AppHandle, version: String, download_url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !download_url.starts_with(RELEASE_DOWNLOAD_PREFIX) || !download_url.to_ascii_lowercase().contains("soflo-server-setup-") {
+            return Err("SoFlo Server only installs its official GitHub Release installer.".into());
+        }
+        if version.is_empty() || !version.chars().all(|character| character.is_ascii_digit() || character == '.') {
+            return Err("That Server update version is invalid.".into());
+        }
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(45))
+            .timeout(Duration::from_secs(60 * 60))
+            .user_agent("SoFlo Server updater")
+            .build()
+            .map_err(|_| "SoFlo Server could not prepare the update download.".to_string())?;
+        let destination = env::temp_dir().join(format!("SoFlo-Server-Setup-{version}.exe"));
+        let partial = destination.with_extension("exe.partial");
+        let mut final_error = None;
+        for attempt in 1..=3u8 {
+            let existing = fs::metadata(&partial).map(|metadata| metadata.len()).unwrap_or(0);
+            let _ = app.emit("server-update-download-progress", ServerUpdateDownloadProgress { downloaded_bytes: existing, total_bytes: None, percent: None, attempt, message: if existing > 0 { "Resuming update download...".into() } else { "Starting update download...".into() } });
+            let mut request = client.get(&download_url);
+            if existing > 0 { request = request.header(reqwest::header::RANGE, format!("bytes={existing}-")); }
+            let result = (|| -> Result<(), String> {
+                let mut response = request.send().map_err(|_| "The update download was interrupted.".to_string())?;
+                if !(response.status().is_success() || response.status() == reqwest::StatusCode::PARTIAL_CONTENT) { return Err("GitHub Releases could not provide that Server update.".into()); }
+                let append = existing > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+                let offset = if append { existing } else { 0 };
+                let total = response.content_length().map(|length| length.saturating_add(offset));
+                let mut output = if append { fs::OpenOptions::new().create(true).append(true).open(&partial) } else { fs::File::create(&partial) }.map_err(|_| "SoFlo Server could not save the update installer.".to_string())?;
+                let mut downloaded = offset;
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let count = response.read(&mut buffer).map_err(|_| "The update download was interrupted.".to_string())?;
+                    if count == 0 { break; }
+                    output.write_all(&buffer[..count]).map_err(|_| "SoFlo Server could not save the update installer.".to_string())?;
+                    downloaded = downloaded.saturating_add(count as u64);
+                    let percent = total.filter(|size| *size > 0).map(|size| ((downloaded.saturating_mul(100) / size).min(100)) as u8);
+                    let _ = app.emit("server-update-download-progress", ServerUpdateDownloadProgress { downloaded_bytes: downloaded, total_bytes: total, percent, attempt, message: "Downloading Server update...".into() });
+                }
+                output.flush().map_err(|_| "SoFlo Server could not save the update installer.".to_string())?;
+                if let Some(total) = total { if downloaded < total { return Err("The update download ended before the complete installer arrived.".into()); } }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => { final_error = None; break; }
+                Err(error) => { final_error = Some(error); if attempt < 3 { thread::sleep(Duration::from_secs(u64::from(attempt) * 2)); } }
+            }
+        }
+        if let Some(error) = final_error { return Err(format!("{error} The partial download was kept so SoFlo Server can resume it next time.")); }
+        let bytes = fs::read(&partial).map_err(|_| "SoFlo Server could not verify the downloaded installer.".to_string())?;
+        if bytes.len() < 1024 || bytes.get(0..2) != Some(b"MZ") { return Err("The downloaded Server update is not a valid Windows installer. Please try again.".into()); }
+        let _ = fs::remove_file(&destination);
+        fs::rename(&partial, &destination).map_err(|_| "SoFlo Server could not finalize the downloaded installer.".to_string())?;
+        let _ = app.emit("server-update-download-progress", ServerUpdateDownloadProgress { downloaded_bytes: bytes.len() as u64, total_bytes: Some(bytes.len() as u64), percent: Some(100), attempt: 1, message: "Opening the Server installer...".into() });
+        let current_pid = std::process::id().to_string();
+        Command::new(&destination).arg(format!("--replace-pid={current_pid}")).spawn().map_err(|_| "SoFlo Server could not start the downloaded update installer.".to_string())?;
+        app.exit(0);
+        Ok(())
+    }).await.map_err(|_| "SoFlo Server's update download stopped unexpectedly.".to_string())?
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let state = ServerState { config_path: config_path(app.handle())?, config: Arc::new(Mutex::new(ServerConfig::default())), model: Arc::new(Mutex::new(None)), tunnel: Arc::new(Mutex::new(None)) };
+            let state = ServerState { config_path: config_path(app.handle())?, config: Arc::new(Mutex::new(ServerConfig::default())), model: Arc::new(Mutex::new(None)), tunnel: Arc::new(Mutex::new(None)), gateway_problem: Arc::new(Mutex::new(None)) };
             let config = load_config(&state.config_path); *state.config.lock().map_err(|_| "SoFlo Server configuration is unavailable.")? = config.clone();
-            start_gateway(state.clone())?;
+            if let Err(problem) = start_gateway(state.clone()) { *state.gateway_problem.lock().map_err(|_| "SoFlo Server could not record its gateway state.")? = Some(problem); }
             app.manage(state.clone());
             let show = MenuItem::with_id(app, "show", "Show dashboard", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Stop server and exit", true, None::<&str>)?;
@@ -294,7 +438,7 @@ fn main() {
             if config.auto_start { let state = state.clone(); thread::spawn(move || { let _ = start_model(&state, &config); let _ = start_cloudflare(&state, &config); }); }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_server_config, save_server_config, generate_pairing_key, start_server, stop_server, get_server_status])
+        .invoke_handler(tauri::generate_handler![get_server_config, save_server_config, generate_pairing_key, start_server, stop_server, get_server_status, check_for_server_update, download_and_launch_server_update])
         .on_window_event(|window, event| if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); })
         .run(tauri::generate_context!())
         .expect("SoFlo Server failed to start");
@@ -318,5 +462,6 @@ mod tests {
         assert!(config.public_endpoint.is_empty());
         assert!(config.cloudflare_tunnel_token.is_empty());
         assert!(config.pairing_key_hash.is_empty());
+        assert!(config.check_for_updates);
     }
 }

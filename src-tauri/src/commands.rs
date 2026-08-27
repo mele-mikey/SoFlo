@@ -857,8 +857,11 @@ pub async fn check_for_app_update() -> CommandResult<Option<AppUpdateInfo>> {
         let mut assets = release.assets.into_iter();
         let asset = assets.find(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            name.ends_with(".exe") && name.contains("setup")
-        }).or_else(|| assets.find(|asset| asset.name.to_ascii_lowercase().ends_with(".msi")));
+            name.ends_with(".exe") && name.starts_with("soflo-setup-")
+        }).or_else(|| assets.find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.starts_with("soflo_") && name.ends_with(".msi")
+        }));
         Ok(asset.map(|asset| AppUpdateInfo { version: release.tag_name.trim_start_matches('v').to_string(), download_url: asset.browser_download_url }))
     }).await.map_err(|_| "SoFlo's update check stopped unexpectedly.".to_string())?
 }

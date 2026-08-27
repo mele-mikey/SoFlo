@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "soflo-server"
-version = "1.0.0"
+version = "1.1.76"
 dependencies = [
  "base64 0.22.1",
  "rand 0.8.8",
