@@ -175,7 +175,10 @@ const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
 // deliberately configured with 8K to stay resident on a 16 GB GPU. Lecture
 // prompts include instructions and metadata as well as the source, so keep
 // their source pieces conservative enough for either runtime.
-const LECTURE_AI_SOURCE_CHUNK_CHARS: usize = 6_000;
+// Cloudflare cannot keep a proxied request open indefinitely. Use compact,
+// independent lecture passes so even a 14B model can answer each one before
+// the proxy deadline, while the complete paper is preserved across passes.
+const LECTURE_AI_SOURCE_CHUNK_CHARS: usize = 2_400;
 const LECTURE_AI_CONTEXT_NOTE_CHARS: usize = 1_200;
 const FLASHCARD_SOURCE_CHUNK_CHARS: usize = 6_000;
 const FLASHCARD_BATCH_CARD_LIMIT: usize = 10;
@@ -530,7 +533,10 @@ fn relay_remote_ai_connection(mut stream: TcpStream) {
         }
     };
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(240))
+        // A direct local/remote tunnel can legitimately take a few minutes on
+        // a cold model. Cloudflare still supplies its own earlier error when
+        // applicable, which the lecture flow turns into a safe fallback.
+        .timeout(Duration::from_secs(300))
         .build()
     {
         Ok(client) => client,
@@ -6288,7 +6294,7 @@ fn create_lecture_analysis(
     connection.execute("INSERT INTO lecture_analyses (lecture_id, status, raw_transcript, cleaned_transcript) VALUES (?1,'analyzing',?2,?3) ON CONFLICT(lecture_id) DO UPDATE SET status='analyzing', raw_transcript=excluded.raw_transcript, cleaned_transcript=excluded.cleaned_transcript, updated_at=CURRENT_TIMESTAMP", params![lecture_id, raw_transcript, cleaned_transcript]).map_err(|error| error.to_string())?;
     let port = ensure_ai_server(&model_path, app)?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(150))
+        .timeout(Duration::from_secs(300))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let chunks = split_source_for_ai(&source_notes, LECTURE_AI_SOURCE_CHUNK_CHARS);
@@ -6309,7 +6315,7 @@ fn create_lecture_analysis(
         let system = if organizing_written_notes {
             "You are SoFlo's meticulous lecture note organizer. Reorganize the student's existing lecture-paper notes into the complete replacement lecture paper. Preserve every academic fact, definition, reasoning step, worked example, correction, assignment, due date, and uncertainty. Do not invent information and do not merely echo the source as one paragraph. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs, bullets, numbered steps, and tables only when useful. Do not add a document title, an H1 heading, a divider, timestamps, or speaker labels."
         } else {
-            "You are SoFlo's meticulous lecture note-taker. Turn the supplied student paper and transcript into the complete replacement lecture paper. Preserve every academic detail from both sources: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Existing student notes may contain details the transcript misses, so retain them. Keep the lecture order where possible. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. Do not add a document title, an H1 heading, a divider, timestamp, speaker label, or recap. Do not turn every spoken moment into a section; merge related material into clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, tables when useful, and fenced ```python code blocks for every Python example. Never put code in ordinary prose."
+            "You are SoFlo's meticulous lecture note-taker. Turn the supplied student paper and transcript into the complete replacement lecture paper. Preserve every academic detail already in the student's paper. Add useful non-duplicate academic detail from the transcript: definitions, reasoning, worked examples, code or procedure steps, corrections, instructor emphasis, questions and answers, cautions, assignments, due dates, and next-class previews. Existing student notes always take priority; the transcript supplements them and must never erase or contradict them. Keep the lecture order where possible. Compress verbal filler only; do not omit meaningful instructional content, and do not invent anything. Do not add a document title, an H1 heading, a divider, timestamp, speaker label, or recap. Do not turn every spoken moment into a section; merge related material into clear conceptual sections. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs and bullets for explanation, tables when useful, and fenced ```python code blocks for every Python example. Never put code in ordinary prose."
         };
         let prompt = format!("LECTURE CONTEXT\n{}\n\nLECTURE PART {} OF {} — continue directly from the prior part when applicable.\n\n{}", lecture_context, index + 1, chunks.len(), chunk);
         let usable = |value: String| {
@@ -6320,7 +6326,7 @@ fn create_lecture_analysis(
                 usable_lecture_notes(&value, chunk)
             }
         };
-        let note = local_chat_text(&client, port, system, &prompt, 1_600)
+        let note = local_chat_text(&client, port, system, &prompt, 700)
             .ok()
             .and_then(usable);
         // A retry gives a temporarily busy local model a shorter, simpler
@@ -6332,7 +6338,7 @@ fn create_lecture_analysis(
             } else {
                 "Combine this student's notes and transcript into complete structured replacement lecture notes. Preserve every academic fact from both, use H2/H3 headings, short paragraphs, bullets, numbered steps, and tables when useful. Put Python examples only in fenced ```python code blocks. Do not include timestamps, speaker labels, a title, divider, raw transcript text, or invented content."
             };
-            local_chat_text(&client, port, retry_system, &prompt, 1_400)
+            local_chat_text(&client, port, retry_system, &prompt, 500)
                 .ok()
                 .and_then(usable)
         })
@@ -6365,7 +6371,7 @@ fn create_lecture_analysis(
             digest_chunks.len(),
             chunk
         );
-        let digest = local_chat_text(&client, port, system, &prompt, 900)
+        let digest = local_chat_text(&client, port, system, &prompt, 500)
             .ok()
             .filter(|digest| !digest.trim().is_empty())
             .unwrap_or_else(|| chunk.to_string());
@@ -6380,7 +6386,7 @@ fn create_lecture_analysis(
         .take(LECTURE_AI_SOURCE_CHUNK_CHARS)
         .collect::<String>();
     let system = "You are SoFlo's lecture analyst. Using every supplied lecture digest, return exactly one valid JSON object with keys overview, keyPoints, concepts, questions, nextSteps. Make the overview a helpful multi-sentence explanation rather than a one-line summary. The other keys are arrays with as many useful entries as the lecture supports. Preserve all assignments, dates, names, examples, corrections, and uncertainty. Never invent sources or information not present in the lecture.";
-    let output = local_chat_text(&client, port, system, &format!("LECTURE CONTEXT\n{}\n\nCreate a complete course-ready lecture guide from these chronological digests:\n\n{}", lecture_context, synthesis), 3_200).unwrap_or_default();
+    let output = local_chat_text(&client, port, system, &format!("LECTURE CONTEXT\n{}\n\nCreate a complete course-ready lecture guide from these chronological digests:\n\n{}", lecture_context, synthesis), 700).unwrap_or_default();
     let value: serde_json::Value = json_object_from_response(&output)
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_else(|| fallback_lecture_summary(&detailed_notes));
@@ -11124,10 +11130,10 @@ mod tests {
         looks_like_math_material, normalize_lecture_notes_part, powerpoint_slide_text,
         quick_mechanics_prepass, remote_ai_reference, remote_ai_target,
         repairs_fragmented_pdf_spacing, semester_end_date, should_retry_flashcard_batch_on_cpu,
-        study_web_hierarchy_layout_edges, study_web_plan_has_hierarchy,
+        split_source_for_ai, study_web_hierarchy_layout_edges, study_web_plan_has_hierarchy,
         thesaurus_json_from_response, usable_lecture_notes, write_document_docx,
         CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource, StudyWebSemanticGroup,
-        StudyWebSemanticPlan, StudyWebSourceCard, REMOTE_AI_PREFIX,
+        StudyWebSemanticPlan, StudyWebSourceCard, LECTURE_AI_SOURCE_CHUNK_CHARS, REMOTE_AI_PREFIX,
     };
     use crate::models::AppSettings;
 
@@ -11481,6 +11487,21 @@ mod tests {
         assert!(fallback.contains("The Revolution began with a tax dispute."));
         assert!(fallback.contains("Compare the colonial and British perspectives."));
         assert!(!fallback.contains("00:00–00:20"));
+    }
+
+    #[test]
+    fn chunks_long_lecture_source_without_losing_any_written_or_spoken_detail() {
+        let paper = "Student paper: The Stamp Act caused colonial resistance. ".repeat(80);
+        let transcript = "Professor: Compare taxation with representation. ".repeat(80);
+        let source = format!("{paper}\n\n{transcript}");
+        let chunks = split_source_for_ai(&source, LECTURE_AI_SOURCE_CHUNK_CHARS);
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= LECTURE_AI_SOURCE_CHUNK_CHARS));
+        let rebuilt = chunks.join(" ");
+        assert!(rebuilt.contains("Student paper: The Stamp Act caused colonial resistance."));
+        assert!(rebuilt.contains("Professor: Compare taxation with representation."));
     }
 
     #[test]
