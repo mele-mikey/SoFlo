@@ -4,8 +4,10 @@ Unicode true
 ManifestDPIAware true
 ManifestDPIAwareness PerMonitorV2
 RequestExecutionLevel user
-SetCompressor /SOLID lzma
-SetDatablockOptimize on
+; Avoid a solid-packed payload: it is easier for security scanners to inspect
+; and a damaged download does not make every embedded file unreadable.
+SetCompressor /FINAL lzma
+SetDatablockOptimize off
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
 ; The setup window is SoFlo's own Tauri UI. NSIS is only the background

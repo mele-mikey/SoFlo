@@ -1,6 +1,6 @@
 [package]
 name = "soflo-server"
-version = "1.1.77"
+version = "1.1.78"
 description = "Private Cloudflare-connected AI server for SoFlo"
 authors = ["Mikey M."]
 license = "PolyForm-Noncommercial-1.0.0"

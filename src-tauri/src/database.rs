@@ -13,8 +13,8 @@ use chacha20poly1305::{
 };
 use rand::{rngs::OsRng, RngCore};
 use rusqlite::{serialize::OwnedData, Connection, DatabaseName, OpenFlags};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::models::{
@@ -100,12 +100,18 @@ impl Database {
     /// Files that belong to a library but are too large to keep inside SQLite,
     /// such as crash-safe lecture audio chunks, live beside the library.
     pub fn app_data_dir(&self) -> PathBuf {
-        self.path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
     }
 
     pub fn installer_model_path(&self) -> Option<String> {
         let marker = self.path.parent()?.join("installer.model-path");
-        fs::read_to_string(marker).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+        fs::read_to_string(marker)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     pub fn clear_installer_model_path(&self) -> Result<(), String> {
@@ -357,7 +363,8 @@ impl Database {
             .map_err(|_| "SoFlo's security state is unavailable.".to_string())?
             .is_some();
         let data = if encrypted {
-            fs::read(self.data_path()).map_err(|_| "SoFlo could not read its local library.".to_string())?
+            fs::read(self.data_path())
+                .map_err(|_| "SoFlo could not read its local library.".to_string())?
         } else {
             // SQLite may have current writes in its WAL sidecar. Export a checkpointed
             // main database so one .soflo file always contains the complete library.
@@ -366,46 +373,94 @@ impl Database {
         let file = fs::File::create(destination).map_err(|error| error.to_string())?;
         let mut archive = ZipWriter::new(file);
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        let manifest = SofloArchiveManifest { format: "soflo-library".into(), version: 1, encrypted };
-        archive.start_file("manifest.json", options).map_err(|error| error.to_string())?;
-        archive.write_all(&serde_json::to_vec(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-        archive.start_file(if encrypted { "library.enc" } else { "library.sqlite3" }, options).map_err(|error| error.to_string())?;
-        archive.write_all(&data).map_err(|error| error.to_string())?;
+        let manifest = SofloArchiveManifest {
+            format: "soflo-library".into(),
+            version: 1,
+            encrypted,
+        };
+        archive
+            .start_file("manifest.json", options)
+            .map_err(|error| error.to_string())?;
+        archive
+            .write_all(&serde_json::to_vec(&manifest).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        archive
+            .start_file(
+                if encrypted {
+                    "library.enc"
+                } else {
+                    "library.sqlite3"
+                },
+                options,
+            )
+            .map_err(|error| error.to_string())?;
+        archive
+            .write_all(&data)
+            .map_err(|error| error.to_string())?;
         if encrypted {
-            archive.start_file("security.json", options).map_err(|error| error.to_string())?;
-            archive.write_all(&fs::read(&self.security_path).map_err(|_| "SoFlo could not read its security configuration.".to_string())?).map_err(|error| error.to_string())?;
+            archive
+                .start_file("security.json", options)
+                .map_err(|error| error.to_string())?;
+            archive
+                .write_all(
+                    &fs::read(&self.security_path).map_err(|_| {
+                        "SoFlo could not read its security configuration.".to_string()
+                    })?,
+                )
+                .map_err(|error| error.to_string())?;
         }
         archive.finish().map_err(|error| error.to_string())?;
         Ok(())
     }
 
     pub fn import_archive(&self, source: &Path) -> Result<(), String> {
-        let file = fs::File::open(source).map_err(|_| "The selected SoFlo data file could not be read.".to_string())?;
-        let mut archive = ZipArchive::new(file).map_err(|_| "That file is not a valid SoFlo data export.".to_string())?;
+        let file = fs::File::open(source)
+            .map_err(|_| "The selected SoFlo data file could not be read.".to_string())?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|_| "That file is not a valid SoFlo data export.".to_string())?;
         let manifest: SofloArchiveManifest = {
-            let mut entry = archive.by_name("manifest.json").map_err(|_| "That file is missing SoFlo export details.".to_string())?;
+            let mut entry = archive
+                .by_name("manifest.json")
+                .map_err(|_| "That file is missing SoFlo export details.".to_string())?;
             let mut raw = Vec::new();
-            entry.read_to_end(&mut raw).map_err(|error| error.to_string())?;
-            serde_json::from_slice(&raw).map_err(|_| "That file is not a valid SoFlo data export.".to_string())?
+            entry
+                .read_to_end(&mut raw)
+                .map_err(|error| error.to_string())?;
+            serde_json::from_slice(&raw)
+                .map_err(|_| "That file is not a valid SoFlo data export.".to_string())?
         };
         if manifest.format != "soflo-library" || manifest.version != 1 {
             return Err("That file is not a compatible SoFlo data export.".into());
         }
         let mut data = Vec::new();
-        archive.by_name(if manifest.encrypted { "library.enc" } else { "library.sqlite3" }).map_err(|_| "That export is missing its library data.".to_string())?.read_to_end(&mut data).map_err(|error| error.to_string())?;
+        archive
+            .by_name(if manifest.encrypted {
+                "library.enc"
+            } else {
+                "library.sqlite3"
+            })
+            .map_err(|_| "That export is missing its library data.".to_string())?
+            .read_to_end(&mut data)
+            .map_err(|error| error.to_string())?;
         if manifest.encrypted {
             if !data.starts_with(ENCRYPTED_HEADER) {
                 return Err("That encrypted export is invalid.".into());
             }
             let mut security = Vec::new();
-            archive.by_name("security.json").map_err(|_| "That encrypted export is missing its security details.".to_string())?.read_to_end(&mut security).map_err(|error| error.to_string())?;
-            serde_json::from_slice::<SecurityMetadata>(&security).map_err(|_| "That encrypted export has invalid security details.".to_string())?;
+            archive
+                .by_name("security.json")
+                .map_err(|_| "That encrypted export is missing its security details.".to_string())?
+                .read_to_end(&mut security)
+                .map_err(|error| error.to_string())?;
+            serde_json::from_slice::<SecurityMetadata>(&security)
+                .map_err(|_| "That encrypted export has invalid security details.".to_string())?;
             write_atomically(&self.encrypted_path, &data)?;
             write_atomically(&self.security_path, &security)?;
             remove_file_if_present(&self.path)?;
             remove_sidecars(&self.path)?;
         } else {
-            let connection = connection_from_bytes(data.clone()).map_err(|_| "That export does not contain a valid SoFlo library.".to_string())?;
+            let connection = connection_from_bytes(data.clone())
+                .map_err(|_| "That export does not contain a valid SoFlo library.".to_string())?;
             validate_schema(&connection)?;
             self.write_plaintext_bytes(&data)?;
             remove_sidecars(&self.path)?;
@@ -420,9 +475,18 @@ impl Database {
         remove_sidecars(&self.path)?;
         remove_file_if_present(&self.encrypted_path)?;
         remove_file_if_present(&self.security_path)?;
-        *self.security.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
-        *self.session_key.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
-        *self.memory_anchor.lock().map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        *self
+            .security
+            .lock()
+            .map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        *self
+            .session_key
+            .lock()
+            .map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
+        *self
+            .memory_anchor
+            .lock()
+            .map_err(|_| "SoFlo's security state is unavailable.".to_string())? = None;
         Ok(())
     }
 
@@ -674,13 +738,17 @@ impl Database {
             "#).map_err(|error| error.to_string())?;
         }
         if version < 8 {
-            connection.execute_batch(r#"
+            connection
+                .execute_batch(
+                    r#"
                 ALTER TABLE document_revisions ADD COLUMN name TEXT;
                 ALTER TABLE document_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
                 ALTER TABLE lecture_revisions ADD COLUMN name TEXT;
                 ALTER TABLE lecture_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
                 PRAGMA user_version = 8;
-            "#).map_err(|error| error.to_string())?;
+            "#,
+                )
+                .map_err(|error| error.to_string())?;
         }
         if version < 9 {
             connection.execute_batch(r#"
@@ -743,25 +811,54 @@ impl Database {
             "#).map_err(|error| error.to_string())?;
         }
         if version < 11 {
-            let mut statement = connection.prepare("PRAGMA table_info(study_web_nodes)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(study_web_nodes)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "pinned") {
-                connection.execute_batch("ALTER TABLE study_web_nodes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;").map_err(|error| error.to_string())?;
+                connection
+                    .execute_batch(
+                        "ALTER TABLE study_web_nodes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
+                    )
+                    .map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 11;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 11;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 12 {
-            let mut statement = connection.prepare("PRAGMA table_info(study_webs)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(study_webs)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "deleted_at") {
-                connection.execute_batch("ALTER TABLE study_webs ADD COLUMN deleted_at TEXT;").map_err(|error| error.to_string())?;
+                connection
+                    .execute_batch("ALTER TABLE study_webs ADD COLUMN deleted_at TEXT;")
+                    .map_err(|error| error.to_string())?;
             }
             connection.execute_batch("CREATE INDEX IF NOT EXISTS idx_study_webs_deleted ON study_webs(class_id, deleted_at, updated_at DESC); PRAGMA user_version = 12;").map_err(|error| error.to_string())?;
         }
         if version < 13 {
-            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-            if !columns.iter().any(|column| column == "is_study_web_private") {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(flashcard_sets)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if !columns
+                .iter()
+                .any(|column| column == "is_study_web_private")
+            {
                 connection.execute_batch("ALTER TABLE flashcard_sets ADD COLUMN is_study_web_private INTEGER NOT NULL DEFAULT 0;").map_err(|error| error.to_string())?;
             }
             connection.execute_batch(r#"
@@ -773,12 +870,20 @@ impl Database {
             "#).map_err(|error| error.to_string())?;
         }
         if version < 14 {
-            let mut statement = connection.prepare("PRAGMA table_info(study_web_groups)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(study_web_groups)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "color") {
                 connection.execute_batch("ALTER TABLE study_web_groups ADD COLUMN color TEXT NOT NULL DEFAULT '#7E70D6';").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 14;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 14;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 15 {
             connection.execute_batch(r#"
@@ -837,23 +942,39 @@ impl Database {
             "#).map_err(|error| error.to_string())?;
         }
         if version < 16 {
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "raw_transcript") {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN raw_transcript TEXT NOT NULL DEFAULT '';").map_err(|error| error.to_string())?;
             }
             if !columns.iter().any(|column| column == "cleaned_transcript") {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN cleaned_transcript TEXT NOT NULL DEFAULT '';").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 16;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 16;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 17 {
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "detailed_notes") {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN detailed_notes TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 17;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 17;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 18 {
             connection.execute_batch(r#"
@@ -867,20 +988,42 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_lecture_note_checkpoints_lecture ON lecture_note_checkpoints(lecture_id, timestamp_ms);
             "#).map_err(|error| error.to_string())?;
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-            if !columns.iter().any(|column| column == "enriched_notes_markdown") {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if !columns
+                .iter()
+                .any(|column| column == "enriched_notes_markdown")
+            {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN enriched_notes_markdown TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 18;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 18;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 19 {
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-            if !columns.iter().any(|column| column == "note_suggestions_json") {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if !columns
+                .iter()
+                .any(|column| column == "note_suggestions_json")
+            {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN note_suggestions_json TEXT NOT NULL DEFAULT '[]'; ").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 19;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 19;")
+                .map_err(|error| error.to_string())?;
         }
         // Some development builds marked the schema as version 19 before the
         // matching lecture-analysis column had reached disk. Repair every
@@ -898,8 +1041,14 @@ impl Database {
                 );
                 CREATE INDEX IF NOT EXISTS idx_lecture_note_checkpoints_lecture ON lecture_note_checkpoints(lecture_id, timestamp_ms);
             "#).map_err(|error| error.to_string())?;
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "raw_transcript") {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN raw_transcript TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
             }
@@ -909,13 +1058,21 @@ impl Database {
             if !columns.iter().any(|column| column == "detailed_notes") {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN detailed_notes TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
             }
-            if !columns.iter().any(|column| column == "enriched_notes_markdown") {
+            if !columns
+                .iter()
+                .any(|column| column == "enriched_notes_markdown")
+            {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN enriched_notes_markdown TEXT NOT NULL DEFAULT ''; ").map_err(|error| error.to_string())?;
             }
-            if !columns.iter().any(|column| column == "note_suggestions_json") {
+            if !columns
+                .iter()
+                .any(|column| column == "note_suggestions_json")
+            {
                 connection.execute_batch("ALTER TABLE lecture_analyses ADD COLUMN note_suggestions_json TEXT NOT NULL DEFAULT '[]'; ").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 20;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 20;")
+                .map_err(|error| error.to_string())?;
         }
         if version < 21 {
             connection.execute_batch(r#"
@@ -949,7 +1106,9 @@ impl Database {
             "#).map_err(|error| error.to_string())?;
         }
         if version < 22 {
-            connection.execute_batch(r#"
+            connection
+                .execute_batch(
+                    r#"
                 CREATE TABLE IF NOT EXISTS course_calendar_manual_items (
                     id TEXT PRIMARY KEY NOT NULL,
                     class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
@@ -965,15 +1124,25 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_course_calendar_manual_items_class_due
                     ON course_calendar_manual_items(class_id, due_date, archived);
                 PRAGMA user_version = 22;
-            "#).map_err(|error| error.to_string())?;
+            "#,
+                )
+                .map_err(|error| error.to_string())?;
         }
         if version < 23 {
-            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            let mut statement = connection
+                .prepare("PRAGMA table_info(flashcard_sets)")
+                .map_err(|error| error.to_string())?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
             if !columns.iter().any(|column| column == "study_kind") {
                 connection.execute_batch("ALTER TABLE flashcard_sets ADD COLUMN study_kind TEXT NOT NULL DEFAULT 'standard';").map_err(|error| error.to_string())?;
             }
-            connection.execute_batch("PRAGMA user_version = 23;").map_err(|error| error.to_string())?;
+            connection
+                .execute_batch("PRAGMA user_version = 23;")
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -1165,40 +1334,91 @@ mod tests {
 
     #[test]
     fn creates_structured_version_history_columns() {
-        let directory = std::env::temp_dir().join(format!("soflo-history-test-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("soflo-history-test-{}", uuid::Uuid::new_v4()));
         let database = Database::new(directory.join("soflo.sqlite3")).expect("create database");
         let connection = database.open().expect("open database");
-        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let version: i32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
         assert_eq!(version, 23);
         let set_columns = {
-            let mut statement = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns");
-            statement.query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows").collect::<Result<Vec<_>, _>>().expect("flashcard set column names")
+            let mut statement = connection
+                .prepare("PRAGMA table_info(flashcard_sets)")
+                .expect("flashcard set columns");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("flashcard set column rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("flashcard set column names")
         };
         assert!(set_columns.contains(&"is_study_web_private".to_string()));
         let group_columns = {
-            let mut statement = connection.prepare("PRAGMA table_info(study_web_groups)").expect("study web group columns");
-            statement.query_map([], |row| row.get::<_, String>(1)).expect("study web group column rows").collect::<Result<Vec<_>, _>>().expect("study web group column names")
+            let mut statement = connection
+                .prepare("PRAGMA table_info(study_web_groups)")
+                .expect("study web group columns");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("study web group column rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("study web group column names")
         };
         assert!(group_columns.contains(&"color".to_string()));
         let analysis_columns = {
-            let mut statement = connection.prepare("PRAGMA table_info(lecture_analyses)").expect("lecture analysis columns");
-            statement.query_map([], |row| row.get::<_, String>(1)).expect("lecture analysis column rows").collect::<Result<Vec<_>, _>>().expect("lecture analysis column names")
+            let mut statement = connection
+                .prepare("PRAGMA table_info(lecture_analyses)")
+                .expect("lecture analysis columns");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("lecture analysis column rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("lecture analysis column names")
         };
         assert!(analysis_columns.contains(&"note_suggestions_json".to_string()));
         for table in ["document_revisions", "lecture_revisions"] {
-            let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).expect("revision columns");
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).expect("column rows").collect::<Result<Vec<_>, _>>().expect("column names");
+            let mut statement = connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .expect("revision columns");
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("column rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("column names");
             assert!(columns.contains(&"content".to_string()));
             assert!(columns.contains(&"content_plain".to_string()));
             assert!(columns.contains(&"name".to_string()));
             assert!(columns.contains(&"source".to_string()));
         }
-        for table in ["study_webs", "study_web_sources", "study_web_groups", "study_web_nodes", "study_web_group_members", "study_web_relationships"] {
-            let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("study web table lookup");
+        for table in [
+            "study_webs",
+            "study_web_sources",
+            "study_web_groups",
+            "study_web_nodes",
+            "study_web_group_members",
+            "study_web_relationships",
+        ] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("study web table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
-        for table in ["course_calendar_sources", "course_calendar_items", "course_calendar_plans", "course_calendar_manual_items"] {
-            let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0)).expect("course calendar table lookup");
+        for table in [
+            "course_calendar_sources",
+            "course_calendar_items",
+            "course_calendar_plans",
+            "course_calendar_manual_items",
+        ] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("course calendar table lookup");
             assert_eq!(exists, 1, "missing {table}");
         }
         drop(connection);
@@ -1208,11 +1428,16 @@ mod tests {
 
     #[test]
     fn repairs_a_version_19_lecture_analysis_table_missing_suggestions() {
-        let directory = std::env::temp_dir().join(format!("soflo-lecture-analysis-repair-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!(
+            "soflo-lecture-analysis-repair-{}",
+            uuid::Uuid::new_v4()
+        ));
         let path = directory.join("soflo.sqlite3");
         let database = Database::new(path.clone()).expect("create database");
         let connection = database.open().expect("open database");
-        connection.execute_batch(r#"
+        connection
+            .execute_batch(
+                r#"
             DROP TABLE lecture_analyses;
             CREATE TABLE lecture_analyses (
                 lecture_id TEXT PRIMARY KEY NOT NULL,
@@ -1229,16 +1454,24 @@ mod tests {
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             PRAGMA user_version = 19;
-        "#).expect("simulate incomplete version 19 schema");
+        "#,
+            )
+            .expect("simulate incomplete version 19 schema");
         drop(connection);
         drop(database);
         let repaired = Database::new(path).expect("repair database");
         let connection = repaired.open().expect("open repaired database");
-        let columns = connection.prepare("PRAGMA table_info(lecture_analyses)").expect("analysis columns")
-            .query_map([], |row| row.get::<_, String>(1)).expect("analysis column rows")
-            .collect::<Result<Vec<_>, _>>().expect("analysis column names");
+        let columns = connection
+            .prepare("PRAGMA table_info(lecture_analyses)")
+            .expect("analysis columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("analysis column rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("analysis column names");
         assert!(columns.contains(&"note_suggestions_json".to_string()));
-        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let version: i32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
         assert_eq!(version, 23);
         drop(connection);
         drop(repaired);
@@ -1247,16 +1480,21 @@ mod tests {
 
     #[test]
     fn upgrades_existing_study_web_schema_to_multi_set_sources() {
-        let directory = std::env::temp_dir().join(format!("soflo-study-web-upgrade-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("soflo-study-web-upgrade-{}", uuid::Uuid::new_v4()));
         let path = directory.join("soflo.sqlite3");
         let database = Database::new(path.clone()).expect("create database");
         let connection = database.open().expect("open database");
-        connection.execute_batch("DROP TABLE study_web_sources; PRAGMA user_version = 9;").expect("simulate schema version 9");
+        connection
+            .execute_batch("DROP TABLE study_web_sources; PRAGMA user_version = 9;")
+            .expect("simulate schema version 9");
         drop(connection);
         drop(database);
         let upgraded = Database::new(path).expect("upgrade database");
         let connection = upgraded.open().expect("open upgraded database");
-        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let version: i32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
         let exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='study_web_sources'", [], |row| row.get(0)).expect("sources table lookup");
         assert_eq!(version, 23);
         assert_eq!(exists, 1);
@@ -1267,20 +1505,29 @@ mod tests {
 
     #[test]
     fn upgrades_a_version_21_library_with_calendar_and_math_schema() {
-        let directory = std::env::temp_dir().join(format!("soflo-v21-upgrade-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("soflo-v21-upgrade-{}", uuid::Uuid::new_v4()));
         let path = directory.join("soflo.sqlite3");
         let database = Database::new(path.clone()).expect("create database");
         let connection = database.open().expect("open database");
-        connection.execute_batch("DROP TABLE course_calendar_manual_items; PRAGMA user_version = 21;").expect("simulate version 21 library");
+        connection
+            .execute_batch("DROP TABLE course_calendar_manual_items; PRAGMA user_version = 21;")
+            .expect("simulate version 21 library");
         drop(connection);
         drop(database);
         let upgraded = Database::new(path).expect("upgrade database");
         let connection = upgraded.open().expect("open upgraded database");
-        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("schema version");
+        let version: i32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
         let manual_exists: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='course_calendar_manual_items'", [], |row| row.get(0)).expect("manual calendar table lookup");
-        let columns = connection.prepare("PRAGMA table_info(flashcard_sets)").expect("flashcard set columns")
-            .query_map([], |row| row.get::<_, String>(1)).expect("flashcard set column rows")
-            .collect::<Result<Vec<_>, _>>().expect("flashcard set column names");
+        let columns = connection
+            .prepare("PRAGMA table_info(flashcard_sets)")
+            .expect("flashcard set columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("flashcard set column rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("flashcard set column names");
         assert_eq!(version, 23);
         assert_eq!(manual_exists, 1);
         assert!(columns.contains(&"study_kind".to_string()));
@@ -1346,29 +1593,69 @@ mod tests {
 
     #[test]
     fn soflo_archive_round_trips_plaintext_and_encrypted_libraries() {
-        let directory = std::env::temp_dir().join(format!("soflo-archive-test-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("soflo-archive-test-{}", uuid::Uuid::new_v4()));
         let source_path = directory.join("source").join("soflo.sqlite3");
         let archive_path = directory.join("export.soflo");
         let source = Database::new(source_path.clone()).expect("create source database");
         source.open().expect("open source").execute("INSERT INTO semesters (id, name, term, year) VALUES ('semester', 'Fall 2026', 'Fall', 2026)", []).expect("insert source data");
-        source.export_archive(&archive_path).expect("export plaintext archive");
+        source
+            .export_archive(&archive_path)
+            .expect("export plaintext archive");
 
         let plain_target_path = directory.join("plain-target").join("soflo.sqlite3");
         let plain_target = Database::new(plain_target_path.clone()).expect("create plain target");
-        plain_target.import_archive(&archive_path).expect("import plaintext archive");
-        let count: i32 = plain_target.open().expect("open imported plaintext").query_row("SELECT COUNT(*) FROM semesters WHERE id='semester'", [], |row| row.get(0)).expect("read plaintext import");
+        plain_target
+            .import_archive(&archive_path)
+            .expect("import plaintext archive");
+        let count: i32 = plain_target
+            .open()
+            .expect("open imported plaintext")
+            .query_row(
+                "SELECT COUNT(*) FROM semesters WHERE id='semester'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read plaintext import");
         assert_eq!(count, 1);
 
-        source.update_security(UpdateLibrarySecurityInput { current_pin: None, current_password: None, new_pin: Some("1234".into()), new_password: None, remove_pin: false, remove_password: false }).expect("encrypt source");
-        source.export_archive(&archive_path).expect("export encrypted archive");
+        source
+            .update_security(UpdateLibrarySecurityInput {
+                current_pin: None,
+                current_password: None,
+                new_pin: Some("1234".into()),
+                new_password: None,
+                remove_pin: false,
+                remove_password: false,
+            })
+            .expect("encrypt source");
+        source
+            .export_archive(&archive_path)
+            .expect("export encrypted archive");
         let encrypted_target_path = directory.join("encrypted-target").join("soflo.sqlite3");
-        let encrypted_target = Database::new(encrypted_target_path.clone()).expect("create encrypted target");
-        encrypted_target.import_archive(&archive_path).expect("import encrypted archive");
+        let encrypted_target =
+            Database::new(encrypted_target_path.clone()).expect("create encrypted target");
+        encrypted_target
+            .import_archive(&archive_path)
+            .expect("import encrypted archive");
         drop(encrypted_target);
         let locked = Database::new(encrypted_target_path).expect("reopen encrypted target");
         assert!(locked.security_status().expect("encrypted status").locked);
-        locked.unlock(UnlockLibraryInput { pin: Some("1234".into()), password: None }).expect("unlock imported archive");
-        let count: i32 = locked.open().expect("open imported encrypted library").query_row("SELECT COUNT(*) FROM semesters WHERE id='semester'", [], |row| row.get(0)).expect("read encrypted import");
+        locked
+            .unlock(UnlockLibraryInput {
+                pin: Some("1234".into()),
+                password: None,
+            })
+            .expect("unlock imported archive");
+        let count: i32 = locked
+            .open()
+            .expect("open imported encrypted library")
+            .query_row(
+                "SELECT COUNT(*) FROM semesters WHERE id='semester'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read encrypted import");
         assert_eq!(count, 1);
         drop(locked);
         drop(plain_target);

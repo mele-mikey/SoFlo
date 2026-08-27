@@ -1,7 +1,7 @@
 {
   "name": "soflo-server",
   "private": true,
-  "version": "1.1.77",
+  "version": "1.1.78",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json && vite build"

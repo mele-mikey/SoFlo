@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SoFlo Server",
-  "version": "1.1.77",
+  "version": "1.1.78",
   "identifier": "edu.soflo.server",
   "build": {
     "frontendDist": "../dist",

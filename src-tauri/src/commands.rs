@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    fs,
+    env, fs,
     io::{Cursor, Read, Seek, SeekFrom, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -219,7 +221,11 @@ fn managed_ai_model(role: &str, tier: &str) -> CommandResult<ManagedAiModel> {
 }
 
 fn managed_models_dir(app: &tauri::AppHandle) -> CommandResult<std::path::PathBuf> {
-    Ok(app.path().app_data_dir().map_err(|error| error.to_string())?.join("models"))
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models"))
 }
 
 fn general_model_minimum_bytes(path: &Path) -> u64 {
@@ -234,14 +240,19 @@ fn general_model_minimum_bytes(path: &Path) -> u64 {
 
 fn is_complete_general_ai_model(path: &Path) -> bool {
     path.is_file()
-        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= general_model_minimum_bytes(path))
+        && fs::metadata(path)
+            .is_ok_and(|metadata| metadata.len() >= general_model_minimum_bytes(path))
 }
 
 /// Desktop shortcuts do not always inherit the updated user PATH after llama.cpp
 /// is installed with WinGet. Resolve its normal locations explicitly so an
 /// installed SoFlo app has the same runtime access as a developer terminal.
 fn llama_server_executable() -> PathBuf {
-    let executable = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let executable = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     if let Ok(current_exe) = env::current_exe() {
         if let Some(install_directory) = current_exe.parent() {
             let bundled = install_directory.join("llama").join(executable);
@@ -269,7 +280,11 @@ fn llama_server_executable() -> PathBuf {
             if let Ok(entries) = fs::read_dir(winget.join("Packages")) {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
-                    if name.to_string_lossy().to_ascii_lowercase().starts_with("ggml.llamacpp_") {
+                    if name
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .starts_with("ggml.llamacpp_")
+                    {
                         let candidate = entry.path().join(executable);
                         if candidate.is_file() {
                             return candidate;
@@ -346,15 +361,32 @@ fn remote_ai_target(reference: &str) -> Option<CommandResult<RemoteAiTarget>> {
         let (encoded_endpoint, encoded_key) = encoded
             .split_once('.')
             .ok_or_else(|| "The online AI connection is incomplete. Re-enter the endpoint and pairing key in Settings.".to_string())?;
-        let endpoint = String::from_utf8(BASE64.decode(encoded_endpoint).map_err(|_| "The online AI endpoint is invalid.".to_string())?)
-            .map_err(|_| "The online AI endpoint is invalid.".to_string())?;
-        let access_key = String::from_utf8(BASE64.decode(encoded_key).map_err(|_| "The online AI pairing key is invalid.".to_string())?)
-            .map_err(|_| "The online AI pairing key is invalid.".to_string())?;
+        let endpoint = String::from_utf8(
+            BASE64
+                .decode(encoded_endpoint)
+                .map_err(|_| "The online AI endpoint is invalid.".to_string())?,
+        )
+        .map_err(|_| "The online AI endpoint is invalid.".to_string())?;
+        let access_key = String::from_utf8(
+            BASE64
+                .decode(encoded_key)
+                .map_err(|_| "The online AI pairing key is invalid.".to_string())?,
+        )
+        .map_err(|_| "The online AI pairing key is invalid.".to_string())?;
         let endpoint = endpoint.trim().trim_end_matches('/').to_string();
-        if !endpoint.starts_with("https://") || endpoint.len() > 2_000 || access_key.trim().len() < 32 {
-            return Err("Enter a valid HTTPS SoFlo Server endpoint and device pairing key in Settings.".into());
+        if !endpoint.starts_with("https://")
+            || endpoint.len() > 2_000
+            || access_key.trim().len() < 32
+        {
+            return Err(
+                "Enter a valid HTTPS SoFlo Server endpoint and device pairing key in Settings."
+                    .into(),
+            );
         }
-        Ok(RemoteAiTarget { endpoint, access_key: access_key.trim().to_string() })
+        Ok(RemoteAiTarget {
+            endpoint,
+            access_key: access_key.trim().to_string(),
+        })
     })())
 }
 
@@ -365,9 +397,16 @@ fn remote_ai_reference(settings: &AppSettings) -> CommandResult<String> {
     let endpoint = settings.online_ai_endpoint.trim().trim_end_matches('/');
     let key = settings.online_ai_access_key.trim();
     if !endpoint.starts_with("https://") || key.len() < 32 {
-        return Err("Enter your HTTPS SoFlo Server endpoint and its device pairing key in Settings.".into());
+        return Err(
+            "Enter your HTTPS SoFlo Server endpoint and its device pairing key in Settings.".into(),
+        );
     }
-    Ok(format!("{}{}.{}", REMOTE_AI_PREFIX, BASE64.encode(endpoint), BASE64.encode(key)))
+    Ok(format!(
+        "{}{}.{}",
+        REMOTE_AI_PREFIX,
+        BASE64.encode(endpoint),
+        BASE64.encode(key)
+    ))
 }
 
 fn relay_http_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
@@ -378,34 +417,64 @@ fn relay_http_response(stream: &mut TcpStream, status: &str, content_type: &str,
 }
 
 fn relay_request_parts(stream: &mut TcpStream) -> CommandResult<(String, String, Vec<u8>)> {
-    stream.set_read_timeout(Some(Duration::from_secs(45))).map_err(|_| "The online AI relay could not read a request.".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(45)))
+        .map_err(|_| "The online AI relay could not read a request.".to_string())?;
     let mut bytes = Vec::with_capacity(8_192);
     let mut header_end = None;
     let mut buffer = [0_u8; 8_192];
     while header_end.is_none() {
-        let read = stream.read(&mut buffer).map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
-        if read == 0 { return Err("The online AI relay received an empty request.".into()); }
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
+        if read == 0 {
+            return Err("The online AI relay received an empty request.".into());
+        }
         bytes.extend_from_slice(&buffer[..read]);
-        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
-        header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|position| position + 4);
+        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES {
+            return Err("The online AI request is too large.".into());
+        }
+        header_end = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4);
     }
     let header_end = header_end.unwrap_or_default();
-    let header = std::str::from_utf8(&bytes[..header_end]).map_err(|_| "The online AI relay received an invalid request.".to_string())?;
+    let header = std::str::from_utf8(&bytes[..header_end])
+        .map_err(|_| "The online AI relay received an invalid request.".to_string())?;
     let mut lines = header.split("\r\n");
     let request_line = lines.next().unwrap_or_default();
     let mut request_parts = request_line.split_whitespace();
     let method = request_parts.next().unwrap_or_default().to_string();
-    let path = request_parts.next().unwrap_or_default().split('?').next().unwrap_or_default().to_string();
+    let path = request_parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .to_string();
     let content_length = lines
-        .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("content-length")).and_then(|(_, value)| value.trim().parse::<usize>().ok()))
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        })
         .unwrap_or(0);
-    if content_length > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
+    if content_length > REMOTE_RELAY_MAX_BODY_BYTES {
+        return Err("The online AI request is too large.".into());
+    }
     let required = header_end.saturating_add(content_length);
     while bytes.len() < required {
-        let read = stream.read(&mut buffer).map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
-        if read == 0 { return Err("The online AI relay received an incomplete request.".into()); }
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
+        if read == 0 {
+            return Err("The online AI relay received an incomplete request.".into());
+        }
         bytes.extend_from_slice(&buffer[..read]);
-        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
+        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES {
+            return Err("The online AI request is too large.".into());
+        }
     }
     Ok((method, path, bytes[header_end..required].to_vec()))
 }
@@ -413,53 +482,142 @@ fn relay_request_parts(stream: &mut TcpStream) -> CommandResult<(String, String,
 fn relay_remote_ai_connection(mut stream: TcpStream) {
     let request = relay_request_parts(&mut stream);
     let Ok((method, path, body)) = request else {
-        relay_http_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", b"Invalid local relay request.");
+        relay_http_response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            b"Invalid local relay request.",
+        );
         return;
     };
-    if !matches!((method.as_str(), path.as_str()), ("GET", "/v1/models") | ("POST", "/v1/chat/completions")) {
-        relay_http_response(&mut stream, "404 Not Found", "text/plain; charset=utf-8", b"Not found.");
+    if !matches!(
+        (method.as_str(), path.as_str()),
+        ("GET", "/v1/models") | ("POST", "/v1/chat/completions")
+    ) {
+        relay_http_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"Not found.",
+        );
         return;
     }
     let Some(relay) = REMOTE_AI_RELAY.get() else {
-        relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is not configured.");
+        relay_http_response(
+            &mut stream,
+            "503 Service Unavailable",
+            "text/plain; charset=utf-8",
+            b"Online AI relay is not configured.",
+        );
         return;
     };
-    let target = match relay.target.lock() { Ok(target) => target.clone(), Err(_) => { relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is unavailable."); return; } };
-    let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(240)).build() { Ok(client) => client, Err(_) => { relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is unavailable."); return; } };
+    let target = match relay.target.lock() {
+        Ok(target) => target.clone(),
+        Err(_) => {
+            relay_http_response(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                b"Online AI relay is unavailable.",
+            );
+            return;
+        }
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(240))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            relay_http_response(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                b"Online AI relay is unavailable.",
+            );
+            return;
+        }
+    };
     let request = match method.as_str() {
         "GET" => client.get(format!("{}{}", target.endpoint, path)),
-        _ => client.post(format!("{}{}", target.endpoint, path)).header("Content-Type", "application/json").body(body),
-    }.header("Authorization", format!("Bearer {}", target.access_key)).header("Accept", "application/json");
+        _ => client
+            .post(format!("{}{}", target.endpoint, path))
+            .header("Content-Type", "application/json")
+            .body(body),
+    }
+    .header("Authorization", format!("Bearer {}", target.access_key))
+    .header("Accept", "application/json");
     match request.send() {
         Ok(response) => {
             let status = response.status();
-            let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("application/json").to_string();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
             match response.bytes() {
-                Ok(response_body) => relay_http_response(&mut stream, &format!("{} {}", status.as_u16(), status.canonical_reason().unwrap_or("Response")), &content_type, &response_body),
-                Err(_) => relay_http_response(&mut stream, "502 Bad Gateway", "text/plain; charset=utf-8", b"SoFlo Server returned an unreadable response."),
+                Ok(response_body) => relay_http_response(
+                    &mut stream,
+                    &format!(
+                        "{} {}",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("Response")
+                    ),
+                    &content_type,
+                    &response_body,
+                ),
+                Err(_) => relay_http_response(
+                    &mut stream,
+                    "502 Bad Gateway",
+                    "text/plain; charset=utf-8",
+                    b"SoFlo Server returned an unreadable response.",
+                ),
             }
         }
-        Err(_) => relay_http_response(&mut stream, "502 Bad Gateway", "text/plain; charset=utf-8", b"SoFlo Server could not be reached."),
+        Err(_) => relay_http_response(
+            &mut stream,
+            "502 Bad Gateway",
+            "text/plain; charset=utf-8",
+            b"SoFlo Server could not be reached.",
+        ),
     }
 }
 
 fn ensure_remote_ai_relay(target: RemoteAiTarget) -> CommandResult<u16> {
     if let Some(relay) = REMOTE_AI_RELAY.get() {
-        *relay.target.lock().map_err(|_| "SoFlo's online AI relay is unavailable.".to_string())? = target;
+        *relay
+            .target
+            .lock()
+            .map_err(|_| "SoFlo's online AI relay is unavailable.".to_string())? = target;
         return Ok(relay.port);
     }
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "SoFlo could not reserve its private online AI relay.".to_string())?;
-    let port = listener.local_addr().map_err(|_| "SoFlo could not read its private online AI relay port.".to_string())?.port();
-    let relay = RemoteAiRelay { port, target: Mutex::new(target) };
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|_| "SoFlo could not reserve its private online AI relay.".to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| "SoFlo could not read its private online AI relay port.".to_string())?
+        .port();
+    let relay = RemoteAiRelay {
+        port,
+        target: Mutex::new(target),
+    };
     if REMOTE_AI_RELAY.set(relay).is_err() {
-        let relay = REMOTE_AI_RELAY.get().ok_or_else(|| "SoFlo's online AI relay is unavailable.".to_string())?;
+        let relay = REMOTE_AI_RELAY
+            .get()
+            .ok_or_else(|| "SoFlo's online AI relay is unavailable.".to_string())?;
         return Ok(relay.port);
     }
-    thread::Builder::new().name("soflo-online-ai-relay".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let _ = thread::Builder::new().name("soflo-online-ai-request".into()).spawn(move || relay_remote_ai_connection(stream));
-        }
-    }).map_err(|_| "SoFlo could not start its private online AI relay.".to_string())?;
+    thread::Builder::new()
+        .name("soflo-online-ai-relay".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _ = thread::Builder::new()
+                    .name("soflo-online-ai-request".into())
+                    .spawn(move || relay_remote_ai_connection(stream));
+            }
+        })
+        .map_err(|_| "SoFlo could not start its private online AI relay.".to_string())?;
     Ok(port)
 }
 
@@ -504,10 +662,21 @@ fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> Comman
     Ok(model.to_string_lossy().to_string())
 }
 
-fn resolve_word_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
+fn resolve_word_ai_model_path(
+    app: &tauri::AppHandle,
+    requested_path: &str,
+) -> CommandResult<String> {
     let requested = Path::new(requested_path.trim());
     let default = managed_models_dir(app)?.join(WORD_AI_MODEL_NAME);
-    let model = if requested.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) && requested.is_file() { requested.to_path_buf() } else { default };
+    let model = if requested
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+        && requested.is_file()
+    {
+        requested.to_path_buf()
+    } else {
+        default
+    };
     if !is_complete_word_ai_model(&model) {
         return Err("SoFlo's fast word-reference model is not downloaded yet. Download the AI model package in Settings, then try again.".into());
     }
@@ -522,7 +691,11 @@ fn is_complete_word_ai_model(path: &Path) -> bool {
 fn resolve_voice_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
     let requested = Path::new(requested_path.trim());
     let fallback = managed_models_dir(app)?.join(VOICE_MEDIUM_MODEL_NAME);
-    let model = if requested.is_file() && requested.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("bin")) {
+    let model = if requested.is_file()
+        && requested
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+    {
         requested.to_path_buf()
     } else {
         fallback
@@ -538,7 +711,10 @@ fn is_complete_voice_model(path: &Path) -> bool {
 }
 
 #[tauri::command]
-pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+pub fn word_ai_model_ready(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
     let configured = Path::new(&settings.ai_writing_model_path);
     let default = managed_models_dir(&app)?.join(WORD_AI_MODEL_NAME);
@@ -551,7 +727,10 @@ pub fn word_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>)
 }
 
 #[tauri::command]
-pub fn general_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+pub fn general_ai_model_ready(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
     let configured = Path::new(&settings.ai_model_path);
     let default = managed_models_dir(&app)?.join(DEFAULT_AI_MODEL_NAME);
@@ -564,7 +743,10 @@ pub fn general_ai_model_ready(app: tauri::AppHandle, database: State<'_, Databas
 }
 
 #[tauri::command]
-pub fn voice_ai_model_ready(app: tauri::AppHandle, database: State<'_, Database>) -> CommandResult<bool> {
+pub fn voice_ai_model_ready(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+) -> CommandResult<bool> {
     let settings = get_settings(&database.open()?, None)?;
     let configured = Path::new(&settings.ai_voice_model_path).to_path_buf();
     let default = managed_models_dir(&app)?.join(VOICE_MEDIUM_MODEL_NAME);
@@ -684,7 +866,9 @@ pub fn run_uninstaller_worker(erase_data: bool) -> CommandResult<()> {
     let uninstaller = uninstaller_executable_argument()?;
     let mut command = Command::new(uninstaller);
     command.arg("--perform-silent-uninstall=1");
-    if erase_data { command.arg("--erase-data=1"); }
+    if erase_data {
+        command.arg("--erase-data=1");
+    }
     let status = command
         .status()
         .map_err(|_| "SoFlo could not begin uninstalling.".to_string())?;
@@ -716,11 +900,15 @@ pub fn launch_installed_soflo_and_close(app: tauri::AppHandle) -> CommandResult<
 
 #[tauri::command]
 pub fn launch_uninstaller_and_close(app: tauri::AppHandle) -> CommandResult<()> {
-    let current = std::env::current_exe().map_err(|_| "SoFlo could not locate its installation.".to_string())?;
-    let uninstaller = current.parent()
+    let current = std::env::current_exe()
+        .map_err(|_| "SoFlo could not locate its installation.".to_string())?;
+    let uninstaller = current
+        .parent()
         .map(|directory| directory.join("uninstall.exe"))
         .filter(|path| path.is_file())
-        .ok_or_else(|| "SoFlo's uninstaller is unavailable. Reinstall SoFlo to restore it.".to_string())?;
+        .ok_or_else(|| {
+            "SoFlo's uninstaller is unavailable. Reinstall SoFlo to restore it.".to_string()
+        })?;
     Command::new(uninstaller)
         .spawn()
         .map_err(|_| "SoFlo could not open its uninstaller.".to_string())?;
@@ -758,10 +946,15 @@ pub fn import_word_text(path: String) -> CommandResult<String> {
 #[tauri::command]
 pub fn import_powerpoint_text(path: String) -> CommandResult<String> {
     let source = PathBuf::from(path);
-    if !source.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("pptx")) {
+    if !source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pptx"))
+    {
         return Err("Choose a .pptx PowerPoint presentation. Legacy .ppt files need to be saved as .pptx first.".into());
     }
-    let file = fs::File::open(&source).map_err(|_| "SoFlo could not read that PowerPoint presentation.".to_string())?;
+    let file = fs::File::open(&source)
+        .map_err(|_| "SoFlo could not read that PowerPoint presentation.".to_string())?;
     powerpoint_to_markdown(file)
 }
 
@@ -774,11 +967,15 @@ pub fn import_google_doc(url: String) -> CommandResult<String> {
         .user_agent("SoFlo/1.1 (Google Docs import)")
         .build()
         .map_err(|_| "SoFlo could not prepare the Google Docs import.".to_string())?;
-    let response = client.get(export_url).send().map_err(|_| "SoFlo could not reach Google Docs. Check your connection and try again.".to_string())?;
+    let response = client.get(export_url).send().map_err(|_| {
+        "SoFlo could not reach Google Docs. Check your connection and try again.".to_string()
+    })?;
     if !response.status().is_success() {
         return Err("Google Docs could not download that document. Make sure the link allows viewing and downloading, or download it as a .docx first.".into());
     }
-    let bytes = response.bytes().map_err(|_| "SoFlo could not download that Google Doc.".to_string())?;
+    let bytes = response
+        .bytes()
+        .map_err(|_| "SoFlo could not download that Google Doc.".to_string())?;
     word_document_to_markdown(Cursor::new(bytes))
         .map_err(|_| "Google Docs did not return a downloadable .docx file. Make sure the document allows downloading, or download it as a .docx first.".to_string())
 }
@@ -789,9 +986,16 @@ fn google_document_id(url: &str) -> CommandResult<String> {
         return Err("Paste a Google Docs link that starts with https://docs.google.com/.".into());
     }
     let marker = "/document/d/";
-    let tail = trimmed.find(marker).map(|index| &trimmed[index + marker.len()..]).ok_or_else(|| "That is not a Google Docs document link.".to_string())?;
+    let tail = trimmed
+        .find(marker)
+        .map(|index| &trimmed[index + marker.len()..])
+        .ok_or_else(|| "That is not a Google Docs document link.".to_string())?;
     let id = tail.split(['/', '?', '#']).next().unwrap_or_default();
-    if id.len() < 12 || !id.chars().all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_') {
+    if id.len() < 12
+        || !id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
         return Err("That Google Docs link does not contain a valid document ID.".into());
     }
     Ok(id.to_string())
@@ -827,13 +1031,21 @@ struct GithubRelease {
 }
 
 fn version_is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |value: &str| value.trim_start_matches('v').split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let parse = |value: &str| {
+        value
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
     let candidate = parse(candidate);
     let current = parse(current);
     for index in 0..candidate.len().max(current.len()) {
         let left = *candidate.get(index).unwrap_or(&0);
         let right = *current.get(index).unwrap_or(&0);
-        if left != right { return left > right; }
+        if left != right {
+            return left > right;
+        }
     }
     false
 }
@@ -846,33 +1058,60 @@ pub async fn check_for_app_update() -> CommandResult<Option<AppUpdateInfo>> {
             .user_agent("SoFlo update check")
             .build()
             .map_err(|_| "SoFlo could not prepare its update check.".to_string())?;
-        let response = client.get("https://api.github.com/repos/mele-mikey/SoFlo/releases/latest")
+        let response = client
+            .get("https://api.github.com/repos/mele-mikey/SoFlo/releases/latest")
             .header("Accept", "application/vnd.github+json")
             .send()
             .map_err(|_| "SoFlo could not check GitHub Releases right now.".to_string())?;
-        if !response.status().is_success() { return Ok(None); }
-        let release: GithubRelease = response.json().map_err(|_| "GitHub Releases returned an unreadable update response.".to_string())?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let release: GithubRelease = response
+            .json()
+            .map_err(|_| "GitHub Releases returned an unreadable update response.".to_string())?;
         let current = env!("CARGO_PKG_VERSION");
-        if !version_is_newer(&release.tag_name, current) { return Ok(None); }
+        if !version_is_newer(&release.tag_name, current) {
+            return Ok(None);
+        }
         let mut assets = release.assets.into_iter();
-        let asset = assets.find(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            name.ends_with(".exe") && name.starts_with("soflo-setup-")
-        }).or_else(|| assets.find(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            name.starts_with("soflo_") && name.ends_with(".msi")
-        }));
-        Ok(asset.map(|asset| AppUpdateInfo { version: release.tag_name.trim_start_matches('v').to_string(), download_url: asset.browser_download_url }))
-    }).await.map_err(|_| "SoFlo's update check stopped unexpectedly.".to_string())?
+        let asset = assets
+            .find(|asset| {
+                let name = asset.name.to_ascii_lowercase();
+                name.ends_with(".exe") && name.starts_with("soflo-setup-")
+            })
+            .or_else(|| {
+                assets.find(|asset| {
+                    let name = asset.name.to_ascii_lowercase();
+                    name.starts_with("soflo_") && name.ends_with(".msi")
+                })
+            });
+        Ok(asset.map(|asset| AppUpdateInfo {
+            version: release.tag_name.trim_start_matches('v').to_string(),
+            download_url: asset.browser_download_url,
+        }))
+    })
+    .await
+    .map_err(|_| "SoFlo's update check stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
-pub async fn download_and_launch_app_update(app: tauri::AppHandle, version: String, download_url: String) -> CommandResult<()> {
+pub async fn download_and_launch_app_update(
+    app: tauri::AppHandle,
+    version: String,
+    download_url: String,
+) -> CommandResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         if !download_url.starts_with("https://github.com/mele-mikey/SoFlo/releases/download/") {
-            return Err("SoFlo only installs updates downloaded from its official GitHub Releases page.".into());
+            return Err(
+                "SoFlo only installs updates downloaded from its official GitHub Releases page."
+                    .into(),
+            );
         }
-        if version.is_empty() || !version.chars().all(|character| character.is_ascii_digit() || character == '.') {
+        if version.is_empty()
+            || !version
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+        {
             return Err("That update version is invalid.".into());
         }
         let client = reqwest::blocking::Client::builder()
@@ -884,49 +1123,157 @@ pub async fn download_and_launch_app_update(app: tauri::AppHandle, version: Stri
             .build()
             .map_err(|_| "SoFlo could not prepare the update download.".to_string())?;
         let is_msi = download_url.to_ascii_lowercase().ends_with(".msi");
-        let destination = std::env::temp_dir().join(format!("SoFlo-Setup-{}.{}", version, if is_msi { "msi" } else { "exe" }));
-        let partial = destination.with_extension(format!("{}.partial", if is_msi { "msi" } else { "exe" }));
+        let destination = std::env::temp_dir().join(format!(
+            "SoFlo-Setup-{}.{}",
+            version,
+            if is_msi { "msi" } else { "exe" }
+        ));
+        let partial =
+            destination.with_extension(format!("{}.partial", if is_msi { "msi" } else { "exe" }));
         let mut final_error = None;
         for attempt in 1..=3u8 {
-            let existing = fs::metadata(&partial).map(|metadata| metadata.len()).unwrap_or(0);
-            let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: existing, total_bytes: None, percent: None, attempt, message: if existing > 0 { "Resuming update download…".into() } else { "Starting update download…".into() } });
+            let existing = fs::metadata(&partial)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let _ = app.emit(
+                "app-update-download-progress",
+                AppUpdateDownloadProgress {
+                    downloaded_bytes: existing,
+                    total_bytes: None,
+                    percent: None,
+                    attempt,
+                    message: if existing > 0 {
+                        "Resuming update download…".into()
+                    } else {
+                        "Starting update download…".into()
+                    },
+                },
+            );
             let mut request = client.get(&download_url);
-            if existing > 0 { request = request.header(reqwest::header::RANGE, format!("bytes={existing}-")); }
+            if existing > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+            }
             let result = (|| -> CommandResult<()> {
-                let mut response = request.send().map_err(|_| "The update download was interrupted.".to_string())?;
-                if !(response.status().is_success() || response.status() == reqwest::StatusCode::PARTIAL_CONTENT) { return Err("GitHub Releases could not provide that update.".into()); }
-                let append = existing > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+                let mut response = request
+                    .send()
+                    .map_err(|_| "The update download was interrupted.".to_string())?;
+                if !(response.status().is_success()
+                    || response.status() == reqwest::StatusCode::PARTIAL_CONTENT)
+                {
+                    return Err("GitHub Releases could not provide that update.".into());
+                }
+                let append =
+                    existing > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
                 let offset = if append { existing } else { 0 };
-                let total = response.content_length().map(|length| length.saturating_add(offset));
-                let mut output = if append { fs::OpenOptions::new().create(true).append(true).open(&partial) } else { fs::File::create(&partial) }.map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                let total = response
+                    .content_length()
+                    .map(|length| length.saturating_add(offset));
+                let mut output = if append {
+                    fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&partial)
+                } else {
+                    fs::File::create(&partial)
+                }
+                .map_err(|_| "SoFlo could not save the update installer.".to_string())?;
                 let mut downloaded = offset;
                 let mut buffer = [0u8; 64 * 1024];
                 loop {
-                    let count = response.read(&mut buffer).map_err(|_| "The update download was interrupted.".to_string())?;
-                    if count == 0 { break; }
-                    output.write_all(&buffer[..count]).map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                    let count = response
+                        .read(&mut buffer)
+                        .map_err(|_| "The update download was interrupted.".to_string())?;
+                    if count == 0 {
+                        break;
+                    }
+                    output
+                        .write_all(&buffer[..count])
+                        .map_err(|_| "SoFlo could not save the update installer.".to_string())?;
                     downloaded = downloaded.saturating_add(count as u64);
-                    let percent = total.filter(|size| *size > 0).map(|size| ((downloaded.saturating_mul(100) / size).min(100)) as u8);
-                    let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: downloaded, total_bytes: total, percent, attempt, message: "Downloading update…".into() });
+                    let percent = total
+                        .filter(|size| *size > 0)
+                        .map(|size| ((downloaded.saturating_mul(100) / size).min(100)) as u8);
+                    let _ = app.emit(
+                        "app-update-download-progress",
+                        AppUpdateDownloadProgress {
+                            downloaded_bytes: downloaded,
+                            total_bytes: total,
+                            percent,
+                            attempt,
+                            message: "Downloading update…".into(),
+                        },
+                    );
                 }
-                output.flush().map_err(|_| "SoFlo could not save the update installer.".to_string())?;
-                if let Some(total) = total { if downloaded < total { return Err("The update download ended before the complete installer arrived.".into()); } }
+                output
+                    .flush()
+                    .map_err(|_| "SoFlo could not save the update installer.".to_string())?;
+                if let Some(total) = total {
+                    if downloaded < total {
+                        return Err(
+                            "The update download ended before the complete installer arrived."
+                                .into(),
+                        );
+                    }
+                }
                 Ok(())
             })();
-            match result { Ok(()) => { final_error = None; break; }, Err(error) => { final_error = Some(error); if attempt < 3 { thread::sleep(Duration::from_secs(u64::from(attempt) * 2)); } } }
+            match result {
+                Ok(()) => {
+                    final_error = None;
+                    break;
+                }
+                Err(error) => {
+                    final_error = Some(error);
+                    if attempt < 3 {
+                        thread::sleep(Duration::from_secs(u64::from(attempt) * 2));
+                    }
+                }
+            }
         }
-        if let Some(error) = final_error { return Err(format!("{error} Your partial download was kept so SoFlo can resume it when you try again.")); }
-        let bytes = fs::read(&partial).map_err(|_| "SoFlo could not verify the downloaded installer.".to_string())?;
-        let valid = if is_msi { bytes.get(0..4) == Some(&[0xD0, 0xCF, 0x11, 0xE0]) } else { bytes.get(0..2) == Some(b"MZ") };
-        if bytes.len() < 1024 || !valid { return Err("The downloaded update is not a valid Windows installer. Please try again.".into()); }
+        if let Some(error) = final_error {
+            return Err(format!(
+                "{error} Your partial download was kept so SoFlo can resume it when you try again."
+            ));
+        }
+        let bytes = fs::read(&partial)
+            .map_err(|_| "SoFlo could not verify the downloaded installer.".to_string())?;
+        let valid = if is_msi {
+            bytes.get(0..4) == Some(&[0xD0, 0xCF, 0x11, 0xE0])
+        } else {
+            bytes.get(0..2) == Some(b"MZ")
+        };
+        if bytes.len() < 1024 || !valid {
+            return Err(
+                "The downloaded update is not a valid Windows installer. Please try again.".into(),
+            );
+        }
         let _ = fs::remove_file(&destination);
-        fs::rename(&partial, &destination).map_err(|_| "SoFlo could not finalize the downloaded installer.".to_string())?;
-        let _ = app.emit("app-update-download-progress", AppUpdateDownloadProgress { downloaded_bytes: bytes.len() as u64, total_bytes: Some(bytes.len() as u64), percent: Some(100), attempt: 1, message: "Opening the installer…".into() });
-        if is_msi { Command::new("msiexec.exe").arg("/i").arg(&destination).spawn() } else { Command::new(&destination).spawn() }
-            .map_err(|_| "SoFlo could not start the downloaded update installer.".to_string())?;
+        fs::rename(&partial, &destination)
+            .map_err(|_| "SoFlo could not finalize the downloaded installer.".to_string())?;
+        let _ = app.emit(
+            "app-update-download-progress",
+            AppUpdateDownloadProgress {
+                downloaded_bytes: bytes.len() as u64,
+                total_bytes: Some(bytes.len() as u64),
+                percent: Some(100),
+                attempt: 1,
+                message: "Opening the installer…".into(),
+            },
+        );
+        if is_msi {
+            Command::new("msiexec.exe")
+                .arg("/i")
+                .arg(&destination)
+                .spawn()
+        } else {
+            Command::new(&destination).spawn()
+        }
+        .map_err(|_| "SoFlo could not start the downloaded update installer.".to_string())?;
         app.exit(0);
         Ok(())
-    }).await.map_err(|_| "SoFlo's update download stopped unexpectedly.".to_string())?
+    })
+    .await
+    .map_err(|_| "SoFlo's update download stopped unexpectedly.".to_string())?
 }
 
 fn word_document_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
@@ -944,22 +1291,41 @@ fn word_document_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
 }
 
 fn powerpoint_to_markdown<R: Read + Seek>(file: R) -> CommandResult<String> {
-    let mut archive = zip::ZipArchive::new(file).map_err(|_| "That file is not a supported .pptx PowerPoint presentation.".to_string())?;
-    let mut slides = (0..archive.len()).filter_map(|index| archive.by_index(index).ok().and_then(|entry| {
-        let name = entry.name().replace('\\', "/");
-        let stem = name.strip_prefix("ppt/slides/slide")?.strip_suffix(".xml")?;
-        let number = stem.parse::<usize>().ok()?;
-        Some((number, name))
-    })).collect::<Vec<_>>();
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|_| "That file is not a supported .pptx PowerPoint presentation.".to_string())?;
+    let mut slides = (0..archive.len())
+        .filter_map(|index| {
+            archive.by_index(index).ok().and_then(|entry| {
+                let name = entry.name().replace('\\', "/");
+                let stem = name
+                    .strip_prefix("ppt/slides/slide")?
+                    .strip_suffix(".xml")?;
+                let number = stem.parse::<usize>().ok()?;
+                Some((number, name))
+            })
+        })
+        .collect::<Vec<_>>();
     slides.sort_by_key(|(number, _)| *number);
     let mut markdown = Vec::new();
     for (number, name) in slides {
         let mut xml = String::new();
-        archive.by_name(&name).map_err(|_| "SoFlo could not read a slide in that PowerPoint presentation.".to_string())?.read_to_string(&mut xml).map_err(|_| "SoFlo could not read a slide in that PowerPoint presentation.".to_string())?;
+        archive
+            .by_name(&name)
+            .map_err(|_| {
+                "SoFlo could not read a slide in that PowerPoint presentation.".to_string()
+            })?
+            .read_to_string(&mut xml)
+            .map_err(|_| {
+                "SoFlo could not read a slide in that PowerPoint presentation.".to_string()
+            })?;
         let text = powerpoint_slide_text(&xml);
-        if !text.is_empty() { markdown.push(format!("## Slide {number}\n\n{text}")); }
+        if !text.is_empty() {
+            markdown.push(format!("## Slide {number}\n\n{text}"));
+        }
     }
-    if markdown.is_empty() { return Err("That PowerPoint presentation has no readable slide text to import.".into()); }
+    if markdown.is_empty() {
+        return Err("That PowerPoint presentation has no readable slide text to import.".into());
+    }
     Ok(markdown.join("\n\n---\n\n"))
 }
 
@@ -967,9 +1333,13 @@ fn powerpoint_slide_text(xml: &str) -> String {
     let mut text = String::new();
     let mut rest = xml;
     while let Some(start) = rest.find("<a:t") {
-        let Some(tag_end) = rest[start..].find('>') else { break; };
+        let Some(tag_end) = rest[start..].find('>') else {
+            break;
+        };
         let after_tag = &rest[start + tag_end + 1..];
-        let Some(end) = after_tag.find("</a:t>") else { break; };
+        let Some(end) = after_tag.find("</a:t>") else {
+            break;
+        };
         text.push_str(&decode_presentation_xml(&after_tag[..end]));
         rest = &after_tag[end + "</a:t>".len()..];
         let next_paragraph = rest.find("</a:p>");
@@ -978,11 +1348,20 @@ fn powerpoint_slide_text(xml: &str) -> String {
             text.push('\n');
         }
     }
-    text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn decode_presentation_xml(value: &str) -> String {
-    value.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'")
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 #[tauri::command]
@@ -1162,13 +1541,7 @@ pub async fn generate_flashcards_text(
     syllabus_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        generate_flashcards_text_blocking(
-            app,
-            model_path,
-            materials,
-            guidance,
-            syllabus_context,
-        )
+        generate_flashcards_text_blocking(app, model_path, materials, guidance, syllabus_context)
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -1282,60 +1655,259 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
     // apostrophes and everyday misspellings when the model focuses elsewhere.
     const CORRECTIONS: &[(&str, &str, &str, &str)] = &[
         ("alot", "a lot", "Spelling", "This is written as two words."),
-        ("dont", "don't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("doesnt", "doesn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("didnt", "didn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("isnt", "isn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("arent", "aren't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("wasnt", "wasn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("werent", "weren't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("cant", "can't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("couldnt", "couldn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("shouldnt", "shouldn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("wouldnt", "wouldn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("hasnt", "hasn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("havent", "haven't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("hadnt", "hadn't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("wont", "won't", "Apostrophe", "This contraction needs an apostrophe."),
-        ("wouldve", "would've", "Apostrophe", "This contraction needs an apostrophe."),
-        ("couldve", "could've", "Apostrophe", "This contraction needs an apostrophe."),
-        ("shouldve", "should've", "Apostrophe", "This contraction needs an apostrophe."),
-        ("theyre", "they're", "Apostrophe", "This contraction needs an apostrophe."),
-        ("youre", "you're", "Apostrophe", "This contraction needs an apostrophe."),
-        ("weve", "we've", "Apostrophe", "This contraction needs an apostrophe."),
-        ("theyve", "they've", "Apostrophe", "This contraction needs an apostrophe."),
-        ("definately", "definitely", "Spelling", "This word is commonly misspelled."),
-        ("seperate", "separate", "Spelling", "This word is commonly misspelled."),
-        ("seperated", "separated", "Spelling", "This word is commonly misspelled."),
-        ("recieve", "receive", "Spelling", "This word is commonly misspelled."),
-        ("occured", "occurred", "Spelling", "This word is commonly misspelled."),
-        ("untill", "until", "Spelling", "This word is commonly misspelled."),
-        ("wich", "which", "Spelling", "This word is commonly misspelled."),
-        ("thier", "their", "Spelling", "This word is commonly misspelled."),
-        ("wierd", "weird", "Spelling", "This word is commonly misspelled."),
-        ("becuase", "because", "Spelling", "This word is commonly misspelled."),
-        ("lett", "let", "Spelling", "This word is commonly misspelled."),
+        (
+            "dont",
+            "don't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "doesnt",
+            "doesn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "didnt",
+            "didn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "isnt",
+            "isn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "arent",
+            "aren't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "wasnt",
+            "wasn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "werent",
+            "weren't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "cant",
+            "can't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "couldnt",
+            "couldn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "shouldnt",
+            "shouldn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "wouldnt",
+            "wouldn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "hasnt",
+            "hasn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "havent",
+            "haven't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "hadnt",
+            "hadn't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "wont",
+            "won't",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "wouldve",
+            "would've",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "couldve",
+            "could've",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "shouldve",
+            "should've",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "theyre",
+            "they're",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "youre",
+            "you're",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "weve",
+            "we've",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "theyve",
+            "they've",
+            "Apostrophe",
+            "This contraction needs an apostrophe.",
+        ),
+        (
+            "definately",
+            "definitely",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "seperate",
+            "separate",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "seperated",
+            "separated",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "recieve",
+            "receive",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "occured",
+            "occurred",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "untill",
+            "until",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "wich",
+            "which",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "thier",
+            "their",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "wierd",
+            "weird",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "becuase",
+            "because",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
+        (
+            "lett",
+            "let",
+            "Spelling",
+            "This word is commonly misspelled.",
+        ),
     ];
     let mut issues = Vec::new();
     let mut seen = HashSet::new();
     let mut word = String::new();
     let mut inspect = |word: &str| {
-        if word.is_empty() || issues.len() >= 12 { return; }
+        if word.is_empty() || issues.len() >= 12 {
+            return;
+        }
         let normalized = word.to_lowercase();
-        let correction = if normalized == "i" { Some(("I", "Capitalization", "The English first-person pronoun is capitalized.")) } else {
-            CORRECTIONS.iter().find(|(original, _, _, _)| *original == normalized).map(|(_, replacement, category, reason)| (*replacement, *category, *reason))
+        let correction = if normalized == "i" {
+            Some((
+                "I",
+                "Capitalization",
+                "The English first-person pronoun is capitalized.",
+            ))
+        } else {
+            CORRECTIONS
+                .iter()
+                .find(|(original, _, _, _)| *original == normalized)
+                .map(|(_, replacement, category, reason)| (*replacement, *category, *reason))
         };
         if let Some((replacement, category, reason)) = correction {
-            let replacement = if word.chars().all(|character| !character.is_alphabetic() || character.is_uppercase()) { replacement.to_uppercase() } else if word.chars().next().is_some_and(|character| character.is_uppercase()) {
+            let replacement = if word
+                .chars()
+                .all(|character| !character.is_alphabetic() || character.is_uppercase())
+            {
+                replacement.to_uppercase()
+            } else if word
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_uppercase())
+            {
                 let mut characters = replacement.chars();
-                characters.next().map(|character| character.to_uppercase().collect::<String>() + characters.as_str()).unwrap_or_else(|| replacement.to_string())
-            } else { replacement.to_string() };
+                characters
+                    .next()
+                    .map(|character| {
+                        character.to_uppercase().collect::<String>() + characters.as_str()
+                    })
+                    .unwrap_or_else(|| replacement.to_string())
+            } else {
+                replacement.to_string()
+            };
             let key = format!("{}\u{0}{}", word.to_lowercase(), replacement.to_lowercase());
-            if seen.insert(key) { issues.push(serde_json::json!({ "kind": "mechanic", "original": word, "replacement": replacement, "reason": reason, "category": category, "alternatives": [] })); }
+            if seen.insert(key) {
+                issues.push(serde_json::json!({ "kind": "mechanic", "original": word, "replacement": replacement, "reason": reason, "category": category, "alternatives": [] }));
+            }
         }
     };
     for character in source.chars() {
-        if character.is_alphabetic() { word.push(character); } else { inspect(&word); word.clear(); }
+        if character.is_alphabetic() {
+            word.push(character);
+        } else {
+            inspect(&word);
+            word.clear();
+        }
     }
     inspect(&word);
     drop(inspect);
@@ -1345,12 +1917,23 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
     // marks the right occurrence rather than the first matching verb on a page.
     let words = source
         .split_whitespace()
-        .map(|token| token.trim_matches(|character: char| !character.is_alphabetic() && character != '\''))
+        .map(|token| {
+            token.trim_matches(|character: char| !character.is_alphabetic() && character != '\'')
+        })
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
-    let mut add_context_issue = |original: String, replacement: String, category: &str, reason: &str| {
-        if issues.len() >= 12 { return; }
-        let key = format!("{}\u{0}{}", original.to_lowercase(), replacement.to_lowercase());
+    let mut add_context_issue = |original: String,
+                                 replacement: String,
+                                 category: &str,
+                                 reason: &str| {
+        if issues.len() >= 12 {
+            return;
+        }
+        let key = format!(
+            "{}\u{0}{}",
+            original.to_lowercase(),
+            replacement.to_lowercase()
+        );
         if seen.insert(key) {
             issues.push(serde_json::json!({ "kind": "mechanic", "original": original, "replacement": replacement, "reason": reason, "category": category, "alternatives": [] }));
         }
@@ -1360,21 +1943,31 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
         let verb = pair[1];
         let normalized_subject = subject.to_lowercase();
         let normalized_verb = verb.to_lowercase();
-        if normalized_verb == "was" && (matches!(normalized_subject.as_str(), "they" | "we" | "you") || likely_plural_subject(&normalized_subject)) {
+        if normalized_verb == "was"
+            && (matches!(normalized_subject.as_str(), "they" | "we" | "you")
+                || likely_plural_subject(&normalized_subject))
+        {
             add_context_issue(
                 format!("{subject} {verb}"),
                 format!("{subject} were"),
                 "Subject–verb agreement",
                 "A plural subject takes “were,” not “was.”",
             );
-        } else if normalized_verb == "has" && (matches!(normalized_subject.as_str(), "they" | "we" | "you") || likely_plural_subject(&normalized_subject)) {
+        } else if normalized_verb == "has"
+            && (matches!(normalized_subject.as_str(), "they" | "we" | "you")
+                || likely_plural_subject(&normalized_subject))
+        {
             add_context_issue(
                 format!("{subject} {verb}"),
                 format!("{subject} have"),
                 "Subject–verb agreement",
                 "A plural subject takes “have,” not “has.”",
             );
-        } else if normalized_subject == "more" && (normalized_verb == "better" || normalized_verb == "worse" || normalized_verb.ends_with("er")) {
+        } else if normalized_subject == "more"
+            && (normalized_verb == "better"
+                || normalized_verb == "worse"
+                || normalized_verb.ends_with("er"))
+        {
             add_context_issue(
                 format!("{subject} {verb}"),
                 verb.to_string(),
@@ -1387,7 +1980,10 @@ fn quick_mechanics_prepass(source: &str) -> Vec<serde_json::Value> {
 }
 
 fn likely_plural_subject(word: &str) -> bool {
-    if matches!(word, "people" | "children" | "men" | "women" | "police" | "cattle") {
+    if matches!(
+        word,
+        "people" | "children" | "men" | "women" | "police" | "cattle"
+    ) {
         return true;
     }
     word.len() > 3
@@ -1432,7 +2028,9 @@ fn review_grammar_text_blocking(
         let request = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nProofread this complete visible page. Return JSON only.\n\n{}", paper_context, source);
         let output = local_chat_text(&client, server_port, system, &request, 1_150)?;
         if let Some(array) = json_array_from_response(&output) {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(&array)
+            {
                 suggestions.extend(items.into_iter().take(12));
             }
         }
@@ -1440,9 +2038,17 @@ fn review_grammar_text_blocking(
         emit_ai_progress(&app, 45, "Auditing grammar across this page");
         let mechanics_system = "You are SoFlo's rigorous copy editor. The supplied text is one complete page currently visible to the writer. Inspect every sentence, including the middle and end of the page. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 8 to 12 distinct, unambiguous mechanics improvements when the page has that many; return fewer only when the writing is genuinely clean. Check spelling, capitalization, apostrophes, agreement, tense consistency, homophones, word forms, hyphenation, repeated words, duplicated spaces, comma use, sentence boundaries, fragments, run-ons, and contextually correct punctuation. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be mechanic. original must be copied exactly from the input. replacement must be the smallest exact correction, usually 1 to 6 words. reason must explain the specific grammar rule or contextual error. alternatives must be an empty JSON array. Never invent facts, change citations, flag proper names merely for being unfamiliar, or report text that is already correct.";
         let mechanics_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nAudit this complete visible page for mechanics. Return JSON only.\n\n{}", paper_context, source);
-        let mechanics_output = local_chat_text(&client, server_port, mechanics_system, &mechanics_prompt, 1_650)?;
+        let mechanics_output = local_chat_text(
+            &client,
+            server_port,
+            mechanics_system,
+            &mechanics_prompt,
+            1_650,
+        )?;
         if let Some(array) = json_array_from_response(&mechanics_output) {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(&array)
+            {
                 let accepted = items.into_iter().take(12).collect::<Vec<_>>();
                 model_suggestion_count += accepted.len();
                 suggestions.extend(accepted);
@@ -1452,9 +2058,12 @@ fn review_grammar_text_blocking(
         emit_ai_progress(&app, 67, "Finding stronger writing choices");
         let style_system = "You are SoFlo's senior college-writing editor. The supplied text is one complete page currently visible to the writer. Read the entire page before responding, then return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 6 to 10 concrete, meaningful writing improvements when the page has that many. Focus on vague or conversational language, weak verbs, repetitive sentence starters, imprecise claims, choppy transitions, redundant phrasing, weak topic or closing phrases, unclear logic, and opportunities for a more formal, precise voice that still matches the stated document goal. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be style. original must be copied exactly from the input. replacement must preserve the writer's meaning. For each suggestion, target a focused 1 to 9 word phrase; never rewrite a whole sentence. reason must explain specifically why the replacement is clearer, more formal, more precise, or improves flow. alternatives must contain zero to two short optional replacements. Do not invent facts, alter quotations or citations, make empty thesaurus substitutions, or praise text instead of offering a real improvement.";
         let style_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nReview this complete visible page for focused writing improvements. Return JSON only.\n\n{}", paper_context, source);
-        let style_output = local_chat_text(&client, server_port, style_system, &style_prompt, 1_700)?;
+        let style_output =
+            local_chat_text(&client, server_port, style_system, &style_prompt, 1_700)?;
         if let Some(array) = json_array_from_response(&style_output) {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(&array)
+            {
                 let accepted = items.into_iter().take(10).collect::<Vec<_>>();
                 model_suggestion_count += accepted.len();
                 suggestions.extend(accepted);
@@ -1471,9 +2080,12 @@ fn review_grammar_text_blocking(
             source
         );
         let audit_system = "You are the second-pass grammar quality check for a college paper. Return only a valid JSON array with exactly these five keys per object: kind, original, replacement, reason, alternatives. kind must be mechanic. Find clear, specific grammar, spelling, agreement, capitalization, apostrophe, homophone, or punctuation problems that a first pass may have missed. Copy original exactly from the paper. Keep each correction focused on 1 to 6 words. Do not return style-only advice, commentary, Markdown, or an empty array when clear mechanics errors exist.";
-        let audit_output = local_chat_text(&client, server_port, audit_system, &audit_prompt, 1_300)?;
+        let audit_output =
+            local_chat_text(&client, server_port, audit_system, &audit_prompt, 1_300)?;
         if let Some(array) = json_array_from_response(&audit_output) {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&array) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(&array)
+            {
                 suggestions.extend(items.into_iter().take(8));
             }
         }
@@ -2109,15 +2721,30 @@ fn generate_flashcards_text_blocking(
                 break;
             }
             let completed_batches = index * batches_per_chunk + batch_index;
-            let progress = 42u8.saturating_add(((completed_batches * 40 / total_batches) as u8).min(40));
+            let progress =
+                42u8.saturating_add(((completed_batches * 40 / total_batches) as u8).min(40));
             let detail = if batch_index == 0 {
-                format!("Making flashcards from section {} of {}", index + 1, total_chunks)
+                format!(
+                    "Making flashcards from section {} of {}",
+                    index + 1,
+                    total_chunks
+                )
             } else {
-                format!("Adding fresh practice from section {} of {}", index + 1, total_chunks)
+                format!(
+                    "Adding fresh practice from section {} of {}",
+                    index + 1,
+                    total_chunks
+                )
             };
             emit_ai_progress(&app, progress, &detail);
             let card_limit = FLASHCARD_BATCH_CARD_LIMIT.min(card_budget - cards.len());
-            let recent_cards = cards.iter().rev().take(18).filter_map(|card| card.get("front").and_then(|value| value.as_str())).collect::<Vec<_>>().join(" | ");
+            let recent_cards = cards
+                .iter()
+                .rev()
+                .take(18)
+                .filter_map(|card| card.get("front").and_then(|value| value.as_str()))
+                .collect::<Vec<_>>()
+                .join(" | ");
             let prompt = flashcard_generation_prompt(
                 request_instruction,
                 &guidance,
@@ -2127,31 +2754,39 @@ fn generate_flashcards_text_blocking(
                 expanded_math_practice && batch_index > 0,
                 &recent_cards,
             );
-            let batch = match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
-            Ok(batch) => batch,
-            Err(error) if !cpu_retry_used && should_retry_flashcard_batch_on_cpu(&error) => {
-                // A GPU can pass the startup probe yet fail on a larger real
-                // request. Retry that one section once on CPU. Invalid JSON
-                // and client-side request errors stay on the current server;
-                // changing hardware cannot repair either of those.
-                eprintln!("[SoFlo AI] flashcard GPU batch failed: {error}");
-                emit_ai_progress(&app, 68, "Trying a compatible local AI mode");
-                stop_model_server(&AI_SERVER);
-                ai_port = ensure_flashcard_cpu_ai_server(&model_path, &app)?;
-                cpu_retry_used = true;
+            let batch =
                 match flashcard_batch_completion(&client, ai_port, system, &prompt, card_limit) {
                     Ok(batch) => batch,
-                    Err(cpu_error) => {
-                        eprintln!("[SoFlo AI] flashcard CPU batch failed: {cpu_error}");
+                    Err(error)
+                        if !cpu_retry_used && should_retry_flashcard_batch_on_cpu(&error) =>
+                    {
+                        // A GPU can pass the startup probe yet fail on a larger real
+                        // request. Retry that one section once on CPU. Invalid JSON
+                        // and client-side request errors stay on the current server;
+                        // changing hardware cannot repair either of those.
+                        eprintln!("[SoFlo AI] flashcard GPU batch failed: {error}");
+                        emit_ai_progress(&app, 68, "Trying a compatible local AI mode");
+                        stop_model_server(&AI_SERVER);
+                        ai_port = ensure_flashcard_cpu_ai_server(&model_path, &app)?;
+                        cpu_retry_used = true;
+                        match flashcard_batch_completion(
+                            &client, ai_port, system, &prompt, card_limit,
+                        ) {
+                            Ok(batch) => batch,
+                            Err(cpu_error) => {
+                                eprintln!("[SoFlo AI] flashcard CPU batch failed: {cpu_error}");
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[SoFlo AI] skipped incomplete flashcard section {}: {error}",
+                            index + 1
+                        );
                         continue;
                     }
-                }
-            }
-            Err(error) => {
-                eprintln!("[SoFlo AI] skipped incomplete flashcard section {}: {error}", index + 1);
-                continue;
-            }
-            };
+                };
             for card in batch {
                 if cards.len() >= card_budget {
                     break;
@@ -2169,7 +2804,8 @@ fn generate_flashcards_text_blocking(
         return Err("SoFlo could not make a complete flashcard batch from this document. The local model was tried in its compatible modes; try the file again after reopening SoFlo.".into());
     }
     emit_ai_progress(&app, 100, "Finishing your flashcard set");
-    serde_json::to_string(&cards).map_err(|_| "SoFlo could not save the generated flashcards.".into())
+    serde_json::to_string(&cards)
+        .map_err(|_| "SoFlo could not save the generated flashcards.".into())
 }
 
 fn flashcard_generation_prompt(
@@ -2249,9 +2885,8 @@ fn flashcard_cards_from_response(output: &str) -> Vec<serde_json::Value> {
         .filter_map(|card| {
             let front = card.get("front")?.as_str()?.trim();
             let back = card.get("back")?.as_str()?.trim();
-            (!front.is_empty() && !back.is_empty()).then(|| {
-                serde_json::json!({ "front": front, "back": back })
-            })
+            (!front.is_empty() && !back.is_empty())
+                .then(|| serde_json::json!({ "front": front, "back": back }))
         })
         .collect()
 }
@@ -2260,7 +2895,13 @@ fn flashcard_card_key(card: &serde_json::Value) -> String {
     ["front", "back"]
         .iter()
         .filter_map(|field| card.get(*field).and_then(|value| value.as_str()))
-        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase())
+        .map(|value| {
+            value
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
         .collect::<Vec<_>>()
         .join("\u{0}")
 }
@@ -2301,9 +2942,19 @@ fn flashcard_completion(
     if !status.is_success() {
         let detail = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
-            .and_then(|value| value.get("error").cloned().or_else(|| value.get("message").cloned()))
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .cloned()
+                    .or_else(|| value.get("message").cloned())
+            })
             .and_then(|value| value.get("message").cloned().or(Some(value)))
-            .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string())
+            })
             .unwrap_or(body)
             .split_whitespace()
             .take(30)
@@ -2317,9 +2968,7 @@ fn flashcard_completion(
     }
     let body: serde_json::Value = serde_json::from_str(&body)
         .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
-    let choice = body
-        .get("choices")
-        .and_then(|value| value.get(0));
+    let choice = body.get("choices").and_then(|value| value.get(0));
     let content = choice
         .and_then(|value| value.get("message"))
         .and_then(|value| value.get("content"))
@@ -2347,17 +2996,55 @@ fn flashcard_completion(
 fn looks_like_math_material(source: &str) -> bool {
     let lower = source.to_ascii_lowercase();
     let keyword_match = [
-        "equation", "inequality", "solve", "simplify", "evaluate", "factor", "quadratic",
-        "derivative", "integral", "function", "matrix", "polynomial", "logarithm", "geometry",
-        "trigonometry", "probability", "calculus", "algebra", "slope", "graph",
+        "equation",
+        "inequality",
+        "solve",
+        "simplify",
+        "evaluate",
+        "factor",
+        "quadratic",
+        "derivative",
+        "integral",
+        "function",
+        "matrix",
+        "polynomial",
+        "logarithm",
+        "geometry",
+        "trigonometry",
+        "probability",
+        "calculus",
+        "algebra",
+        "slope",
+        "graph",
     ]
     .iter()
     .any(|keyword| lower.contains(keyword));
     let symbol_count = source
         .chars()
-        .filter(|character| matches!(character, '=' | '+' | '-' | '*' | '/' | '^' | '√' | '∫' | '∑' | 'π' | '≤' | '≥' | '≠' | '×' | '÷'))
+        .filter(|character| {
+            matches!(
+                character,
+                '=' | '+'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '^'
+                    | '√'
+                    | '∫'
+                    | '∑'
+                    | 'π'
+                    | '≤'
+                    | '≥'
+                    | '≠'
+                    | '×'
+                    | '÷'
+            )
+        })
         .count();
-    let digit_count = source.chars().filter(|character| character.is_ascii_digit()).count();
+    let digit_count = source
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .count();
     keyword_match || (symbol_count >= 4 && digit_count >= 2)
 }
 
@@ -2507,7 +3194,9 @@ fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u
     if let Some(target) = remote_ai_target(model_path) {
         return ensure_remote_ai_relay(target?);
     }
-    if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) { return Ok(port); }
+    if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) {
+        return Ok(port);
+    }
     // Qwen 3 can spend a completion entirely in its reasoning channel, which
     // leaves message.content empty for JSON- and text-based SoFlo features.
     // Keep reasoning disabled at the server level so every general AI action
@@ -2537,11 +3226,19 @@ fn ensure_flashcard_cpu_ai_server(model_path: &str, app: &tauri::AppHandle) -> C
 }
 
 fn ensure_study_web_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
-    ensure_model_server(&AI_SERVER, model_path, app, STUDY_WEB_AI_CONTEXT_SIZE, "off")
+    ensure_model_server(
+        &AI_SERVER,
+        model_path,
+        app,
+        STUDY_WEB_AI_CONTEXT_SIZE,
+        "off",
+    )
 }
 
 fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
-    if let Some(port) = shared_model_server_port(&AI_SERVER, model_path) { return Ok(port); }
+    if let Some(port) = shared_model_server_port(&AI_SERVER, model_path) {
+        return Ok(port);
+    }
     ensure_model_server(
         &WORD_AI_SERVER,
         model_path,
@@ -2554,11 +3251,19 @@ fn ensure_word_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandRes
 // General and Writing can intentionally point at the exact same GGUF (for
 // example General Medium and Writing High). Keep one llama.cpp process in
 // that case: these are two logical features, not two model instances.
-fn shared_model_server_port(server_state: &'static OnceLock<Mutex<Option<AiServer>>>, model_path: &str) -> Option<u16> {
+fn shared_model_server_port(
+    server_state: &'static OnceLock<Mutex<Option<AiServer>>>,
+    model_path: &str,
+) -> Option<u16> {
     let state = server_state.get()?;
     let mut guard = state.lock().ok()?;
     let server = guard.as_mut()?;
-    if server.model_path != model_path || server.child.try_wait().ok()?.is_some() || !ai_server_ready(server.port) { return None; }
+    if server.model_path != model_path
+        || server.child.try_wait().ok()?.is_some()
+        || !ai_server_ready(server.port)
+    {
+        return None;
+    }
     server.last_used = Instant::now();
     Some(server.port)
 }
@@ -2646,7 +3351,14 @@ fn ensure_model_server(
     context_size: &str,
     reasoning: &str,
 ) -> CommandResult<u16> {
-    ensure_model_server_with_profiles(server_state, model_path, app, context_size, reasoning, false)
+    ensure_model_server_with_profiles(
+        server_state,
+        model_path,
+        app,
+        context_size,
+        reasoning,
+        false,
+    )
 }
 
 fn ensure_model_server_with_profiles(
@@ -2668,7 +3380,8 @@ fn ensure_model_server_with_profiles(
         if server.model_path == model_path
             && server.context_size == context_size
             && server.reasoning == reasoning
-            && (server.last_used.elapsed() < AI_WARM_WINDOW || model_server_session_pinned(server_state))
+            && (server.last_used.elapsed() < AI_WARM_WINDOW
+                || model_server_session_pinned(server_state))
             && server
                 .child
                 .try_wait()
@@ -2685,7 +3398,11 @@ fn ensure_model_server_with_profiles(
         *guard = None;
     }
     emit_ai_progress(app, 22, "Loading your private local model");
-    let gpu_device = if force_cpu { None } else { llama_acceleration_device() };
+    let gpu_device = if force_cpu {
+        None
+    } else {
+        llama_acceleration_device()
+    };
     let profiles: &[&str] = if force_cpu || gpu_device.is_none() {
         &["0"]
     } else {
@@ -2700,7 +3417,11 @@ fn ensure_model_server_with_profiles(
             context_size,
             reasoning,
             gpu_layers,
-            if *gpu_layers == "0" { None } else { gpu_device.as_deref() },
+            if *gpu_layers == "0" {
+                None
+            } else {
+                gpu_device.as_deref()
+            },
         ) {
             Ok(child) => child,
             Err(error) => {
@@ -2828,9 +3549,10 @@ fn touch_model_server(server_state: &'static OnceLock<Mutex<Option<AiServer>>>) 
         thread::sleep(AI_WARM_WINDOW);
         if let Some(state) = server_state.get() {
             if let Ok(mut guard) = state.lock() {
-                if !model_server_session_pinned(server_state) && guard
-                    .as_ref()
-                    .is_some_and(|server| server.last_used.elapsed() >= AI_WARM_WINDOW)
+                if !model_server_session_pinned(server_state)
+                    && guard
+                        .as_ref()
+                        .is_some_and(|server| server.last_used.elapsed() >= AI_WARM_WINDOW)
                 {
                     if let Some(mut server) = guard.take() {
                         let _ = server.child.kill();
@@ -2885,7 +3607,11 @@ pub async fn prepare_ai_for_session(
                 return Err(error);
             }
         };
-        emit_ai_progress(&app, if mode == "writing" { 48 } else { 8 }, "Preparing your local AI");
+        emit_ai_progress(
+            &app,
+            if mode == "writing" { 48 } else { 8 },
+            "Preparing your local AI",
+        );
         if let Err(error) = ensure_ai_server(&general_model, &app) {
             AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
             return Err(error);
@@ -2920,7 +3646,6 @@ fn download_ai_model_file(
         }) {
             return Ok(());
         }
-        fs::remove_file(destination).map_err(|error| error.to_string())?;
     }
     let directory = destination
         .parent()
@@ -2931,46 +3656,99 @@ fn download_ai_model_file(
         .and_then(|value| value.to_str())
         .unwrap_or("model.gguf");
     let temporary = directory.join(format!("{}.download", filename));
-    let mut response = reqwest::blocking::get(url)
-        .map_err(|_| "SoFlo could not start the local AI model download.".to_string())?;
-    if !response.status().is_success() {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(45))
+        .timeout(Duration::from_secs(60 * 60 * 8))
+        .user_agent("SoFlo model downloader")
+        .build()
+        .map_err(|_| "SoFlo could not prepare the local AI model download.".to_string())?;
+    let mut last_error = None;
+    for attempt in 1..=3u8 {
+        let existing = fs::metadata(&temporary)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut request = client.get(url);
+        if existing > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+        }
+        let result = (|| -> CommandResult<()> {
+            let mut response = request
+                .send()
+                .map_err(|_| "The local AI model download was interrupted.".to_string())?;
+            if !(response.status().is_success()
+                || response.status() == reqwest::StatusCode::PARTIAL_CONTENT)
+            {
+                return Err(format!(
+                    "SoFlo could not download the local AI model (server returned {}).",
+                    response.status()
+                ));
+            }
+            let append = existing > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+            let offset = if append { existing } else { 0 };
+            let total = response
+                .content_length()
+                .map(|size| size.saturating_add(offset));
+            let mut output = if append {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&temporary)
+            } else {
+                fs::File::create(&temporary)
+            }
+            .map_err(|error| error.to_string())?;
+            let mut downloaded = offset;
+            let mut buffer = [0u8; 128 * 1024];
+            loop {
+                let count = response
+                    .read(&mut buffer)
+                    .map_err(|_| "The local AI model download was interrupted.".to_string())?;
+                if count == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..count])
+                    .map_err(|error| error.to_string())?;
+                downloaded = downloaded.saturating_add(count as u64);
+                if let Some(total) = total.filter(|total| *total > 0) {
+                    let span = u64::from(progress_end.saturating_sub(progress_start));
+                    let progress =
+                        u64::from(progress_start) + downloaded.saturating_mul(span) / total;
+                    let _ = app.emit("ai-download-progress", progress.min(100) as u8);
+                }
+            }
+            output.flush().map_err(|error| error.to_string())?;
+            if let Some(total) = total {
+                if downloaded < total {
+                    return Err("The local AI model download ended early.".into());
+                }
+            }
+            if let Some(minimum) = minimum_size {
+                if downloaded < minimum {
+                    return Err("The local AI model file is smaller than expected.".into());
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 3 {
+                    thread::sleep(Duration::from_secs(u64::from(attempt) * 2));
+                }
+            }
+        }
+    }
+    if let Some(error) = last_error {
         return Err(format!(
-            "SoFlo could not download the local AI model (server returned {}).",
-            response.status()
+            "{error} Your partial model download was kept so SoFlo can resume it next time."
         ));
     }
-    // Some CDN responses stream correctly but omit Content-Length. The model
-    // is still safe to download; we simply show indeterminate progress until
-    // the final integrity-size check below.
-    let total = response.content_length();
-    let mut output = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-    let mut downloaded = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = response
-            .read(&mut buffer)
-            .map_err(|_| "The local AI model download was interrupted.".to_string())?;
-        if count == 0 {
-            break;
-        }
-        use std::io::Write;
-        output
-            .write_all(&buffer[..count])
-            .map_err(|error| error.to_string())?;
-        downloaded += count as u64;
-        if let Some(total) = total.filter(|total| *total > 0) {
-            let span = u64::from(progress_end.saturating_sub(progress_start));
-            let progress = u64::from(progress_start) + downloaded.saturating_mul(span) / total;
-            let _ = app.emit("ai-download-progress", progress.min(100) as u8);
-        }
-    }
-    drop(output);
-    if let Some(minimum) = minimum_size {
-        if downloaded < minimum {
-            let _ = fs::remove_file(&temporary);
-            return Err("The local AI model download ended before the complete file arrived. Please try again.".into());
-        }
-    }
+    let _ = fs::remove_file(destination);
     fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -3047,12 +3825,23 @@ pub async fn install_ai_model(
     let download_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let destination = managed_models_dir(&download_app)?.join(profile.filename);
-        download_ai_model_file(&download_app, profile.url, &destination, 0, 100, profile.minimum_bytes)?;
+        download_ai_model_file(
+            &download_app,
+            profile.url,
+            &destination,
+            0,
+            100,
+            profile.minimum_bytes,
+        )?;
         let _ = download_app.emit("ai-download-progress", 100u8);
         let _ = download_app.emit("ai-download-finished", ());
         Ok(destination.to_string_lossy().to_string())
-    }).await.map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
-    if result.is_err() { let _ = app.emit("ai-download-finished", ()); }
+    })
+    .await
+    .map_err(|_| "SoFlo could not start the local AI download.".to_string())?;
+    if result.is_err() {
+        let _ = app.emit("ai-download-finished", ());
+    }
     result
 }
 
@@ -3062,7 +3851,10 @@ pub fn get_ai_model_inventory(app: tauri::AppHandle) -> CommandResult<serde_json
     let installed = |role: &str, tier: &str| -> bool {
         managed_ai_model(role, tier).ok().is_some_and(|profile| {
             let path = models.join(profile.filename);
-            path.is_file() && profile.minimum_bytes.map_or(true, |minimum| fs::metadata(path).is_ok_and(|metadata| metadata.len() >= minimum))
+            path.is_file()
+                && profile.minimum_bytes.map_or(true, |minimum| {
+                    fs::metadata(path).is_ok_and(|metadata| metadata.len() >= minimum)
+                })
         })
     };
     Ok(serde_json::json!({
@@ -3083,14 +3875,28 @@ pub fn delete_unused_ai_models(
     stop_model_server(&WORD_AI_SERVER);
     let models = managed_models_dir(&app)?;
     let active = [
-        if general_path.trim().is_empty() { models.join(DEFAULT_AI_MODEL_NAME) } else { Path::new(general_path.trim()).to_path_buf() },
-        if writing_path.trim().is_empty() { models.join(WORD_AI_MODEL_NAME) } else { Path::new(writing_path.trim()).to_path_buf() },
-        if voice_path.trim().is_empty() { models.join(VOICE_MEDIUM_MODEL_NAME) } else { Path::new(voice_path.trim()).to_path_buf() },
+        if general_path.trim().is_empty() {
+            models.join(DEFAULT_AI_MODEL_NAME)
+        } else {
+            Path::new(general_path.trim()).to_path_buf()
+        },
+        if writing_path.trim().is_empty() {
+            models.join(WORD_AI_MODEL_NAME)
+        } else {
+            Path::new(writing_path.trim()).to_path_buf()
+        },
+        if voice_path.trim().is_empty() {
+            models.join(VOICE_MEDIUM_MODEL_NAME)
+        } else {
+            Path::new(voice_path.trim()).to_path_buf()
+        },
     ];
     let mut names = std::collections::HashSet::new();
     for role in ["general", "writing", "voice"] {
         for tier in ["low", "medium", "high"] {
-            if let Ok(profile) = managed_ai_model(role, tier) { names.insert(profile.filename); }
+            if let Ok(profile) = managed_ai_model(role, tier) {
+                names.insert(profile.filename);
+            }
         }
     }
     for name in names {
@@ -3111,10 +3917,27 @@ pub fn delete_local_ai_models(
     WORD_AI_SERVER_SESSION_PINNED.store(false, Ordering::Relaxed);
     stop_model_server(&AI_SERVER);
     stop_model_server(&WORD_AI_SERVER);
-    let models = app.path().app_data_dir().map_err(|error| error.to_string())?.join("models");
-    for name in [DEFAULT_AI_MODEL_NAME, WORD_AI_MODEL_NAME, LEGACY_DEFAULT_AI_MODEL_NAME, GENERAL_LOW_MODEL_NAME, GENERAL_HIGH_MODEL_NAME, WRITING_LOW_MODEL_NAME, WRITING_HIGH_MODEL_NAME, VOICE_LOW_MODEL_NAME, VOICE_MEDIUM_MODEL_NAME, VOICE_HIGH_MODEL_NAME] {
+    let models = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models");
+    for name in [
+        DEFAULT_AI_MODEL_NAME,
+        WORD_AI_MODEL_NAME,
+        LEGACY_DEFAULT_AI_MODEL_NAME,
+        GENERAL_LOW_MODEL_NAME,
+        GENERAL_HIGH_MODEL_NAME,
+        WRITING_LOW_MODEL_NAME,
+        WRITING_HIGH_MODEL_NAME,
+        VOICE_LOW_MODEL_NAME,
+        VOICE_MEDIUM_MODEL_NAME,
+        VOICE_HIGH_MODEL_NAME,
+    ] {
         let path = models.join(name);
-        if path.is_file() { fs::remove_file(path).map_err(|error| error.to_string())?; }
+        if path.is_file() {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
     }
     let connection = database.open()?;
     let mut settings = get_settings(&connection, None)?;
@@ -3879,7 +4702,8 @@ pub fn save_lecture(
             .map_err(|error| error.to_string())?;
     let changed = existing != input.content || existing_title != input.title.trim();
     let latest_checkpoint_age: Option<i64> = transaction.query_row("SELECT CAST(strftime('%s','now') - strftime('%s',created_at) AS INTEGER) FROM lecture_revisions WHERE lecture_id=?1 ORDER BY created_at DESC LIMIT 1", [&input.id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
-    let checkpoint = changed && (input.force_checkpoint || latest_checkpoint_age.is_none_or(|seconds| seconds >= 180));
+    let checkpoint = changed
+        && (input.force_checkpoint || latest_checkpoint_age.is_none_or(|seconds| seconds >= 180));
     let next_revision = if checkpoint { revision + 1 } else { revision };
     transaction.execute("UPDATE lectures SET title=?1, content=?2, content_plain=?3, revision=?4, updated_at=CURRENT_TIMESTAMP WHERE id=?5", params![input.title.trim(), input.content, input.content_plain, next_revision, input.id]).map_err(|error| error.to_string())?;
     if checkpoint {
@@ -3904,7 +4728,9 @@ pub fn record_lecture_note_checkpoint(
         [&input.lecture_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
     ).optional().map_err(|error| error.to_string())?;
-    let Some((state, captured_ms, elapsed_ms)) = recording else { return Ok(()) };
+    let Some((state, captured_ms, elapsed_ms)) = recording else {
+        return Ok(());
+    };
     if state != "recording" {
         return Ok(());
     }
@@ -3995,7 +4821,10 @@ fn ready_lecture_recording(lecture_id: String) -> LectureRecording {
     }
 }
 
-fn get_lecture_recording_from(connection: &Connection, lecture_id: &str) -> CommandResult<LectureRecording> {
+fn get_lecture_recording_from(
+    connection: &Connection,
+    lecture_id: &str,
+) -> CommandResult<LectureRecording> {
     connection.query_row(
         "SELECT lecture_id, state, source_kind, audio_path, raw_audio_path, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at, updated_at FROM lecture_recordings WHERE lecture_id=?1",
         [lecture_id],
@@ -4003,7 +4832,12 @@ fn get_lecture_recording_from(connection: &Connection, lecture_id: &str) -> Comm
     ).optional().map_err(|error| error.to_string()).map(|value| value.unwrap_or_else(|| ready_lecture_recording(lecture_id.to_string())))
 }
 
-fn update_recording_status(connection: &Connection, lecture_id: &str, state: &str, message: &str) -> CommandResult<()> {
+fn update_recording_status(
+    connection: &Connection,
+    lecture_id: &str,
+    state: &str,
+    message: &str,
+) -> CommandResult<()> {
     connection.execute(
         "UPDATE lecture_recordings SET state=?1, status_message=?2, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?3",
         params![state, message, lecture_id],
@@ -4020,24 +4854,47 @@ fn emit_lecture_recording_update(app: &tauri::AppHandle, database: &Database, le
 }
 
 #[tauri::command]
-pub fn get_lecture_recording(database: State<'_, Database>, lecture_id: String) -> CommandResult<LectureRecording> {
+pub fn get_lecture_recording(
+    database: State<'_, Database>,
+    lecture_id: String,
+) -> CommandResult<LectureRecording> {
     get_lecture_recording_from(&database.open()?, &lecture_id)
 }
 
 #[tauri::command]
-pub fn list_lecture_transcript_segments(database: State<'_, Database>, lecture_id: String) -> CommandResult<Vec<LectureTranscriptSegment>> {
+pub fn list_lecture_transcript_segments(
+    database: State<'_, Database>,
+    lecture_id: String,
+) -> CommandResult<Vec<LectureTranscriptSegment>> {
     let connection = database.open()?;
     let mut statement = connection.prepare(
         "SELECT id, lecture_id, chunk_index, start_ms, end_ms, speaker, text, is_final, created_at FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, chunk_index, id"
     ).map_err(|error| error.to_string())?;
-    let segments = statement.query_map([lecture_id], |row| Ok(LectureTranscriptSegment {
-        id: row.get(0)?, lecture_id: row.get(1)?, chunk_index: row.get(2)?, start_ms: row.get(3)?, end_ms: row.get(4)?, speaker: row.get(5)?, text: row.get(6)?, is_final: row.get::<_, i64>(7)? != 0, created_at: row.get(8)?,
-    })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let segments = statement
+        .query_map([lecture_id], |row| {
+            Ok(LectureTranscriptSegment {
+                id: row.get(0)?,
+                lecture_id: row.get(1)?,
+                chunk_index: row.get(2)?,
+                start_ms: row.get(3)?,
+                end_ms: row.get(4)?,
+                speaker: row.get(5)?,
+                text: row.get(6)?,
+                is_final: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     Ok(segments)
 }
 
 #[tauri::command]
-pub fn get_lecture_analysis(database: State<'_, Database>, lecture_id: String) -> CommandResult<Option<LectureAnalysis>> {
+pub fn get_lecture_analysis(
+    database: State<'_, Database>,
+    lecture_id: String,
+) -> CommandResult<Option<LectureAnalysis>> {
     let connection = database.open()?;
     connection.query_row(
         "SELECT lecture_id, status, overview, key_points_json, concepts_json, questions_json, next_steps_json, raw_transcript, cleaned_transcript, detailed_notes, note_suggestions_json, created_at, updated_at FROM lecture_analyses WHERE lecture_id=?1",
@@ -4056,9 +4913,17 @@ pub fn get_lecture_analysis(database: State<'_, Database>, lecture_id: String) -
 }
 
 #[tauri::command]
-pub fn start_lecture_recording(database: State<'_, Database>, lecture_id: String) -> CommandResult<LectureRecording> {
+pub fn start_lecture_recording(
+    database: State<'_, Database>,
+    lecture_id: String,
+) -> CommandResult<LectureRecording> {
     let connection = database.open()?;
-    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0))
+    connection
+        .query_row(
+            "SELECT id FROM lectures WHERE id=?1",
+            [&lecture_id],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|_| "That lecture could not be found.".to_string())?;
     let existing = get_lecture_recording_from(&connection, &lecture_id)?;
     let directory = lecture_recordings_dir(&database, &lecture_id)?;
@@ -4069,11 +4934,30 @@ pub fn start_lecture_recording(database: State<'_, Database>, lecture_id: String
     if !matches!(existing.state.as_str(), "recording" | "interrupted") {
         let _ = fs::remove_file(&raw_path);
         let _ = fs::remove_file(&audio_path);
-        connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-        connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-        connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM lecture_recording_chunks WHERE lecture_id=?1",
+                [&lecture_id],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM lecture_transcript_segments WHERE lecture_id=?1",
+                [&lecture_id],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1",
+                [&lecture_id],
+            )
+            .map_err(|error| error.to_string())?;
     }
-    std::fs::OpenOptions::new().create(true).append(true).open(&raw_path).map_err(|error| error.to_string())?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&raw_path)
+        .map_err(|error| error.to_string())?;
     connection.execute(r#"
         INSERT INTO lecture_recordings (lecture_id, state, source_kind, audio_path, raw_audio_path, sample_rate, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at)
         VALUES (?1,'recording','microphone',?2,?3,16000,?4,?4,?5,0,'Recording microphone audio.',CURRENT_TIMESTAMP,NULL)
@@ -4089,8 +4973,15 @@ pub fn append_lecture_audio_chunk(
     pcm_base64: String,
     duration_ms: i64,
 ) -> CommandResult<i32> {
-    let bytes = BASE64.decode(pcm_base64.as_bytes()).map_err(|_| "SoFlo could not read that microphone audio chunk.".to_string())?;
-    if bytes.is_empty() || bytes.len() % 2 != 0 || bytes.len() > 4_000_000 || duration_ms <= 0 || duration_ms > 60_000 {
+    let bytes = BASE64
+        .decode(pcm_base64.as_bytes())
+        .map_err(|_| "SoFlo could not read that microphone audio chunk.".to_string())?;
+    if bytes.is_empty()
+        || bytes.len() % 2 != 0
+        || bytes.len() > 4_000_000
+        || duration_ms <= 0
+        || duration_ms > 60_000
+    {
         return Err("That audio chunk is not valid.".into());
     }
     let connection = database.open()?;
@@ -4098,10 +4989,20 @@ pub fn append_lecture_audio_chunk(
     if recording.state != "recording" {
         return Err("Start a lecture recording before sending microphone audio.".into());
     }
-    let raw_path = recording.raw_audio_path.ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
-    let offset = fs::metadata(&raw_path).map(|metadata| metadata.len() as i64).unwrap_or(0);
-    let mut output = std::fs::OpenOptions::new().create(true).append(true).open(&raw_path).map_err(|error| error.to_string())?;
-    output.write_all(&bytes).map_err(|error| error.to_string())?;
+    let raw_path = recording
+        .raw_audio_path
+        .ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
+    let offset = fs::metadata(&raw_path)
+        .map(|metadata| metadata.len() as i64)
+        .unwrap_or(0);
+    let mut output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&raw_path)
+        .map_err(|error| error.to_string())?;
+    output
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
     output.sync_data().map_err(|error| error.to_string())?;
     let chunk_index: i32 = connection.query_row("SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id], |row| row.get(0)).map_err(|error| error.to_string())?;
     let start_ms = recording.captured_ms;
@@ -4121,9 +5022,17 @@ fn append_imported_pcm_chunk(
     captured_ms: &mut i64,
     next_chunk_index: &mut i32,
 ) -> CommandResult<()> {
-    if bytes.is_empty() { return Ok(()); }
-    let offset = fs::metadata(raw_path).map(|metadata| metadata.len() as i64).unwrap_or(0);
-    let mut output = fs::OpenOptions::new().create(true).append(true).open(raw_path).map_err(|error| error.to_string())?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let offset = fs::metadata(raw_path)
+        .map(|metadata| metadata.len() as i64)
+        .unwrap_or(0);
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(raw_path)
+        .map_err(|error| error.to_string())?;
     output.write_all(bytes).map_err(|error| error.to_string())?;
     output.sync_data().map_err(|error| error.to_string())?;
     let duration_ms = ((bytes.len() as i64) * 1000 / (VOICE_SAMPLE_RATE * 2)).max(1);
@@ -4154,18 +5063,32 @@ fn decode_imported_audio_to_pcm<F>(
 where
     F: FnMut(i32) -> CommandResult<()>,
 {
-    let source_file = fs::File::open(source).map_err(|_| "SoFlo could not open that media file.".to_string())?;
+    let source_file =
+        fs::File::open(source).map_err(|_| "SoFlo could not open that media file.".to_string())?;
     let mut hint = Hint::new();
-    if let Some(extension) = source.extension().and_then(|value| value.to_str()) { hint.with_extension(extension); }
+    if let Some(extension) = source.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
     let stream = MediaSourceStream::new(Box::new(source_file), Default::default());
     let mut format = get_probe().probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
         .map_err(|_| "SoFlo could not read that media format. Try MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM with a supported audio track.".to_string())?;
-    let track = format.default_track(TrackType::Audio).ok_or_else(|| "That file has no playable audio track.".to_string())?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| "That file has no playable audio track.".to_string())?;
     let track_id = track.id;
-    let mut decoder = get_codecs().make_audio_decoder(
-        track.codec_params.as_ref().ok_or_else(|| "That audio track has no usable codec information.".to_string())?.audio().ok_or_else(|| "That file does not contain an audio track SoFlo can decode.".to_string())?,
-        &AudioDecoderOptions::default(),
-    ).map_err(|_| "SoFlo could not decode that audio format.".to_string())?;
+    let mut decoder = get_codecs()
+        .make_audio_decoder(
+            track
+                .codec_params
+                .as_ref()
+                .ok_or_else(|| "That audio track has no usable codec information.".to_string())?
+                .audio()
+                .ok_or_else(|| {
+                    "That file does not contain an audio track SoFlo can decode.".to_string()
+                })?,
+            &AudioDecoderOptions::default(),
+        )
+        .map_err(|_| "SoFlo could not decode that audio format.".to_string())?;
     let _ = fs::remove_file(destination);
     fs::File::create(destination).map_err(|error| error.to_string())?;
     let mut captured_ms = 0i64;
@@ -4173,39 +5096,64 @@ where
     let mut source_frame_cursor = 0f64;
     let mut next_output_source_frame = 0f64;
     let mut pcm_chunk = Vec::<u8>::with_capacity((VOICE_SAMPLE_RATE as usize) * 2 * 21);
-    const CHUNK_BYTES: usize = (VOICE_SAMPLE_RATE as usize) * 2 * (VOICE_CHUNK_TARGET_MS as usize) / 1000;
+    const CHUNK_BYTES: usize =
+        (VOICE_SAMPLE_RATE as usize) * 2 * (VOICE_CHUNK_TARGET_MS as usize) / 1000;
     loop {
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
             Err(SymphoniaError::IoError(_)) => break,
-            Err(SymphoniaError::ResetRequired) => return Err("That audio stream changed format while it was being read.".into()),
+            Err(SymphoniaError::ResetRequired) => {
+                return Err("That audio stream changed format while it was being read.".into())
+            }
             Err(_) => return Err("SoFlo could not continue reading that media file.".into()),
         };
-        if packet.track_id != track_id { continue; }
+        if packet.track_id != track_id {
+            continue;
+        }
         let decoded = match decoder.decode(&packet) {
             Ok(buffer) => buffer,
             Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
-            Err(_) => return Err("SoFlo could not decode the audio track in that media file.".into()),
+            Err(_) => {
+                return Err("SoFlo could not decode the audio track in that media file.".into())
+            }
         };
         let channels = decoded.spec().channels().count().max(1);
         let sample_rate = decoded.spec().rate().max(1) as f64;
         let mut samples = vec![0f32; decoded.samples_interleaved()];
         decoded.copy_to_slice_interleaved(&mut samples);
         let frame_count = samples.len() / channels;
-        if frame_count == 0 { continue; }
+        if frame_count == 0 {
+            continue;
+        }
         let end_source_frame = source_frame_cursor + frame_count as f64;
         while next_output_source_frame < end_source_frame {
-            let frame = ((next_output_source_frame - source_frame_cursor).floor().max(0.0) as usize).min(frame_count - 1);
+            let frame = ((next_output_source_frame - source_frame_cursor)
+                .floor()
+                .max(0.0) as usize)
+                .min(frame_count - 1);
             let start = frame * channels;
-            let averaged = samples[start..start + channels].iter().copied().sum::<f32>() / channels as f32;
+            let averaged = samples[start..start + channels]
+                .iter()
+                .copied()
+                .sum::<f32>()
+                / channels as f32;
             let sample = (averaged.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
             pcm_chunk.extend_from_slice(&sample.to_le_bytes());
             next_output_source_frame += sample_rate / VOICE_SAMPLE_RATE as f64;
             while pcm_chunk.len() >= CHUNK_BYTES {
                 let batch = pcm_chunk.drain(..CHUNK_BYTES).collect::<Vec<_>>();
                 let chunk_index = next_chunk_index;
-                append_imported_pcm_chunk(app, database, connection, lecture_id, destination, &batch, &mut captured_ms, &mut next_chunk_index)?;
+                append_imported_pcm_chunk(
+                    app,
+                    database,
+                    connection,
+                    lecture_id,
+                    destination,
+                    &batch,
+                    &mut captured_ms,
+                    &mut next_chunk_index,
+                )?;
                 queue_chunk(chunk_index)?;
             }
         }
@@ -4213,10 +5161,21 @@ where
     }
     if !pcm_chunk.is_empty() {
         let chunk_index = next_chunk_index;
-        append_imported_pcm_chunk(app, database, connection, lecture_id, destination, &pcm_chunk, &mut captured_ms, &mut next_chunk_index)?;
+        append_imported_pcm_chunk(
+            app,
+            database,
+            connection,
+            lecture_id,
+            destination,
+            &pcm_chunk,
+            &mut captured_ms,
+            &mut next_chunk_index,
+        )?;
         queue_chunk(chunk_index)?;
     }
-    if next_chunk_index == 0 { return Err("SoFlo could not decode usable audio from that file.".into()); }
+    if next_chunk_index == 0 {
+        return Err("SoFlo could not decode usable audio from that file.".into());
+    }
     Ok(next_chunk_index)
 }
 
@@ -4229,11 +5188,28 @@ fn process_imported_lecture_audio(
 ) -> CommandResult<()> {
     let model_path = resolve_voice_model_path(&app, &model_path)?;
     let source = PathBuf::from(source_path);
-    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm") { return Err("Choose a supported audio or video file (MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM).".into()); }
-    if !source.is_file() { return Err("That audio or video file is no longer available.".into()); }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm"
+    ) {
+        return Err("Choose a supported audio or video file (MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM).".into());
+    }
+    if !source.is_file() {
+        return Err("That audio or video file is no longer available.".into());
+    }
     let connection = database.open()?;
-    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
+    connection
+        .query_row(
+            "SELECT id FROM lectures WHERE id=?1",
+            [&lecture_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| "That lecture could not be found.".to_string())?;
     let directory = lecture_recordings_dir(&database, &lecture_id)?;
     let raw_path = directory.join("lecture.pcm");
     let audio_path = directory.join("lecture.mp3");
@@ -4241,10 +5217,26 @@ fn process_imported_lecture_audio(
     let _ = fs::remove_file(&raw_path);
     let _ = fs::remove_file(&audio_path);
     let _ = fs::remove_file(&source_copy);
-    connection.execute("DELETE FROM lecture_recording_chunks WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-    connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-    connection.execute("DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
-    fs::copy(&source, &source_copy).map_err(|_| "SoFlo could not copy that media file into your lecture.".to_string())?;
+    connection
+        .execute(
+            "DELETE FROM lecture_recording_chunks WHERE lecture_id=?1",
+            [&lecture_id],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM lecture_transcript_segments WHERE lecture_id=?1",
+            [&lecture_id],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM lecture_note_checkpoints WHERE lecture_id=?1",
+            [&lecture_id],
+        )
+        .map_err(|error| error.to_string())?;
+    fs::copy(&source, &source_copy)
+        .map_err(|_| "SoFlo could not copy that media file into your lecture.".to_string())?;
     connection.execute(
         "INSERT INTO lecture_recordings (lecture_id, state, source_kind, audio_path, raw_audio_path, sample_rate, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at) VALUES (?1,'transcribing','import',?2,?3,16000,0,0,0,0,'Preparing imported audio…',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='transcribing', source_kind='import', audio_path=excluded.audio_path, raw_audio_path=excluded.raw_audio_path, duration_ms=0, captured_ms=0, transcribed_ms=0, pending_chunks=0, status_message=excluded.status_message, started_at=CURRENT_TIMESTAMP, stopped_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
         params![lecture_id, audio_path.to_string_lossy(), raw_path.to_string_lossy()],
@@ -4257,20 +5249,39 @@ fn process_imported_lecture_audio(
         imported_chunks.push(chunk_index);
         Ok(())
     };
-    let _chunks = decode_imported_audio_to_pcm(&app, &database, &source_copy, &raw_path, &connection, &lecture_id, &mut collect_chunk)?;
+    let _chunks = decode_imported_audio_to_pcm(
+        &app,
+        &database,
+        &source_copy,
+        &raw_path,
+        &connection,
+        &lecture_id,
+        &mut collect_chunk,
+    )?;
     connection.execute("UPDATE lecture_recordings SET state='queued', status_message='Transcribing imported lecture…', updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     drop(connection);
     for chunk_index in imported_chunks {
-        voice_job_sender().send(VoiceTranscriptionJob {
+        voice_job_sender()
+            .send(VoiceTranscriptionJob {
+                app: app.clone(),
+                database: database.clone(),
+                lecture_id: lecture_id.clone(),
+                chunk_index,
+                model_path: model_path.clone(),
+                finalize: false,
+            })
+            .map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+    }
+    voice_job_sender()
+        .send(VoiceTranscriptionJob {
             app: app.clone(),
             database: database.clone(),
             lecture_id: lecture_id.clone(),
-            chunk_index,
-            model_path: model_path.clone(),
-            finalize: false,
-        }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
-    }
-    voice_job_sender().send(VoiceTranscriptionJob { app: app.clone(), database: database.clone(), lecture_id: lecture_id.clone(), chunk_index: -1, model_path, finalize: true }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+            chunk_index: -1,
+            model_path,
+            finalize: true,
+        })
+        .map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
     emit_lecture_recording_update(&app, &database, &lecture_id);
     Ok(())
 }
@@ -4285,26 +5296,55 @@ pub fn import_lecture_audio(
 ) -> CommandResult<()> {
     let model_path = resolve_voice_model_path(&app, &model_path)?;
     let source = PathBuf::from(source_path);
-    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm") {
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "mp4" | "m4v" | "mov" | "mkv" | "webm"
+    ) {
         return Err("Choose a supported audio or video file (MP3, WAV, M4A, AAC, FLAC, OGG, MP4, MOV, MKV, or WebM).".into());
     }
-    if !source.is_file() { return Err("That audio or video file is no longer available.".into()); }
+    if !source.is_file() {
+        return Err("That audio or video file is no longer available.".into());
+    }
     let connection = database.open()?;
-    connection.query_row("SELECT id FROM lectures WHERE id=?1", [&lecture_id], |row| row.get::<_, String>(0)).map_err(|_| "That lecture could not be found.".to_string())?;
+    connection
+        .query_row(
+            "SELECT id FROM lectures WHERE id=?1",
+            [&lecture_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| "That lecture could not be found.".to_string())?;
     connection.execute("INSERT INTO lecture_recordings (lecture_id, state, source_kind, status_message, started_at, stopped_at) VALUES (?1,'importing','import','Importing media in the background',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(lecture_id) DO UPDATE SET state='importing', source_kind='import', status_message='Importing media in the background', updated_at=CURRENT_TIMESTAMP", [&lecture_id]).map_err(|error| error.to_string())?;
     let database_handle = database.inner().clone();
     let thread_app = app.clone();
     let thread_lecture_id = lecture_id.clone();
-    thread::Builder::new().name("soflo-lecture-import".into()).spawn(move || {
-        let result = process_imported_lecture_audio(thread_app.clone(), database_handle.clone(), thread_lecture_id.clone(), source.to_string_lossy().to_string(), model_path);
-        if let Err(error) = result {
-            if let Ok(connection) = database_handle.open() {
-                let _ = update_recording_status(&connection, &thread_lecture_id, "import_failed", &format!("SoFlo could not import this audio: {}", error));
+    thread::Builder::new()
+        .name("soflo-lecture-import".into())
+        .spawn(move || {
+            let result = process_imported_lecture_audio(
+                thread_app.clone(),
+                database_handle.clone(),
+                thread_lecture_id.clone(),
+                source.to_string_lossy().to_string(),
+                model_path,
+            );
+            if let Err(error) = result {
+                if let Ok(connection) = database_handle.open() {
+                    let _ = update_recording_status(
+                        &connection,
+                        &thread_lecture_id,
+                        "import_failed",
+                        &format!("SoFlo could not import this audio: {}", error),
+                    );
+                }
+                emit_lecture_recording_update(&thread_app, &database_handle, &thread_lecture_id);
             }
-            emit_lecture_recording_update(&thread_app, &database_handle, &thread_lecture_id);
-        }
-    }).map_err(|_| "SoFlo could not start the audio import worker.".to_string())?;
+        })
+        .map_err(|_| "SoFlo could not start the audio import worker.".to_string())?;
     emit_lecture_recording_update(&app, database.inner(), &lecture_id);
     Ok(())
 }
@@ -4324,7 +5364,10 @@ static VOICE_JOB_SENDER: OnceLock<mpsc::Sender<VoiceTranscriptionJob>> = OnceLoc
 fn voice_job_sender() -> &'static mpsc::Sender<VoiceTranscriptionJob> {
     VOICE_JOB_SENDER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<VoiceTranscriptionJob>();
-        thread::Builder::new().name("soflo-voice-transcription".into()).spawn(move || run_voice_jobs(receiver)).expect("could not start SoFlo voice worker");
+        thread::Builder::new()
+            .name("soflo-voice-transcription".into())
+            .spawn(move || run_voice_jobs(receiver))
+            .expect("could not start SoFlo voice worker");
         sender
     })
 }
@@ -4341,7 +5384,15 @@ fn run_voice_jobs(receiver: mpsc::Receiver<VoiceTranscriptionJob>) {
         };
         if let Err(error) = result {
             if let Ok(connection) = job.database.open() {
-                let _ = update_recording_status(&connection, &job.lecture_id, "transcription_failed", &format!("Audio is safe, but transcription needs attention: {}", error));
+                let _ = update_recording_status(
+                    &connection,
+                    &job.lecture_id,
+                    "transcription_failed",
+                    &format!(
+                        "Audio is safe, but transcription needs attention: {}",
+                        error
+                    ),
+                );
             }
             emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
         }
@@ -4354,64 +5405,141 @@ fn write_pcm_wave(path: &Path, pcm: &[u8]) -> CommandResult<()> {
     let block_align = 2u16;
     let data_len = pcm.len() as u32;
     file.write_all(b"RIFF").map_err(|error| error.to_string())?;
-    file.write_all(&(36u32 + data_len).to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(b"WAVEfmt ").map_err(|error| error.to_string())?;
-    file.write_all(&16u32.to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&1u16.to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&1u16.to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&(VOICE_SAMPLE_RATE as u32).to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&byte_rate.to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&block_align.to_le_bytes()).map_err(|error| error.to_string())?;
-    file.write_all(&16u16.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&(36u32 + data_len).to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(b"WAVEfmt ")
+        .map_err(|error| error.to_string())?;
+    file.write_all(&16u32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&(VOICE_SAMPLE_RATE as u32).to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&byte_rate.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&block_align.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&16u16.to_le_bytes())
+        .map_err(|error| error.to_string())?;
     file.write_all(b"data").map_err(|error| error.to_string())?;
-    file.write_all(&data_len.to_le_bytes()).map_err(|error| error.to_string())?;
+    file.write_all(&data_len.to_le_bytes())
+        .map_err(|error| error.to_string())?;
     file.write_all(pcm).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())
 }
 
 fn whisper_cli_path(app: &tauri::AppHandle) -> CommandResult<PathBuf> {
-    let bundled = app.path().resource_dir().ok().map(|directory| directory.join("resources").join("whisper").join("whisper-cli.exe"));
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("whisper").join("whisper-cli.exe");
-    bundled.filter(|path| path.is_file()).or_else(|| development.is_file().then_some(development)).ok_or_else(|| "SoFlo's private transcription helper is missing. Reinstall SoFlo to restore it.".to_string())
+    let bundled = app.path().resource_dir().ok().map(|directory| {
+        directory
+            .join("resources")
+            .join("whisper")
+            .join("whisper-cli.exe")
+    });
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("whisper")
+        .join("whisper-cli.exe");
+    bundled
+        .filter(|path| path.is_file())
+        .or_else(|| development.is_file().then_some(development))
+        .ok_or_else(|| {
+            "SoFlo's private transcription helper is missing. Reinstall SoFlo to restore it."
+                .to_string()
+        })
 }
 
 fn transcript_offset(value: &serde_json::Value) -> Option<i64> {
-    value.as_i64().or_else(|| value.as_str().and_then(|text| {
-        let parts = text.replace(',', ".").split(':').map(str::parse::<f64>).collect::<Result<Vec<_>, _>>().ok()?;
-        match parts.as_slice() {
-            [seconds] => Some((seconds * 1000.0).round() as i64),
-            [minutes, seconds] => Some(((minutes * 60.0 + seconds) * 1000.0).round() as i64),
-            [hours, minutes, seconds] => Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0).round() as i64),
-            _ => None,
-        }
-    }))
+    value.as_i64().or_else(|| {
+        value.as_str().and_then(|text| {
+            let parts = text
+                .replace(',', ".")
+                .split(':')
+                .map(str::parse::<f64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            match parts.as_slice() {
+                [seconds] => Some((seconds * 1000.0).round() as i64),
+                [minutes, seconds] => Some(((minutes * 60.0 + seconds) * 1000.0).round() as i64),
+                [hours, minutes, seconds] => {
+                    Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0).round() as i64)
+                }
+                _ => None,
+            }
+        })
+    })
 }
 
-fn transcribe_pcm_with_cli(app: &tauri::AppHandle, model_path: &str, pcm: &[u8], workspace: &Path) -> CommandResult<Vec<(i64, i64, String)>> {
+fn transcribe_pcm_with_cli(
+    app: &tauri::AppHandle,
+    model_path: &str,
+    pcm: &[u8],
+    workspace: &Path,
+) -> CommandResult<Vec<(i64, i64, String)>> {
     let input_path = workspace.join("chunk.wav");
     let output_prefix = workspace.join("chunk");
     let json_path = workspace.join("chunk.json");
     let _ = fs::remove_file(&json_path);
     write_pcm_wave(&input_path, pcm)?;
     let mut command = Command::new(whisper_cli_path(app)?);
-    command.args(["-m", model_path, "-f", &input_path.to_string_lossy(), "-l", "en", "-oj", "-of", &output_prefix.to_string_lossy(), "-nt"]);
+    command.args([
+        "-m",
+        model_path,
+        "-f",
+        &input_path.to_string_lossy(),
+        "-l",
+        "en",
+        "-oj",
+        "-of",
+        &output_prefix.to_string_lossy(),
+        "-nt",
+    ]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let output = command.output().map_err(|_| "SoFlo could not start its private transcription helper.".to_string())?;
-    if !output.status.success() { return Err("SoFlo's private transcription helper could not read this audio.".into()); }
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(&json_path).map_err(|_| "SoFlo could not read the local transcription result.".to_string())?).map_err(|_| "SoFlo could not read the local transcription result.".to_string())?;
-    let segments = value.get("transcription").or_else(|| value.get("segments")).and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    let output = command
+        .output()
+        .map_err(|_| "SoFlo could not start its private transcription helper.".to_string())?;
+    if !output.status.success() {
+        return Err("SoFlo's private transcription helper could not read this audio.".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(&json_path)
+            .map_err(|_| "SoFlo could not read the local transcription result.".to_string())?,
+    )
+    .map_err(|_| "SoFlo could not read the local transcription result.".to_string())?;
+    let segments = value
+        .get("transcription")
+        .or_else(|| value.get("segments"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut result = Vec::new();
     for item in segments {
-        let text = item.get("text").and_then(|value| value.as_str()).unwrap_or_default().trim().to_string();
-        if text.is_empty() { continue; }
+        let text = item
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
         let offsets = item.get("offsets").unwrap_or(&serde_json::Value::Null);
         let timestamps = item.get("timestamps").unwrap_or(&serde_json::Value::Null);
-        let start = offsets.get("from").and_then(transcript_offset).or_else(|| timestamps.get("from").and_then(transcript_offset)).unwrap_or(0);
-        let end = offsets.get("to").and_then(transcript_offset).or_else(|| timestamps.get("to").and_then(transcript_offset)).unwrap_or(start);
+        let start = offsets
+            .get("from")
+            .and_then(transcript_offset)
+            .or_else(|| timestamps.get("from").and_then(transcript_offset))
+            .unwrap_or(0);
+        let end = offsets
+            .get("to")
+            .and_then(transcript_offset)
+            .or_else(|| timestamps.get("to").and_then(transcript_offset))
+            .unwrap_or(start);
         result.push((start, end, text));
     }
     Ok(result)
@@ -4423,13 +5551,43 @@ fn refresh_lecture_speaker_labels(connection: &Connection, lecture_id: &str) -> 
     // turns become a neutral secondary speaker, while the sustained majority
     // is only called Professor once it has a meaningful duration advantage.
     let mut statement = connection.prepare("SELECT id, start_ms, end_ms, text FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, id").map_err(|error| error.to_string())?;
-    let segments = statement.query_map([lecture_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    let primary_ms: i64 = segments.iter().filter(|(_, _, _, text)| !text.trim_end().ends_with('?')).map(|(_, start, end, _)| (end - start).max(0)).sum();
-    let secondary_ms: i64 = segments.iter().filter(|(_, _, _, text)| text.trim_end().ends_with('?')).map(|(_, start, end, _)| (end - start).max(0)).sum();
+    let segments = statement
+        .query_map([lecture_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let primary_ms: i64 = segments
+        .iter()
+        .filter(|(_, _, _, text)| !text.trim_end().ends_with('?'))
+        .map(|(_, start, end, _)| (end - start).max(0))
+        .sum();
+    let secondary_ms: i64 = segments
+        .iter()
+        .filter(|(_, _, _, text)| text.trim_end().ends_with('?'))
+        .map(|(_, start, end, _)| (end - start).max(0))
+        .sum();
     let professor_confident = primary_ms >= 60_000 && primary_ms >= secondary_ms.saturating_mul(3);
     for (id, _start, _end, text) in segments {
-        let label = if text.trim_end().ends_with('?') { "Speaker 2" } else if professor_confident { "Professor" } else { "Speaker 1" };
-        connection.execute("UPDATE lecture_transcript_segments SET speaker=?1 WHERE id=?2", params![label, id]).map_err(|error| error.to_string())?;
+        let label = if text.trim_end().ends_with('?') {
+            "Speaker 2"
+        } else if professor_confident {
+            "Professor"
+        } else {
+            "Speaker 1"
+        };
+        connection
+            .execute(
+                "UPDATE lecture_transcript_segments SET speaker=?1 WHERE id=?2",
+                params![label, id],
+            )
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -4444,23 +5602,49 @@ fn transcribe_lecture_chunk(job: &VoiceTranscriptionJob) -> CommandResult<()> {
     ).optional().map_err(|error| error.to_string())?;
     // A newer import may replace one while old jobs are still waiting in the
     // shared worker queue. Those obsolete chunks should quietly disappear.
-    let Some((start_ms, end_ms, byte_offset, byte_length, state)) = chunk else { return Ok(()); };
-    if state == "complete" { return Ok(()); }
-    update_recording_status(&connection, &job.lecture_id, if recording.state == "recording" { "recording" } else { "transcribing" }, "Transcribing your lecture…")?;
-    let raw_path = recording.raw_audio_path.ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
+    let Some((start_ms, end_ms, byte_offset, byte_length, state)) = chunk else {
+        return Ok(());
+    };
+    if state == "complete" {
+        return Ok(());
+    }
+    update_recording_status(
+        &connection,
+        &job.lecture_id,
+        if recording.state == "recording" {
+            "recording"
+        } else {
+            "transcribing"
+        },
+        "Transcribing your lecture…",
+    )?;
+    let raw_path = recording
+        .raw_audio_path
+        .ok_or_else(|| "SoFlo could not find the local recording file.".to_string())?;
     let mut source = fs::File::open(raw_path).map_err(|error| error.to_string())?;
-    source.seek(SeekFrom::Start(byte_offset as u64)).map_err(|error| error.to_string())?;
+    source
+        .seek(SeekFrom::Start(byte_offset as u64))
+        .map_err(|error| error.to_string())?;
     let mut bytes = vec![0u8; byte_length as usize];
-    source.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    source
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
     if bytes.len() < 3200 {
         connection.execute("UPDATE lecture_recording_chunks SET state='complete' WHERE lecture_id=?1 AND chunk_index=?2", params![job.lecture_id, job.chunk_index]).map_err(|error| error.to_string())?;
         connection.execute("UPDATE lecture_recordings SET pending_chunks=MAX(0, pending_chunks-1), updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&job.lecture_id]).map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let workspace = lecture_recordings_dir(&job.database, &job.lecture_id)?.join("transcription").join(format!("{:06}", job.chunk_index));
+    let workspace = lecture_recordings_dir(&job.database, &job.lecture_id)?
+        .join("transcription")
+        .join(format!("{:06}", job.chunk_index));
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
     let transcribed = transcribe_pcm_with_cli(&job.app, &job.model_path, &bytes, &workspace)?;
-    connection.execute("DELETE FROM lecture_transcript_segments WHERE lecture_id=?1 AND chunk_index=?2", params![job.lecture_id, job.chunk_index]).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM lecture_transcript_segments WHERE lecture_id=?1 AND chunk_index=?2",
+            params![job.lecture_id, job.chunk_index],
+        )
+        .map_err(|error| error.to_string())?;
     for (relative_start, relative_end, text) in transcribed {
         let segment_start = start_ms + relative_start;
         let segment_end = (start_ms + relative_end).min(end_ms);
@@ -4485,20 +5669,43 @@ fn discard_lecture_audio(database: &Database, lecture_id: &str) -> CommandResult
 
 fn finalize_lecture_recording_job(job: &VoiceTranscriptionJob) -> CommandResult<()> {
     let connection = job.database.open()?;
-    let state: Option<String> = connection.query_row("SELECT state FROM lecture_recordings WHERE lecture_id=?1", [&job.lecture_id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
-    let Some(state) = state else { return Ok(()); };
-    if !matches!(state.as_str(), "queued" | "transcribing") { return Ok(()); }
+    let state: Option<String> = connection
+        .query_row(
+            "SELECT state FROM lecture_recordings WHERE lecture_id=?1",
+            [&job.lecture_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(state) = state else {
+        return Ok(());
+    };
+    if !matches!(state.as_str(), "queued" | "transcribing") {
+        return Ok(());
+    }
     let pending: i64 = connection.query_row("SELECT COUNT(*) FROM lecture_recording_chunks WHERE lecture_id=?1 AND state != 'complete'", [&job.lecture_id], |row| row.get(0)).map_err(|error| error.to_string())?;
     // Ignore stale finalize jobs until the replacement import's chunks finish.
-    if pending > 0 { return Ok(()); }
-    update_recording_status(&connection, &job.lecture_id, "finalizing", "Transcript complete. Removing temporary audio…")?;
+    if pending > 0 {
+        return Ok(());
+    }
+    update_recording_status(
+        &connection,
+        &job.lecture_id,
+        "finalizing",
+        "Transcript complete. Removing temporary audio…",
+    )?;
     drop(connection);
     emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
     discard_lecture_audio(&job.database, &job.lecture_id)?;
     let connection = job.database.open()?;
     connection.execute("UPDATE lecture_recordings SET state='analyzing', duration_ms=captured_ms, status_message='Preparing lecture analysis…', stopped_at=COALESCE(stopped_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&job.lecture_id]).map_err(|error| error.to_string())?;
     emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
-    update_recording_status(&connection, &job.lecture_id, "complete", "Transcript is ready. Use the AI button to append organized notes to your lecture paper.")?;
+    update_recording_status(
+        &connection,
+        &job.lecture_id,
+        "complete",
+        "Transcript is ready. Use the AI button to append organized notes to your lecture paper.",
+    )?;
     emit_lecture_recording_update(&job.app, &job.database, &job.lecture_id);
     Ok(())
 }
@@ -4510,7 +5717,11 @@ fn clean_lecture_segment(text: &str) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut words = Vec::new();
     for word in compact.split(' ') {
-        if words.last().is_some_and(|previous: &&str| previous.eq_ignore_ascii_case(word)) && word.len() > 2 {
+        if words
+            .last()
+            .is_some_and(|previous: &&str| previous.eq_ignore_ascii_case(word))
+            && word.len() > 2
+        {
             continue;
         }
         words.push(word);
@@ -4518,17 +5729,38 @@ fn clean_lecture_segment(text: &str) -> String {
     words.join(" ").trim().to_string()
 }
 
-fn stored_lecture_transcripts(connection: &Connection, lecture_id: &str) -> CommandResult<(String, String)> {
+fn stored_lecture_transcripts(
+    connection: &Connection,
+    lecture_id: &str,
+) -> CommandResult<(String, String)> {
     let mut statement = connection.prepare("SELECT start_ms, end_ms, speaker, text FROM lecture_transcript_segments WHERE lecture_id=?1 ORDER BY start_ms, chunk_index, id").map_err(|error| error.to_string())?;
-    let rows = statement.query_map([lecture_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([lecture_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
     let mut raw = Vec::new();
     let mut clean = Vec::new();
     for row in rows {
         let (start, end, speaker, text) = row.map_err(|error| error.to_string())?;
-        let prefix = format!("[{:02}:{:02}–{:02}:{:02} · {}]", start / 60_000, (start / 1_000) % 60, end / 60_000, (end / 1_000) % 60, speaker);
+        let prefix = format!(
+            "[{:02}:{:02}–{:02}:{:02} · {}]",
+            start / 60_000,
+            (start / 1_000) % 60,
+            end / 60_000,
+            (end / 1_000) % 60,
+            speaker
+        );
         raw.push(format!("{} {}", prefix, text.trim()));
         let cleaned = clean_lecture_segment(&text);
-        if !cleaned.is_empty() { clean.push(format!("{} {}", prefix, cleaned)); }
+        if !cleaned.is_empty() {
+            clean.push(format!("{} {}", prefix, cleaned));
+        }
     }
     Ok((raw.join("\n"), clean.join("\n")))
 }
@@ -4545,19 +5777,31 @@ fn lecture_analysis_context(connection: &Connection, lecture_id: &str) -> Comman
 }
 
 fn lecture_timestamp_label(timestamp_ms: i64) -> String {
-    format!("{:02}:{:02}", timestamp_ms.max(0) / 60_000, (timestamp_ms.max(0) / 1_000) % 60)
+    format!(
+        "{:02}:{:02}",
+        timestamp_ms.max(0) / 60_000,
+        (timestamp_ms.max(0) / 1_000) % 60
+    )
 }
 
-fn compact_lecture_note_timeline(connection: &Connection, lecture_id: &str) -> CommandResult<(String, String)> {
-    let latest_notes = connection.query_row(
-        "SELECT content_plain FROM lectures WHERE id=?1",
-        [lecture_id],
-        |row| row.get::<_, String>(0),
-    ).map_err(|_| "That lecture could not be found.".to_string())?;
+fn compact_lecture_note_timeline(
+    connection: &Connection,
+    lecture_id: &str,
+) -> CommandResult<(String, String)> {
+    let latest_notes = connection
+        .query_row(
+            "SELECT content_plain FROM lectures WHERE id=?1",
+            [lecture_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| "That lecture could not be found.".to_string())?;
     let mut statement = connection.prepare(
         "SELECT timestamp_ms, content_plain FROM lecture_note_checkpoints WHERE lecture_id=?1 ORDER BY timestamp_ms ASC, created_at ASC"
     ).map_err(|error| error.to_string())?;
-    let checkpoints = statement.query_map([lecture_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+    let checkpoints = statement
+        .query_map([lecture_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -4574,7 +5818,8 @@ fn compact_lecture_note_timeline(connection: &Connection, lecture_id: &str) -> C
         .into_iter()
         .enumerate()
         .filter_map(|(index, checkpoint)| {
-            (index == 0 || index + 1 == checkpoint_count || index % stride == 0).then_some(checkpoint)
+            (index == 0 || index + 1 == checkpoint_count || index % stride == 0)
+                .then_some(checkpoint)
         })
         .collect::<Vec<_>>();
     let mut entries = Vec::new();
@@ -4582,13 +5827,26 @@ fn compact_lecture_note_timeline(connection: &Connection, lecture_id: &str) -> C
     for (timestamp_ms, snapshot) in sampled {
         let normalized = snapshot.split_whitespace().collect::<Vec<_>>().join(" ");
         let prior_normalized = prior.split_whitespace().collect::<Vec<_>>().join(" ");
-        let changed = normalized.strip_prefix(&prior_normalized).unwrap_or(&normalized).trim();
+        let changed = normalized
+            .strip_prefix(&prior_normalized)
+            .unwrap_or(&normalized)
+            .trim();
         prior = snapshot;
-        if changed.is_empty() { continue; }
+        if changed.is_empty() {
+            continue;
+        }
         let mut transcript = connection.prepare(
             "SELECT text FROM lecture_transcript_segments WHERE lecture_id=?1 AND end_ms >= ?2 AND start_ms <= ?3 ORDER BY start_ms ASC LIMIT 10"
         ).map_err(|error| error.to_string())?;
-        let nearby = transcript.query_map(params![lecture_id, timestamp_ms.saturating_sub(45_000), timestamp_ms + 90_000], |row| row.get::<_, String>(0))
+        let nearby = transcript
+            .query_map(
+                params![
+                    lecture_id,
+                    timestamp_ms.saturating_sub(45_000),
+                    timestamp_ms + 90_000
+                ],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
@@ -4608,7 +5866,8 @@ fn normalize_note_fragment(value: &str) -> String {
 }
 
 fn clean_lecture_markdown_line(value: &str) -> String {
-    value.trim()
+    value
+        .trim()
         .trim_matches('#')
         .trim()
         .trim_start_matches("- ")
@@ -4655,13 +5914,17 @@ fn push_lecture_paragraphs(nodes: &mut Vec<serde_json::Value>, text: String) {
     let mut paragraph = String::new();
     for sentence in text.split_inclusive(|character: char| matches!(character, '.' | '!' | '?')) {
         let sentence = sentence.trim();
-        if sentence.is_empty() { continue; }
-        let would_exceed_target = !paragraph.is_empty()
-            && paragraph.len() + 1 + sentence.len() > TARGET_CHARS;
+        if sentence.is_empty() {
+            continue;
+        }
+        let would_exceed_target =
+            !paragraph.is_empty() && paragraph.len() + 1 + sentence.len() > TARGET_CHARS;
         if would_exceed_target && paragraph.len() >= MIN_BREAK_CHARS {
             nodes.push(lecture_paragraph_node(std::mem::take(&mut paragraph)));
         }
-        if !paragraph.is_empty() { paragraph.push(' '); }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
         paragraph.push_str(sentence);
     }
     if !paragraph.trim().is_empty() {
@@ -4671,15 +5934,19 @@ fn push_lecture_paragraphs(nodes: &mut Vec<serde_json::Value>, text: String) {
 
 fn lecture_code_block_node(lines: Vec<String>) -> Option<serde_json::Value> {
     let text = lines.join("\n").trim_end().to_string();
-    (!text.trim().is_empty()).then(|| serde_json::json!({
-        "type": "codeBlock",
-        "attrs": { "language": "python" },
-        "content": [{ "type": "text", "text": text }]
-    }))
+    (!text.trim().is_empty()).then(|| {
+        serde_json::json!({
+            "type": "codeBlock",
+            "attrs": { "language": "python" },
+            "content": [{ "type": "text", "text": text }]
+        })
+    })
 }
 
 fn flush_lecture_bullets(nodes: &mut Vec<serde_json::Value>, bullets: &mut Vec<String>) {
-    if bullets.is_empty() { return; }
+    if bullets.is_empty() {
+        return;
+    }
     let items = std::mem::take(bullets).into_iter().map(|text| {
         serde_json::json!({ "type": "listItem", "content": [lecture_paragraph_node(text)] })
     }).collect::<Vec<_>>();
@@ -4695,7 +5962,9 @@ fn lecture_markdown_to_editor_content(markdown: &str) -> String {
         if trimmed.starts_with("```") {
             flush_lecture_bullets(&mut nodes, &mut bullets);
             if let Some(lines) = code_lines.take() {
-                if let Some(node) = lecture_code_block_node(lines) { nodes.push(node); }
+                if let Some(node) = lecture_code_block_node(lines) {
+                    nodes.push(node);
+                }
             } else {
                 code_lines = Some(Vec::new());
             }
@@ -4724,10 +5993,14 @@ fn lecture_markdown_to_editor_content(markdown: &str) -> String {
         }
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
             let text = clean_lecture_markdown_line(trimmed);
-            if !text.is_empty() { bullets.push(text); }
+            if !text.is_empty() {
+                bullets.push(text);
+            }
             continue;
         }
-        let bold_heading = trimmed.strip_prefix("**").and_then(|text| text.strip_suffix("**"));
+        let bold_heading = trimmed
+            .strip_prefix("**")
+            .and_then(|text| text.strip_suffix("**"));
         if let Some(text) = bold_heading.filter(|text| !text.contains("**")) {
             flush_lecture_bullets(&mut nodes, &mut bullets);
             let text = clean_lecture_markdown_line(text);
@@ -4738,18 +6011,25 @@ fn lecture_markdown_to_editor_content(markdown: &str) -> String {
         }
         flush_lecture_bullets(&mut nodes, &mut bullets);
         let text = clean_lecture_markdown_line(trimmed);
-        if !text.is_empty() { push_lecture_paragraphs(&mut nodes, text); }
+        if !text.is_empty() {
+            push_lecture_paragraphs(&mut nodes, text);
+        }
     }
     if let Some(lines) = code_lines.take() {
-        if let Some(node) = lecture_code_block_node(lines) { nodes.push(node); }
+        if let Some(node) = lecture_code_block_node(lines) {
+            nodes.push(node);
+        }
     }
     flush_lecture_bullets(&mut nodes, &mut bullets);
-    if nodes.is_empty() { nodes.push(serde_json::json!({ "type": "paragraph" })); }
+    if nodes.is_empty() {
+        nodes.push(serde_json::json!({ "type": "paragraph" }));
+    }
     serde_json::json!({ "type": "doc", "content": nodes }).to_string()
 }
 
 fn lecture_markdown_to_plain_text(markdown: &str) -> String {
-    markdown.lines()
+    markdown
+        .lines()
         .filter(|line| !line.trim().starts_with("```"))
         .map(clean_lecture_markdown_line)
         .filter(|line| !line.is_empty() && line != "---")
@@ -4766,19 +6046,24 @@ fn usable_lecture_notes(value: &str, transcript_part: &str) -> Option<String> {
     }
     // A model occasionally echoes the source when it is interrupted. That is a
     // transcript, not study notes, and must never replace a lecture paper.
-    let likely_transcript_echo = normalized_notes.len() >= normalized_transcript.len().saturating_mul(2) / 3
+    let likely_transcript_echo = normalized_notes.len()
+        >= normalized_transcript.len().saturating_mul(2) / 3
         && normalized_notes.matches(" · ").count() >= 4;
-    let timestamp_sections = notes.lines().filter(|line| {
-        let line = line.trim();
-        (line.starts_with('[') || line.starts_with('#') || line.starts_with("**["))
-            && line.contains(':')
-            && line.contains("Professor")
-    }).count();
+    let timestamp_sections = notes
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            (line.starts_with('[') || line.starts_with('#') || line.starts_with("**["))
+                && line.contains(':')
+                && line.contains("Professor")
+        })
+        .count();
     (!likely_transcript_echo && timestamp_sections < 3).then_some(notes)
 }
 
 fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
-    let highlights = detailed_notes.lines()
+    let highlights = detailed_notes
+        .lines()
         .map(clean_lecture_markdown_line)
         .filter(|line| line.len() > 18)
         .take(18)
@@ -4792,21 +6077,39 @@ fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
     })
 }
 
-fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, detailed_notes: &str) -> CommandResult<bool> {
+fn populate_lecture_with_study_notes(
+    database: &Database,
+    lecture_id: &str,
+    detailed_notes: &str,
+) -> CommandResult<bool> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let (title, current_content, current_plain, revision): (String, String, String, i32) = transaction.query_row(
-        "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
-        [lecture_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).map_err(|_| "That lecture could not be found.".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let (title, current_content, current_plain, revision): (String, String, String, i32) =
+        transaction
+            .query_row(
+                "SELECT title, content, content_plain, revision FROM lectures WHERE id=?1",
+                [lecture_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|_| "That lecture could not be found.".to_string())?;
     let generated_content = lecture_markdown_to_editor_content(detailed_notes);
-    let generated_nodes = serde_json::from_str::<serde_json::Value>(&generated_content).ok()
-        .and_then(|value| value.get("content").and_then(|items| items.as_array()).cloned())
+    let generated_nodes = serde_json::from_str::<serde_json::Value>(&generated_content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("content")
+                .and_then(|items| items.as_array())
+                .cloned()
+        })
         .unwrap_or_default();
     let mut content_value = serde_json::from_str::<serde_json::Value>(&current_content)
         .unwrap_or_else(|_| serde_json::json!({ "type": "doc", "content": [] }));
-    if let Some(nodes) = content_value.get_mut("content").and_then(|items| items.as_array_mut()) {
+    if let Some(nodes) = content_value
+        .get_mut("content")
+        .and_then(|items| items.as_array_mut())
+    {
         // The formatted result is the new lecture paper. The exact prior paper
         // is saved as a revision below before this replacement occurs.
         *nodes = generated_nodes;
@@ -4814,7 +6117,9 @@ fn populate_lecture_with_study_notes(database: &Database, lecture_id: &str, deta
     let content = serde_json::to_string(&content_value).map_err(|error| error.to_string())?;
     let generated_plain = lecture_markdown_to_plain_text(detailed_notes);
     let plain = generated_plain;
-    if plain.is_empty() { return Ok(false); }
+    if plain.is_empty() {
+        return Ok(false);
+    }
     transaction.execute(
         "INSERT INTO lecture_revisions (id, lecture_id, title, content, content_plain, revision, source) VALUES (?1,?2,?3,?4,?5,?6,'user')",
         params![Uuid::new_v4().to_string(), lecture_id, title, current_content, current_plain, revision],
@@ -4856,41 +6161,62 @@ fn create_lecture_note_suggestions(
         lecture_digest.chars().take(24_000).collect::<String>(),
     );
     let output = local_chat_text(client, port, system, &prompt, 4_200)?;
-    let json = json_array_from_response(&output).ok_or_else(|| "The local AI model returned unreadable lecture-note suggestions.".to_string())?;
-    let suggestions = serde_json::from_str::<Vec<LectureNoteSuggestion>>(&json).map_err(|_| "The local AI model returned unreadable lecture-note suggestions.".to_string())?;
+    let json = json_array_from_response(&output).ok_or_else(|| {
+        "The local AI model returned unreadable lecture-note suggestions.".to_string()
+    })?;
+    let suggestions = serde_json::from_str::<Vec<LectureNoteSuggestion>>(&json).map_err(|_| {
+        "The local AI model returned unreadable lecture-note suggestions.".to_string()
+    })?;
     let normalized_notes = normalize_note_fragment(&student_notes).to_lowercase();
     let mut seen = HashSet::new();
-    Ok(suggestions.into_iter().filter_map(|suggestion| {
-        let original = suggestion.original.trim().to_string();
-        let replacement = suggestion.replacement.trim().to_string();
-        let normalized_original = normalize_note_fragment(&original);
-        let normalized_replacement = normalize_note_fragment(&replacement);
-        let original_words = normalized_original.split_whitespace().count();
-        let replacement_words = normalized_replacement.split_whitespace().count();
-        let valid = original_words >= 3
-            && original_words <= 35
-            && replacement_words > original_words
-            && replacement_words <= 70
-            && original.len() <= 360
-            && replacement.len() <= 760
-            && normalized_notes.contains(&normalized_original.to_lowercase())
-            && normalized_replacement.to_lowercase().starts_with(&normalized_original.to_lowercase())
-            && matches!(suggestion.kind.trim().to_lowercase().as_str(), "bridge" | "clarify");
-        if !valid || !seen.insert(normalized_original.to_lowercase()) { return None; }
-        Some(LectureNoteSuggestion {
-            original,
-            replacement,
-            reason: suggestion.reason.trim().chars().take(280).collect(),
-            timestamp: suggestion.timestamp.trim().chars().take(12).collect(),
-            kind: suggestion.kind.trim().to_lowercase(),
+    Ok(suggestions
+        .into_iter()
+        .filter_map(|suggestion| {
+            let original = suggestion.original.trim().to_string();
+            let replacement = suggestion.replacement.trim().to_string();
+            let normalized_original = normalize_note_fragment(&original);
+            let normalized_replacement = normalize_note_fragment(&replacement);
+            let original_words = normalized_original.split_whitespace().count();
+            let replacement_words = normalized_replacement.split_whitespace().count();
+            let valid = original_words >= 3
+                && original_words <= 35
+                && replacement_words > original_words
+                && replacement_words <= 70
+                && original.len() <= 360
+                && replacement.len() <= 760
+                && normalized_notes.contains(&normalized_original.to_lowercase())
+                && normalized_replacement
+                    .to_lowercase()
+                    .starts_with(&normalized_original.to_lowercase())
+                && matches!(
+                    suggestion.kind.trim().to_lowercase().as_str(),
+                    "bridge" | "clarify"
+                );
+            if !valid || !seen.insert(normalized_original.to_lowercase()) {
+                return None;
+            }
+            Some(LectureNoteSuggestion {
+                original,
+                replacement,
+                reason: suggestion.reason.trim().chars().take(280).collect(),
+                timestamp: suggestion.timestamp.trim().chars().take(12).collect(),
+                kind: suggestion.kind.trim().to_lowercase(),
+            })
         })
-    }).take(24).collect())
+        .take(24)
+        .collect())
 }
 
-fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_id: &str) -> CommandResult<()> {
+fn create_lecture_analysis(
+    app: &tauri::AppHandle,
+    database: &Database,
+    lecture_id: &str,
+) -> CommandResult<()> {
     let connection = database.open()?;
     let settings = get_settings(&connection, None)?;
-    if !settings.ai_enabled || (!settings.online_ai_enabled && settings.ai_model_path.trim().is_empty()) {
+    if !settings.ai_enabled
+        || (!settings.online_ai_enabled && settings.ai_model_path.trim().is_empty())
+    {
         return Err("Enable General AI to create the lecture analysis.".into());
     }
     let model_path = resolve_ai_model_path(app, &remote_ai_reference(&settings)?)?;
@@ -4898,18 +6224,39 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     let lecture_context = lecture_analysis_context(&connection, lecture_id)?;
     let organizing_written_notes = cleaned_transcript.trim().is_empty();
     let written_notes = connection
-        .query_row("SELECT content_plain FROM lectures WHERE id=?1", [lecture_id], |row| row.get::<_, String>(0))
+        .query_row(
+            "SELECT content_plain FROM lectures WHERE id=?1",
+            [lecture_id],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|_| "That lecture could not be found.".to_string())?;
     let source_notes = lecture_analysis_source(&written_notes, &cleaned_transcript);
-    if source_notes.trim().is_empty() { return Err("Write a little in the lecture paper or finish a transcript before organizing it.".into()); }
+    if source_notes.trim().is_empty() {
+        return Err(
+            "Write a little in the lecture paper or finish a transcript before organizing it."
+                .into(),
+        );
+    }
     connection.execute("INSERT INTO lecture_analyses (lecture_id, status, raw_transcript, cleaned_transcript) VALUES (?1,'analyzing',?2,?3) ON CONFLICT(lecture_id) DO UPDATE SET status='analyzing', raw_transcript=excluded.raw_transcript, cleaned_transcript=excluded.cleaned_transcript, updated_at=CURRENT_TIMESTAMP", params![lecture_id, raw_transcript, cleaned_transcript]).map_err(|error| error.to_string())?;
     let port = ensure_ai_server(&model_path, app)?;
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(150))
+        .build()
+        .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
     let chunks = split_source_for_ai(&source_notes, AI_SOURCE_CHUNK_CHARS);
     let mut notes = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
         let progress_connection = database.open()?;
-        update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Building detailed study notes: part {} of {}...", index + 1, chunks.len()))?;
+        update_recording_status(
+            &progress_connection,
+            lecture_id,
+            "analyzing",
+            &format!(
+                "Building detailed study notes: part {} of {}...",
+                index + 1,
+                chunks.len()
+            ),
+        )?;
         emit_lecture_recording_update(app, database, lecture_id);
         let system = if organizing_written_notes {
             "You are SoFlo's meticulous lecture note organizer. Reorganize the student's existing lecture-paper notes into the complete replacement lecture paper. Preserve every academic fact, definition, reasoning step, worked example, correction, assignment, due date, and uncertainty. Do not invent information and do not merely echo the source as one paragraph. Return structured Markdown only: use H2 for main topics, H3 for subtopics, concise paragraphs, bullets, numbered steps, and tables only when useful. Do not add a document title, an H1 heading, a divider, timestamps, or speaker labels."
@@ -4948,10 +6295,25 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     let mut digest_parts = Vec::with_capacity(digest_chunks.len());
     for (index, chunk) in digest_chunks.iter().enumerate() {
         let progress_connection = database.open()?;
-        update_recording_status(&progress_connection, lecture_id, "analyzing", &format!("Organizing your lecture guide: section {} of {}...", index + 1, digest_chunks.len()))?;
+        update_recording_status(
+            &progress_connection,
+            lecture_id,
+            "analyzing",
+            &format!(
+                "Organizing your lecture guide: section {} of {}...",
+                index + 1,
+                digest_chunks.len()
+            ),
+        )?;
         emit_lecture_recording_update(app, database, lecture_id);
         let system = "You are SoFlo's lecture analyst. Condense these detailed chronological study notes into a faithful sectional digest for a final course guide. Preserve all concrete facts, definitions, examples, assignments, questions, and cautions. Do not invent or remove meaningful academic content.";
-        let prompt = format!("LECTURE CONTEXT\n{}\n\nDETAILED NOTES SECTION {} OF {}\n\n{}", lecture_context, index + 1, digest_chunks.len(), chunk);
+        let prompt = format!(
+            "LECTURE CONTEXT\n{}\n\nDETAILED NOTES SECTION {} OF {}\n\n{}",
+            lecture_context,
+            index + 1,
+            digest_chunks.len(),
+            chunk
+        );
         let digest = local_chat_text(&client, port, system, &prompt, 1_200)
             .ok()
             .filter(|digest| !digest.trim().is_empty())
@@ -4964,12 +6326,39 @@ fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_
     let value: serde_json::Value = json_object_from_response(&output)
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_else(|| fallback_lecture_summary(&detailed_notes));
-    let array = |key: &str| value.get(key).and_then(|item| item.as_array()).map(|items| items.iter().filter_map(|item| item.as_str().map(|text| text.trim().to_string())).filter(|text| !text.is_empty()).take(36).collect::<Vec<_>>()).unwrap_or_default();
+    let array = |key: &str| {
+        value
+            .get(key)
+            .and_then(|item| item.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|text| text.trim().to_string()))
+                    .filter(|text| !text.is_empty())
+                    .take(36)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
     let progress_connection = database.open()?;
-    update_recording_status(&progress_connection, lecture_id, "analyzing", "Finding optional additions for your own notes...")?;
+    update_recording_status(
+        &progress_connection,
+        lecture_id,
+        "analyzing",
+        "Finding optional additions for your own notes...",
+    )?;
     emit_lecture_recording_update(app, database, lecture_id);
-    let note_suggestions = create_lecture_note_suggestions(&client, port, &progress_connection, lecture_id, &lecture_context, &detailed_notes).unwrap_or_default();
-    let auto_filled_lecture = populate_lecture_with_study_notes(database, lecture_id, &detailed_notes)?;
+    let note_suggestions = create_lecture_note_suggestions(
+        &client,
+        port,
+        &progress_connection,
+        lecture_id,
+        &lecture_context,
+        &detailed_notes,
+    )
+    .unwrap_or_default();
+    let auto_filled_lecture =
+        populate_lecture_with_study_notes(database, lecture_id, &detailed_notes)?;
     let connection = database.open()?;
     connection.execute("UPDATE lecture_analyses SET status='complete', overview=?1, key_points_json=?2, concepts_json=?3, questions_json=?4, next_steps_json=?5, detailed_notes=?6, note_suggestions_json=?7, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?8", params![value.get("overview").and_then(|item| item.as_str()).unwrap_or_default().trim(), serde_json::to_string(&array("keyPoints")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("concepts")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("questions")).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&array("nextSteps")).unwrap_or_else(|_| "[]".into()), detailed_notes, serde_json::to_string(&note_suggestions).unwrap_or_else(|_| "[]".into()), lecture_id]).map_err(|error| error.to_string())?;
     touch_ai_server();
@@ -4990,7 +6379,12 @@ pub fn retry_lecture_analysis(
     if !matches!(recording.state.as_str(), "complete" | "analysis_failed") {
         return Err("Finish the lecture transcript before retrying the analysis.".into());
     }
-    update_recording_status(&connection, &lecture_id, "analyzing", "Preparing lecture analysis…")?;
+    update_recording_status(
+        &connection,
+        &lecture_id,
+        "analyzing",
+        "Preparing lecture analysis…",
+    )?;
     let database_handle = database.inner().clone();
     let thread_app = app.clone();
     let thread_lecture_id = lecture_id.clone();
@@ -4999,7 +6393,13 @@ pub fn retry_lecture_analysis(
         if let Ok(connection) = database_handle.open() {
             let message = match result {
                 Ok(()) => ("complete", "Lecture analysis is ready.".to_string()),
-                Err(error) => ("analysis_failed", format!("Recording and transcript are ready, but analysis needs another try: {}", error)),
+                Err(error) => (
+                    "analysis_failed",
+                    format!(
+                        "Recording and transcript are ready, but analysis needs another try: {}",
+                        error
+                    ),
+                ),
             };
             let _ = update_recording_status(&connection, &thread_lecture_id, message.0, &message.1);
         }
@@ -5018,7 +6418,16 @@ pub fn queue_lecture_transcription(
     model_path: String,
 ) -> CommandResult<()> {
     let model_path = resolve_voice_model_path(&app, &model_path)?;
-    voice_job_sender().send(VoiceTranscriptionJob { app, database: database.inner().clone(), lecture_id, chunk_index, model_path, finalize: false }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
+    voice_job_sender()
+        .send(VoiceTranscriptionJob {
+            app,
+            database: database.inner().clone(),
+            lecture_id,
+            chunk_index,
+            model_path,
+            finalize: false,
+        })
+        .map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
 }
 
 #[tauri::command]
@@ -5031,22 +6440,55 @@ pub fn finish_lecture_recording(
     let model_path = resolve_voice_model_path(&app, &model_path)?;
     let connection = database.open()?;
     let recording = get_lecture_recording_from(&connection, &lecture_id)?;
-    if !matches!(recording.state.as_str(), "recording" | "interrupted" | "queued") { return Err("There is no active lecture recording to finish.".into()); }
+    if !matches!(
+        recording.state.as_str(),
+        "recording" | "interrupted" | "queued"
+    ) {
+        return Err("There is no active lecture recording to finish.".into());
+    }
     connection.execute("UPDATE lecture_recordings SET state='queued', status_message='Finishing the recording after the remaining transcript chunks.', stopped_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE lecture_id=?1", [&lecture_id]).map_err(|error| error.to_string())?;
     let mut statement = connection.prepare("SELECT chunk_index FROM lecture_recording_chunks WHERE lecture_id=?1 AND state != 'complete' ORDER BY chunk_index").map_err(|error| error.to_string())?;
-    let pending = statement.query_map([&lecture_id], |row| row.get::<_, i32>(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let pending = statement
+        .query_map([&lecture_id], |row| row.get::<_, i32>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     for chunk_index in pending {
-        voice_job_sender().send(VoiceTranscriptionJob { app: app.clone(), database: database.inner().clone(), lecture_id: lecture_id.clone(), chunk_index, model_path: model_path.clone(), finalize: false }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
+        voice_job_sender()
+            .send(VoiceTranscriptionJob {
+                app: app.clone(),
+                database: database.inner().clone(),
+                lecture_id: lecture_id.clone(),
+                chunk_index,
+                model_path: model_path.clone(),
+                finalize: false,
+            })
+            .map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())?;
     }
-    voice_job_sender().send(VoiceTranscriptionJob { app, database: database.inner().clone(), lecture_id, chunk_index: -1, model_path, finalize: true }).map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
+    voice_job_sender()
+        .send(VoiceTranscriptionJob {
+            app,
+            database: database.inner().clone(),
+            lecture_id,
+            chunk_index: -1,
+            model_path,
+            finalize: true,
+        })
+        .map_err(|_| "SoFlo's transcription worker is unavailable.".to_string())
 }
 
 #[tauri::command]
-pub fn recover_interrupted_lecture_recordings(database: State<'_, Database>) -> CommandResult<Vec<LectureRecording>> {
+pub fn recover_interrupted_lecture_recordings(
+    database: State<'_, Database>,
+) -> CommandResult<Vec<LectureRecording>> {
     let connection = database.open()?;
     connection.execute("UPDATE lecture_recordings SET state='interrupted', status_message=CASE WHEN source_kind='import' THEN 'Audio import was interrupted. The prepared audio is saved and can be finished.' ELSE 'Recording was interrupted. You can continue or finish the saved audio.' END, updated_at=CURRENT_TIMESTAMP WHERE state IN ('recording','importing','transcribing','queued','finalizing','analyzing')", []).map_err(|error| error.to_string())?;
     let mut statement = connection.prepare("SELECT lecture_id, state, source_kind, audio_path, raw_audio_path, duration_ms, captured_ms, transcribed_ms, pending_chunks, status_message, started_at, stopped_at, updated_at FROM lecture_recordings WHERE state='interrupted' ORDER BY updated_at DESC").map_err(|error| error.to_string())?;
-    let recordings = statement.query_map([], recording_from_row).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let recordings = statement
+        .query_map([], recording_from_row)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     Ok(recordings)
 }
 
@@ -5101,27 +6543,66 @@ fn docx_run(text: &str, marks: Option<&Vec<serde_json::Value>>) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let has_mark = |kind: &str| marks.is_some_and(|items| items.iter().any(|mark| mark.get("type").and_then(|value| value.as_str()) == Some(kind)));
+    let has_mark = |kind: &str| {
+        marks.is_some_and(|items| {
+            items
+                .iter()
+                .any(|mark| mark.get("type").and_then(|value| value.as_str()) == Some(kind))
+        })
+    };
     let mut properties = String::new();
-    if has_mark("bold") { properties.push_str("<w:b/>"); }
-    if has_mark("italic") { properties.push_str("<w:i/>"); }
-    if has_mark("underline") { properties.push_str("<w:u w:val=\"single\"/>"); }
-    if has_mark("strike") { properties.push_str("<w:strike/>"); }
-    if has_mark("superscript") { properties.push_str("<w:vertAlign w:val=\"superscript\"/>"); }
-    if has_mark("subscript") { properties.push_str("<w:vertAlign w:val=\"subscript\"/>"); }
-    if has_mark("code") { properties.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/><w:shd w:val=\"clear\" w:fill=\"EEEEEE\"/>"); }
-    format!("<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>", if properties.is_empty() { String::new() } else { format!("<w:rPr>{properties}</w:rPr>") }, docx_escape(text))
+    if has_mark("bold") {
+        properties.push_str("<w:b/>");
+    }
+    if has_mark("italic") {
+        properties.push_str("<w:i/>");
+    }
+    if has_mark("underline") {
+        properties.push_str("<w:u w:val=\"single\"/>");
+    }
+    if has_mark("strike") {
+        properties.push_str("<w:strike/>");
+    }
+    if has_mark("superscript") {
+        properties.push_str("<w:vertAlign w:val=\"superscript\"/>");
+    }
+    if has_mark("subscript") {
+        properties.push_str("<w:vertAlign w:val=\"subscript\"/>");
+    }
+    if has_mark("code") {
+        properties.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/><w:shd w:val=\"clear\" w:fill=\"EEEEEE\"/>");
+    }
+    format!(
+        "<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+        if properties.is_empty() {
+            String::new()
+        } else {
+            format!("<w:rPr>{properties}</w:rPr>")
+        },
+        docx_escape(text)
+    )
 }
 
 fn docx_inline(node: &serde_json::Value) -> String {
-    let node_type = node.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+    let node_type = node
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
     match node_type {
         "text" => docx_run(
-            node.get("text").and_then(|value| value.as_str()).unwrap_or_default(),
+            node.get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
             node.get("marks").and_then(|value| value.as_array()),
         ),
         "hardBreak" => "<w:r><w:br/></w:r>".into(),
-        "citationPlaceholder" => docx_run(node.get("attrs").and_then(|value| value.get("label")).and_then(|value| value.as_str()).unwrap_or("Citation detail"), None),
+        "citationPlaceholder" => docx_run(
+            node.get("attrs")
+                .and_then(|value| value.get("label"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("Citation detail"),
+            None,
+        ),
         _ => node
             .get("content")
             .and_then(|value| value.as_array())
@@ -5131,21 +6612,39 @@ fn docx_inline(node: &serde_json::Value) -> String {
 }
 
 fn docx_paragraph(content: &serde_json::Value, properties: &str, prefix: &str) -> String {
-    let children = content.as_array().map(|items| items.iter().map(docx_inline).collect::<String>()).unwrap_or_default();
-    let prefix = if prefix.is_empty() { String::new() } else { docx_run(prefix, None) };
+    let children = content
+        .as_array()
+        .map(|items| items.iter().map(docx_inline).collect::<String>())
+        .unwrap_or_default();
+    let prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        docx_run(prefix, None)
+    };
     format!("<w:p>{properties}{prefix}{children}</w:p>")
 }
 
 fn docx_list_item(node: &serde_json::Value, prefix: &str, output: &mut String) {
     let Some(children) = node.get("content").and_then(|value| value.as_array()) else {
-        output.push_str(&docx_paragraph(&serde_json::Value::Null, "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>", prefix));
+        output.push_str(&docx_paragraph(
+            &serde_json::Value::Null,
+            "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>",
+            prefix,
+        ));
         return;
     };
     let mut first = true;
     for child in children {
-        let node_type = child.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+        let node_type = child
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
         if node_type == "paragraph" {
-            output.push_str(&docx_paragraph(child.get("content").unwrap_or(&serde_json::Value::Null), "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>", if first { prefix } else { "" }));
+            output.push_str(&docx_paragraph(
+                child.get("content").unwrap_or(&serde_json::Value::Null),
+                "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>",
+                if first { prefix } else { "" },
+            ));
             first = false;
         } else {
             docx_blocks(child, output);
@@ -5155,20 +6654,44 @@ fn docx_list_item(node: &serde_json::Value, prefix: &str, output: &mut String) {
 
 fn docx_table(node: &serde_json::Value, output: &mut String) {
     output.push_str("<w:tbl><w:tblPr><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:left w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:right w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"B0B0B0\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"B0B0B0\"/></w:tblBorders></w:tblPr>");
-    for row in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+    for row in node
+        .get("content")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
         output.push_str("<w:tr>");
-        for cell in row.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
-            let is_header = cell.get("type").and_then(|value| value.as_str()) == Some("tableHeader");
+        for cell in row
+            .get("content")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let is_header =
+                cell.get("type").and_then(|value| value.as_str()) == Some("tableHeader");
             output.push_str("<w:tc>");
-            if is_header { output.push_str("<w:tcPr><w:shd w:val=\"clear\" w:fill=\"E7E7E7\"/></w:tcPr>"); }
+            if is_header {
+                output.push_str("<w:tcPr><w:shd w:val=\"clear\" w:fill=\"E7E7E7\"/></w:tcPr>");
+            }
             let mut wrote_paragraph = false;
-            for block in cell.get("content").and_then(|value| value.as_array()).into_iter().flatten() {
+            for block in cell
+                .get("content")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+            {
                 if block.get("type").and_then(|value| value.as_str()) == Some("paragraph") {
-                    output.push_str(&docx_paragraph(block.get("content").unwrap_or(&serde_json::Value::Null), "", ""));
+                    output.push_str(&docx_paragraph(
+                        block.get("content").unwrap_or(&serde_json::Value::Null),
+                        "",
+                        "",
+                    ));
                     wrote_paragraph = true;
                 }
             }
-            if !wrote_paragraph { output.push_str("<w:p/>"); }
+            if !wrote_paragraph {
+                output.push_str("<w:p/>");
+            }
             output.push_str("</w:tc>");
         }
         output.push_str("</w:tr>");
@@ -5177,7 +6700,10 @@ fn docx_table(node: &serde_json::Value, output: &mut String) {
 }
 
 fn docx_blocks(node: &serde_json::Value, output: &mut String) {
-    let node_type = node.get("type").and_then(|value| value.as_str()).unwrap_or_default();
+    let node_type = node
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
     match node_type {
         "doc" => for child in node.get("content").and_then(|value| value.as_array()).into_iter().flatten() { docx_blocks(child, output); },
         "paragraph" => output.push_str(&docx_paragraph(node.get("content").unwrap_or(&serde_json::Value::Null), "", "")),
@@ -5207,9 +6733,15 @@ fn docx_blocks(node: &serde_json::Value, output: &mut String) {
 fn docx_plain_blocks(plain: &str) -> String {
     let mut output = String::new();
     for line in plain.replace('\r', "").lines() {
-        output.push_str(&docx_paragraph(&serde_json::json!([{ "type": "text", "text": line }]), "", ""));
+        output.push_str(&docx_paragraph(
+            &serde_json::json!([{ "type": "text", "text": line }]),
+            "",
+            "",
+        ));
     }
-    if output.is_empty() { output.push_str("<w:p/>"); }
+    if output.is_empty() {
+        output.push_str("<w:p/>");
+    }
     output
 }
 
@@ -5218,38 +6750,73 @@ fn docx_document_xml(content: &str, content_plain: &str) -> String {
     if let Ok(document) = serde_json::from_str::<serde_json::Value>(content) {
         docx_blocks(&document, &mut blocks);
     }
-    if blocks.is_empty() { blocks = docx_plain_blocks(content_plain); }
+    if blocks.is_empty() {
+        blocks = docx_plain_blocks(content_plain);
+    }
     format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{blocks}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>")
 }
 
 fn document_export_filename(title: &str) -> String {
-    let name = title.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') { character } else { '_' }).collect::<String>();
+    let name = title
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
     let name = name.trim_matches([' ', '_', '-']);
-    if name.is_empty() { "SoFlo document".into() } else { name.into() }
+    if name.is_empty() {
+        "SoFlo document".into()
+    } else {
+        name.into()
+    }
 }
 
-fn write_document_docx(path: &Path, title: &str, content: &str, content_plain: &str) -> CommandResult<()> {
-    let file = fs::File::create(path).map_err(|_| "SoFlo could not create the Word document.".to_string())?;
+fn write_document_docx(
+    path: &Path,
+    title: &str,
+    content: &str,
+    content_plain: &str,
+) -> CommandResult<()> {
+    let file = fs::File::create(path)
+        .map_err(|_| "SoFlo could not create the Word document.".to_string())?;
     let mut archive = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     let mut write_part = |name: &str, value: String| -> CommandResult<()> {
-        archive.start_file(name, options).map_err(|_| "SoFlo could not create the Word document.".to_string())?;
-        archive.write_all(value.as_bytes()).map_err(|_| "SoFlo could not write the Word document.".to_string())
+        archive
+            .start_file(name, options)
+            .map_err(|_| "SoFlo could not create the Word document.".to_string())?;
+        archive
+            .write_all(value.as_bytes())
+            .map_err(|_| "SoFlo could not write the Word document.".to_string())
     };
     write_part("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/><Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/><Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/></Types>".into())?;
     write_part("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" Target=\"docProps/app.xml\"/></Relationships>".into())?;
     write_part("docProps/core.xml", format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{}</dc:title><dc:creator>SoFlo</dc:creator></cp:coreProperties>", docx_escape(title)))?;
     write_part("docProps/app.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>SoFlo</Application></Properties>".into())?;
     write_part("word/styles.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"/><w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:rPr><w:b/><w:sz w:val=\"32\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading2\"><w:name w:val=\"heading 2\"/><w:rPr><w:b/><w:sz w:val=\"28\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading3\"><w:name w:val=\"heading 3\"/><w:rPr><w:b/><w:sz w:val=\"24\"/></w:rPr></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading4\"><w:name w:val=\"heading 4\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading5\"><w:name w:val=\"heading 5\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading6\"><w:name w:val=\"heading 6\"/></w:style></w:styles>".into())?;
-    write_part("word/document.xml", docx_document_xml(content, content_plain))?;
-    archive.finish().map_err(|_| "SoFlo could not finish the Word document.".to_string())?;
+    write_part(
+        "word/document.xml",
+        docx_document_xml(content, content_plain),
+    )?;
+    archive
+        .finish()
+        .map_err(|_| "SoFlo could not finish the Word document.".to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn export_document_docx(input: ExportDocumentDocxInput) -> CommandResult<String> {
-    let downloads = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?).join("Downloads");
-    fs::create_dir_all(&downloads).map_err(|_| "SoFlo could not open Downloads to save the Word document.".to_string())?;
+    let downloads = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?)
+        .join("Downloads");
+    fs::create_dir_all(&downloads)
+        .map_err(|_| "SoFlo could not open Downloads to save the Word document.".to_string())?;
     let path = downloads.join(format!("{}.docx", document_export_filename(&input.title)));
     write_document_docx(&path, &input.title, &input.content, &input.content_plain)?;
     Ok(path.to_string_lossy().to_string())
@@ -5528,15 +7095,23 @@ fn create_flashcard_set_with_cards_in(
     if input.cards.is_empty() {
         return Err("Add at least one complete flashcard before creating the set.".into());
     }
-    if input.cards.iter().any(|card| card.front.trim().is_empty() || card.back.trim().is_empty()) {
+    if input
+        .cards
+        .iter()
+        .any(|card| card.front.trim().is_empty() || card.back.trim().is_empty())
+    {
         return Err("Every flashcard needs both a question and an answer.".into());
     }
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let id = Uuid::new_v4().to_string();
-    transaction.execute(
-        "INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1, ?2, ?3, ?4)",
-        params![id, input.class_id, input.title.trim(), input.description],
-    ).map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO flashcard_sets (id, class_id, title, description) VALUES (?1, ?2, ?3, ?4)",
+            params![id, input.class_id, input.title.trim(), input.description],
+        )
+        .map_err(|error| error.to_string())?;
     for card in input.cards {
         transaction.execute(
             "INSERT INTO flashcards (id, set_id, front, back, notes, image_path, position, is_starred) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -5719,8 +7294,17 @@ pub fn set_flashcard_set_study_kind(
     id: String,
     study_kind: String,
 ) -> CommandResult<FlashcardSetDetail> {
-    let kind = match study_kind.trim() { "math" => "math", _ => "standard" };
-    database.open()?.execute("UPDATE flashcard_sets SET study_kind=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![kind, id]).map_err(|error| error.to_string())?;
+    let kind = match study_kind.trim() {
+        "math" => "math",
+        _ => "standard",
+    };
+    database
+        .open()?
+        .execute(
+            "UPDATE flashcard_sets SET study_kind=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+            params![kind, id],
+        )
+        .map_err(|error| error.to_string())?;
     get_flashcard_set(database, id)
 }
 
@@ -5812,7 +7396,12 @@ fn local_chat_json_object(
         .send()
         .map_err(|error| format!("SoFlo's local AI model did not respond: {}", error))?
         .error_for_status()
-        .map_err(|error| format!("SoFlo's local AI model could not create the calendar: {}", error))?;
+        .map_err(|error| {
+            format!(
+                "SoFlo's local AI model could not create the calendar: {}",
+                error
+            )
+        })?;
     let body: serde_json::Value = response
         .json()
         .map_err(|_| "SoFlo could not read the local AI response.".to_string())?;
@@ -5836,8 +7425,13 @@ fn fragmented_pdf_spacing_stats(text: &str) -> (usize, usize) {
         .windows(2)
         .filter(|pair| {
             pair.iter().all(|word| {
-                let letters = word.chars().filter(|character| character.is_alphabetic()).count();
-                letters >= 2 && letters <= 3 && word.chars().all(|character| character.is_alphabetic())
+                let letters = word
+                    .chars()
+                    .filter(|character| character.is_alphabetic())
+                    .count();
+                letters >= 2
+                    && letters <= 3
+                    && word.chars().all(|character| character.is_alphabetic())
             })
         })
         .count();
@@ -5902,55 +7496,199 @@ fn ensure_course_calendar_schema(connection: &Connection) -> CommandResult<()> {
     "#).map_err(|error| error.to_string())
 }
 
-fn read_course_calendar_detail(connection: &Connection, class_id: &str) -> CommandResult<CourseCalendarDetail> {
+fn read_course_calendar_detail(
+    connection: &Connection,
+    class_id: &str,
+) -> CommandResult<CourseCalendarDetail> {
     ensure_course_calendar_schema(connection)?;
     let mut sources = connection.prepare("SELECT id, class_id, title, content_plain, source_path, created_at FROM course_calendar_sources WHERE class_id=?1 ORDER BY created_at DESC").map_err(|error| error.to_string())?;
-    let sources = sources.query_map([class_id], |row| Ok(CourseCalendarSource { id: row.get(0)?, class_id: row.get(1)?, title: row.get(2)?, content_plain: row.get(3)?, source_path: row.get(4)?, created_at: row.get(5)? })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let sources = sources
+        .query_map([class_id], |row| {
+            Ok(CourseCalendarSource {
+                id: row.get(0)?,
+                class_id: row.get(1)?,
+                title: row.get(2)?,
+                content_plain: row.get(3)?,
+                source_path: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let mut items_statement = connection.prepare("SELECT id, class_id, source_id, title, due_date, description, urgency, completed, source_excerpt FROM course_calendar_items WHERE class_id=?1 ORDER BY due_date, completed, title").map_err(|error| error.to_string())?;
-    let mut items = items_statement.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: row.get(2)?, title: row.get(3)?, due_date: row.get(4)?, description: row.get(5)?, urgency: row.get(6)?, completed: row.get::<_, i64>(7)? != 0, source_excerpt: row.get(8)?, start_time: None, color: None, is_manual: false, archived: false })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let mut items = items_statement
+        .query_map([class_id], |row| {
+            Ok(CourseCalendarItem {
+                id: row.get(0)?,
+                class_id: row.get(1)?,
+                source_id: row.get(2)?,
+                title: row.get(3)?,
+                due_date: row.get(4)?,
+                description: row.get(5)?,
+                urgency: row.get(6)?,
+                completed: row.get::<_, i64>(7)? != 0,
+                source_excerpt: row.get(8)?,
+                start_time: None,
+                color: None,
+                is_manual: false,
+                archived: false,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let mut manual_statement = connection.prepare("SELECT id, class_id, title, due_date, start_time, description, color, archived FROM course_calendar_manual_items WHERE class_id=?1 AND archived=0 ORDER BY due_date, start_time, title").map_err(|error| error.to_string())?;
-    let manual_items = manual_statement.query_map([class_id], |row| Ok(CourseCalendarItem { id: row.get(0)?, class_id: row.get(1)?, source_id: String::new(), title: row.get(2)?, due_date: row.get(3)?, start_time: row.get(4)?, description: row.get(5)?, color: Some(row.get(6)?), archived: row.get::<_, i64>(7)? != 0, urgency: "upcoming".to_string(), completed: false, source_excerpt: String::new(), is_manual: true })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let manual_items = manual_statement
+        .query_map([class_id], |row| {
+            Ok(CourseCalendarItem {
+                id: row.get(0)?,
+                class_id: row.get(1)?,
+                source_id: String::new(),
+                title: row.get(2)?,
+                due_date: row.get(3)?,
+                start_time: row.get(4)?,
+                description: row.get(5)?,
+                color: Some(row.get(6)?),
+                archived: row.get::<_, i64>(7)? != 0,
+                urgency: "upcoming".to_string(),
+                completed: false,
+                source_excerpt: String::new(),
+                is_manual: true,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     items.extend(manual_items);
-    items.sort_by(|left, right| left.due_date.cmp(&right.due_date).then_with(|| left.start_time.cmp(&right.start_time)).then_with(|| left.title.cmp(&right.title)));
-    let plan = connection.query_row("SELECT game_plan, updated_at FROM course_calendar_plans WHERE class_id=?1", [class_id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| error.to_string())?;
-    Ok(CourseCalendarDetail { class_id: class_id.to_string(), sources, items, game_plan: plan.as_ref().map(|entry: &(String, String)| entry.0.clone()).unwrap_or_default(), updated_at: plan.map(|entry| entry.1) })
+    items.sort_by(|left, right| {
+        left.due_date
+            .cmp(&right.due_date)
+            .then_with(|| left.start_time.cmp(&right.start_time))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    let plan = connection
+        .query_row(
+            "SELECT game_plan, updated_at FROM course_calendar_plans WHERE class_id=?1",
+            [class_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(CourseCalendarDetail {
+        class_id: class_id.to_string(),
+        sources,
+        items,
+        game_plan: plan
+            .as_ref()
+            .map(|entry: &(String, String)| entry.0.clone())
+            .unwrap_or_default(),
+        updated_at: plan.map(|entry| entry.1),
+    })
 }
 
 #[tauri::command]
-pub fn get_course_calendar(database: State<'_, Database>, class_id: String) -> CommandResult<CourseCalendarDetail> {
+pub fn get_course_calendar(
+    database: State<'_, Database>,
+    class_id: String,
+) -> CommandResult<CourseCalendarDetail> {
     let connection = database.open()?;
     ensure_course_calendar_schema(&connection)?;
-    let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    let source_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1",
+            [&class_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
     if source_count == 0 {
-        connection.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
-        connection.execute("DELETE FROM course_calendar_plans WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM course_calendar_items WHERE class_id=?1",
+                [&class_id],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM course_calendar_plans WHERE class_id=?1",
+                [&class_id],
+            )
+            .map_err(|error| error.to_string())?;
     }
     read_course_calendar_detail(&connection, &class_id)
 }
 
 #[tauri::command]
-pub fn add_course_calendar_source(database: State<'_, Database>, input: AddCourseCalendarSourceInput) -> CommandResult<CourseCalendarDetail> {
+pub fn add_course_calendar_source(
+    database: State<'_, Database>,
+    input: AddCourseCalendarSourceInput,
+) -> CommandResult<CourseCalendarDetail> {
     let title = input.title.trim().chars().take(180).collect::<String>();
-    let content = input.content_plain.trim().chars().take(250_000).collect::<String>();
-    if title.is_empty() || content.is_empty() { return Err("That course document has no readable text.".into()); }
+    let content = input
+        .content_plain
+        .trim()
+        .chars()
+        .take(250_000)
+        .collect::<String>();
+    if title.is_empty() || content.is_empty() {
+        return Err("That course document has no readable text.".into());
+    }
     let connection = database.open()?;
-    let count: i64 = connection.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&input.class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
-    if count >= 10 { return Err("A Course Calendar can keep up to 10 source documents. Remove one before adding another.".into()); }
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1",
+            [&input.class_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if count >= 10 {
+        return Err("A Course Calendar can keep up to 10 source documents. Remove one before adding another.".into());
+    }
     connection.execute("INSERT INTO course_calendar_sources (id, class_id, title, content_plain, source_path) VALUES (?1,?2,?3,?4,?5)", params![Uuid::new_v4().to_string(), input.class_id, title, content, input.source_path]).map_err(|error| error.to_string())?;
     read_course_calendar_detail(&connection, &input.class_id)
 }
 
 #[tauri::command]
-pub fn remove_course_calendar_source(database: State<'_, Database>, id: String) -> CommandResult<()> {
+pub fn remove_course_calendar_source(
+    database: State<'_, Database>,
+    id: String,
+) -> CommandResult<()> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let class_id = transaction.query_row("SELECT class_id FROM course_calendar_sources WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM course_calendar_sources WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let class_id = transaction
+        .query_row(
+            "SELECT class_id FROM course_calendar_sources WHERE id=?1",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM course_calendar_sources WHERE id=?1", [&id])
+        .map_err(|error| error.to_string())?;
     if let Some(class_id) = class_id {
-        let remaining: i64 = transaction.query_row("SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1", [&class_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let remaining: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM course_calendar_sources WHERE class_id=?1",
+                [&class_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
         if remaining == 0 {
-            transaction.execute("DELETE FROM course_calendar_items WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
-            transaction.execute("DELETE FROM course_calendar_plans WHERE class_id=?1", [&class_id]).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM course_calendar_items WHERE class_id=?1",
+                    [&class_id],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM course_calendar_plans WHERE class_id=?1",
+                    [&class_id],
+                )
+                .map_err(|error| error.to_string())?;
         }
     }
     transaction.commit().map_err(|error| error.to_string())?;
@@ -5958,24 +7696,58 @@ pub fn remove_course_calendar_source(database: State<'_, Database>, id: String) 
 }
 
 #[tauri::command]
-pub fn set_course_calendar_item_completed(database: State<'_, Database>, id: String, completed: bool) -> CommandResult<()> {
+pub fn set_course_calendar_item_completed(
+    database: State<'_, Database>,
+    id: String,
+    completed: bool,
+) -> CommandResult<()> {
     let connection = database.open()?;
-    connection.execute("UPDATE course_calendar_items SET completed=?1 WHERE id=?2", params![completed as i32, id]).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE course_calendar_items SET completed=?1 WHERE id=?2",
+            params![completed as i32, id],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn save_course_calendar_manual_item(database: State<'_, Database>, input: SaveCourseCalendarManualItemInput) -> CommandResult<CourseCalendarDetail> {
+pub fn save_course_calendar_manual_item(
+    database: State<'_, Database>,
+    input: SaveCourseCalendarManualItemInput,
+) -> CommandResult<CourseCalendarDetail> {
     let title = input.title.trim().chars().take(180).collect::<String>();
-    if title.is_empty() { return Err("Give the calendar event a title.".into()); }
+    if title.is_empty() {
+        return Err("Give the calendar event a title.".into());
+    }
     let due_date = input.due_date.trim();
-    chrono::NaiveDate::parse_from_str(due_date, "%Y-%m-%d").map_err(|_| "Choose a valid event date.".to_string())?;
-    let start_time = input.start_time.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(|value| {
-        chrono::NaiveTime::parse_from_str(value, "%H:%M").map(|_| value.to_string()).map_err(|_| "Choose a valid event time.".to_string())
-    }).transpose()?;
+    chrono::NaiveDate::parse_from_str(due_date, "%Y-%m-%d")
+        .map_err(|_| "Choose a valid event date.".to_string())?;
+    let start_time = input
+        .start_time
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            chrono::NaiveTime::parse_from_str(value, "%H:%M")
+                .map(|_| value.to_string())
+                .map_err(|_| "Choose a valid event time.".to_string())
+        })
+        .transpose()?;
     let color = input.color.trim();
-    if !matches!(color, "#8B7CF6" | "#63B98F" | "#7E8ADE" | "#E8B558" | "#EF8794" | "#4E86D9") { return Err("Choose one of SoFlo's event colors.".into()); }
-    let description = input.description.unwrap_or_default().trim().chars().take(1600).collect::<String>();
+    if !matches!(
+        color,
+        "#8B7CF6" | "#63B98F" | "#7E8ADE" | "#E8B558" | "#EF8794" | "#4E86D9"
+    ) {
+        return Err("Choose one of SoFlo's event colors.".into());
+    }
+    let description = input
+        .description
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(1600)
+        .collect::<String>();
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let connection = database.open()?;
     connection.execute("INSERT INTO course_calendar_manual_items (id,class_id,title,due_date,start_time,description,color,archived,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,0,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,due_date=excluded.due_date,start_time=excluded.start_time,description=excluded.description,color=excluded.color,archived=0,updated_at=CURRENT_TIMESTAMP", params![id, input.class_id, title, due_date, start_time, description, color]).map_err(|error| error.to_string())?;
@@ -5983,18 +7755,40 @@ pub fn save_course_calendar_manual_item(database: State<'_, Database>, input: Sa
 }
 
 #[tauri::command]
-pub fn archive_course_calendar_manual_item(database: State<'_, Database>, id: String) -> CommandResult<()> {
+pub fn archive_course_calendar_manual_item(
+    database: State<'_, Database>,
+    id: String,
+) -> CommandResult<()> {
     let connection = database.open()?;
     connection.execute("UPDATE course_calendar_manual_items SET archived=1,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[derive(serde::Deserialize)]
-struct CourseCalendarAiPlan { #[serde(default)] items: Vec<CourseCalendarAiItem>, #[serde(default)] game_plan: Vec<CourseCalendarAiPlanStep> }
+struct CourseCalendarAiPlan {
+    #[serde(default)]
+    items: Vec<CourseCalendarAiItem>,
+    #[serde(default)]
+    game_plan: Vec<CourseCalendarAiPlanStep>,
+}
 #[derive(serde::Deserialize)]
-struct CourseCalendarAiItem { source_title: String, title: String, due_date: String, #[serde(default)] description: String, #[serde(default)] urgency: String, #[serde(default)] source_excerpt: String }
+struct CourseCalendarAiItem {
+    source_title: String,
+    title: String,
+    due_date: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    urgency: String,
+    #[serde(default)]
+    source_excerpt: String,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
-struct CourseCalendarAiPlanStep { action: String, #[serde(default)] context: String }
+struct CourseCalendarAiPlanStep {
+    action: String,
+    #[serde(default)]
+    context: String,
+}
 
 fn course_calendar_plan_from_response(output: &str) -> Option<CourseCalendarAiPlan> {
     json_object_from_response(output)
@@ -6007,44 +7801,107 @@ fn explicit_course_dates(text: &str) -> Vec<(String, String)> {
 
 fn source_calendar_year(text: &str) -> Option<i32> {
     text.split(|character: char| !character.is_ascii_digit())
-        .find_map(|value| value.parse::<i32>().ok().filter(|year| (2020..=2100).contains(year)))
+        .find_map(|value| {
+            value
+                .parse::<i32>()
+                .ok()
+                .filter(|year| (2020..=2100).contains(year))
+        })
 }
 
 fn explicit_course_dates_with_year(text: &str, source_year: Option<i32>) -> Vec<(String, String)> {
-    let mut dates = text.split(|character: char| !(character.is_ascii_digit() || character == '/' || character == '-'))
+    let mut dates = text
+        .split(|character: char| {
+            !(character.is_ascii_digit() || character == '/' || character == '-')
+        })
         .filter_map(|token| {
-            let separator = if token.contains('/') { '/' } else if token.contains('-') { '-' } else { return None };
+            let separator = if token.contains('/') {
+                '/'
+            } else if token.contains('-') {
+                '-'
+            } else {
+                return None;
+            };
             let values = token.split(separator).collect::<Vec<_>>();
-            if !(values.len() == 2 || values.len() == 3) || values.iter().any(|value| value.is_empty()) { return None; }
-            let first = values[0].parse::<i32>().ok()?; let second = values[1].parse::<u32>().ok()?;
-            let (year, month, day) = if values.len() == 2 { (source_year?, first as u32, second) } else { let third = values[2].parse::<u32>().ok()?; if values[0].len() == 4 { (first, second, third) } else { (values[2].parse::<i32>().ok()?, first as u32, second) } };
-            chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| (date.to_string(), token.to_string()))
+            if !(values.len() == 2 || values.len() == 3)
+                || values.iter().any(|value| value.is_empty())
+            {
+                return None;
+            }
+            let first = values[0].parse::<i32>().ok()?;
+            let second = values[1].parse::<u32>().ok()?;
+            let (year, month, day) = if values.len() == 2 {
+                (source_year?, first as u32, second)
+            } else {
+                let third = values[2].parse::<u32>().ok()?;
+                if values[0].len() == 4 {
+                    (first, second, third)
+                } else {
+                    (values[2].parse::<i32>().ok()?, first as u32, second)
+                }
+            };
+            chrono::NaiveDate::from_ymd_opt(year, month, day)
+                .map(|date| (date.to_string(), token.to_string()))
         })
         .collect::<Vec<_>>();
-    let month_number = |value: &str| match value.trim_matches(|character: char| !character.is_ascii_alphabetic()).to_ascii_lowercase().as_str() {
-        "jan" | "january" => Some(1), "feb" | "february" => Some(2), "mar" | "march" => Some(3),
-        "apr" | "april" => Some(4), "may" => Some(5), "jun" | "june" => Some(6),
-        "jul" | "july" => Some(7), "aug" | "august" => Some(8), "sep" | "sept" | "september" => Some(9),
-        "oct" | "october" => Some(10), "nov" | "november" => Some(11), "dec" | "december" => Some(12), _ => None,
+    let month_number = |value: &str| match value
+        .trim_matches(|character: char| !character.is_ascii_alphabetic())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jan" | "january" => Some(1),
+        "feb" | "february" => Some(2),
+        "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4),
+        "may" => Some(5),
+        "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7),
+        "aug" | "august" => Some(8),
+        "sep" | "sept" | "september" => Some(9),
+        "oct" | "october" => Some(10),
+        "nov" | "november" => Some(11),
+        "dec" | "december" => Some(12),
+        _ => None,
     };
-    let mut seen = dates.iter().map(|(date, raw)| format!("{date}|{raw}")).collect::<HashSet<_>>();
+    let mut seen = dates
+        .iter()
+        .map(|(date, raw)| format!("{date}|{raw}"))
+        .collect::<HashSet<_>>();
     let words = text.split_whitespace().collect::<Vec<_>>();
     for (index, word) in words.iter().enumerate() {
-        let Some(month) = month_number(word) else { continue; };
-        let Some(day_word) = words.get(index + 1) else { continue; };
-        let digits = day_word.trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        let Some(month) = month_number(word) else {
+            continue;
+        };
+        let Some(day_word) = words.get(index + 1) else {
+            continue;
+        };
+        let digits = day_word
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric())
             .trim_end_matches(|character: char| character.is_ascii_alphabetic());
-        let Ok(day) = digits.parse::<u32>() else { continue; };
-        let year = words.get(index + 2)
+        let Ok(day) = digits.parse::<u32>() else {
+            continue;
+        };
+        let year = words
+            .get(index + 2)
             .map(|value| value.trim_matches(|character: char| !character.is_ascii_digit()))
             .and_then(|value| value.parse::<i32>().ok())
             .filter(|value| (2020..=2100).contains(value))
             .or(source_year);
-        let Some(year) = year else { continue; };
-        let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) else { continue; };
-        let raw = format!("{} {}", word.trim_matches(|character: char| !character.is_ascii_alphabetic()), digits);
+        let Some(year) = year else {
+            continue;
+        };
+        let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) else {
+            continue;
+        };
+        let raw = format!(
+            "{} {}",
+            word.trim_matches(|character: char| !character.is_ascii_alphabetic()),
+            digits
+        );
         let entry = (date.to_string(), raw);
-        if seen.insert(format!("{}|{}", entry.0, entry.1)) { dates.push(entry); }
+        if seen.insert(format!("{}|{}", entry.0, entry.1)) {
+            dates.push(entry);
+        }
     }
     dates
 }
@@ -6053,63 +7910,156 @@ fn course_calendar_source_excerpt(source: &CourseCalendarSource) -> String {
     // The compact local model cannot reliably read several entire textbooks or
     // note packets at once. Give it the term context plus every date/deadline
     // candidate, retaining enough surrounding text to name the work faithfully.
-    const MAX_CHARS: usize = 8_000;
+    // Up to ten documents can be attached to a course. Bound every source so
+    // the combined calendar prompt stays inside an 8K GPU context; full-date
+    // extraction still scans every line below in the deterministic fallback.
+    const MAX_CHARS: usize = 2_200;
     let source_year = source_calendar_year(&source.content_plain);
     let mut kept = Vec::new();
     let mut seen = HashSet::new();
-    for (index, line) in source.content_plain.replace('\u{000c}', "\n").lines().enumerate() {
+    for (index, line) in source
+        .content_plain
+        .replace('\u{000c}', "\n")
+        .lines()
+        .enumerate()
+    {
         let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
         let lower = text.to_ascii_lowercase();
         let relevant = index < 16
             || !explicit_course_dates_with_year(&text, source_year).is_empty()
-            || ["due", "deadline", "assignment", "exam", "quiz", "final", "project", "paper", "presentation", "schedule", "week ", "reading"].iter().any(|keyword| lower.contains(keyword));
-        if relevant && seen.insert(text.clone()) { kept.push(text); }
+            || [
+                "due",
+                "deadline",
+                "assignment",
+                "exam",
+                "quiz",
+                "final",
+                "project",
+                "paper",
+                "presentation",
+                "schedule",
+                "week ",
+                "reading",
+            ]
+            .iter()
+            .any(|keyword| lower.contains(keyword));
+        if relevant && seen.insert(text.clone()) {
+            kept.push(text);
+        }
     }
     let mut excerpt = format!("SOURCE: {}\n", source.title);
     for line in kept {
-        if excerpt.len() + line.len() + 1 > MAX_CHARS { break; }
+        if excerpt.len() + line.len() + 1 > MAX_CHARS {
+            break;
+        }
         excerpt.push_str(&line);
         excerpt.push('\n');
     }
     excerpt
 }
 
-fn fallback_course_calendar_plan(sources: &[CourseCalendarSource], today: &str) -> CourseCalendarAiPlan {
-    let mut seen = HashSet::new(); let mut items = Vec::new();
+fn fallback_course_calendar_plan(
+    sources: &[CourseCalendarSource],
+    today: &str,
+) -> CourseCalendarAiPlan {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
     for source in sources {
         let source_year = source_calendar_year(&source.content_plain);
         for line in source.content_plain.replace('\u{000c}', "\n").lines() {
             let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            if text.is_empty() { continue; }
+            if text.is_empty() {
+                continue;
+            }
             for (due_date, raw_date) in explicit_course_dates_with_year(&text, source_year) {
-                let before = text.split_once(&raw_date).map(|(value, _)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
-                let after = text.split_once(&raw_date).map(|(_, value)| value).unwrap_or("").trim_matches(|character: char| character.is_ascii_punctuation() || character.is_whitespace());
-                let title = if before.chars().any(|character| character.is_alphabetic()) { before.chars().take(180).collect::<String>() } else if after.chars().any(|character| character.is_alphabetic()) { after.chars().take(180).collect::<String>() } else { format!("Dated course work from {}", source.title) };
+                let before = text
+                    .split_once(&raw_date)
+                    .map(|(value, _)| value)
+                    .unwrap_or("")
+                    .trim_matches(|character: char| {
+                        character.is_ascii_punctuation() || character.is_whitespace()
+                    });
+                let after = text
+                    .split_once(&raw_date)
+                    .map(|(_, value)| value)
+                    .unwrap_or("")
+                    .trim_matches(|character: char| {
+                        character.is_ascii_punctuation() || character.is_whitespace()
+                    });
+                let title = if before.chars().any(|character| character.is_alphabetic()) {
+                    before.chars().take(180).collect::<String>()
+                } else if after.chars().any(|character| character.is_alphabetic()) {
+                    after.chars().take(180).collect::<String>()
+                } else {
+                    format!("Dated course work from {}", source.title)
+                };
                 let key = format!("{}|{}|{}", source.id, due_date, title.to_ascii_lowercase());
-                if !seen.insert(key) { continue; }
-                let urgency = if due_date.as_str() < today { "later" } else { "upcoming" }.to_string();
-                items.push(CourseCalendarAiItem { source_title: source.title.clone(), title, due_date, description: text.chars().take(1200).collect(), urgency, source_excerpt: text.chars().take(1200).collect() });
+                if !seen.insert(key) {
+                    continue;
+                }
+                let urgency = if due_date.as_str() < today {
+                    "later"
+                } else {
+                    "upcoming"
+                }
+                .to_string();
+                items.push(CourseCalendarAiItem {
+                    source_title: source.title.clone(),
+                    title,
+                    due_date,
+                    description: text.chars().take(1200).collect(),
+                    urgency,
+                    source_excerpt: text.chars().take(1200).collect(),
+                });
             }
         }
     }
-    items.sort_by(|left, right| left.due_date.cmp(&right.due_date)); items.truncate(250);
-    let game_plan = items.iter().filter(|item| item.due_date.as_str() >= today).take(8).map(|item| CourseCalendarAiPlanStep { action: format!("Start {} before {}.", item.title, item.due_date), context: format!("Explicitly dated in {}.", item.source_title) }).collect();
+    items.sort_by(|left, right| left.due_date.cmp(&right.due_date));
+    items.truncate(250);
+    let game_plan = items
+        .iter()
+        .filter(|item| item.due_date.as_str() >= today)
+        .take(8)
+        .map(|item| CourseCalendarAiPlanStep {
+            action: format!("Start {} before {}.", item.title, item.due_date),
+            context: format!("Explicitly dated in {}.", item.source_title),
+        })
+        .collect();
     CourseCalendarAiPlan { items, game_plan }
 }
 
-fn course_calendar_plan_uses_source_dates(plan: &CourseCalendarAiPlan, sources: &[CourseCalendarSource]) -> bool {
+fn course_calendar_plan_uses_source_dates(
+    plan: &CourseCalendarAiPlan,
+    sources: &[CourseCalendarSource],
+) -> bool {
     plan.items.iter().all(|item| {
-        let Some(source) = sources.iter().find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim())) else { return false; };
-        explicit_course_dates_with_year(&source.content_plain, source_calendar_year(&source.content_plain))
-            .into_iter()
-            .any(|(date, _)| date == item.due_date.chars().take(10).collect::<String>())
+        let Some(source) = sources
+            .iter()
+            .find(|source| source.title.eq_ignore_ascii_case(item.source_title.trim()))
+        else {
+            return false;
+        };
+        explicit_course_dates_with_year(
+            &source.content_plain,
+            source_calendar_year(&source.content_plain),
+        )
+        .into_iter()
+        .any(|(date, _)| date == item.due_date.chars().take(10).collect::<String>())
     })
 }
 
 #[tauri::command]
-pub async fn refresh_course_calendar(app: tauri::AppHandle, database: State<'_, Database>, class_id: String, model_path: String) -> CommandResult<CourseCalendarDetail> {
-    let database = database.inner().clone(); let app_for_ai = app.clone();
+pub async fn refresh_course_calendar(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    class_id: String,
+    model_path: String,
+) -> CommandResult<CourseCalendarDetail> {
+    let database = database.inner().clone();
+    let app_for_ai = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let connection = database.open()?;
         let detail = read_course_calendar_detail(&connection, &class_id)?;
@@ -6417,7 +8367,12 @@ fn default_study_web_group_color() -> String {
 }
 fn normalize_study_web_group_color(value: &str) -> String {
     let value = value.trim();
-    if value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
         value.to_ascii_uppercase()
     } else {
         default_study_web_group_color()
@@ -6727,9 +8682,15 @@ pub fn create_empty_study_web(
     name: String,
 ) -> CommandResult<StudyWebDetail> {
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let title = name.trim().chars().take(96).collect::<String>();
-    let title = if title.is_empty() { "Study Web".to_string() } else { title };
+    let title = if title.is_empty() {
+        "Study Web".to_string()
+    } else {
+        title
+    };
     let set_id = Uuid::new_v4().to_string();
     let web_id = Uuid::new_v4().to_string();
     transaction.execute(
@@ -6751,10 +8712,20 @@ pub fn create_empty_study_web(
 fn study_web_export_filename(name: &str) -> String {
     let safe = name
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let safe = safe.trim_matches([' ', '-', '_']);
-    if safe.is_empty() { "SoFlo Study Web".to_string() } else { format!("SoFlo Study Web - {}", safe) }
+    if safe.is_empty() {
+        "SoFlo Study Web".to_string()
+    } else {
+        format!("SoFlo Study Web - {}", safe)
+    }
 }
 
 #[tauri::command]
@@ -6762,18 +8733,70 @@ pub fn export_study_web_json(database: State<'_, Database>, id: String) -> Comma
     let connection = database.open()?;
     let detail = read_study_web_detail(&connection, &id)?;
     let mut statement = connection.prepare("SELECT f.id, f.front, f.back, f.notes, f.image_path, f.position, f.is_starred FROM flashcards f INNER JOIN study_web_nodes n ON n.flashcard_id=f.id WHERE n.study_web_id=?1 ORDER BY f.position, f.created_at").map_err(|error| error.to_string())?;
-    let cards = statement.query_map([&id], |row| Ok(PortableStudyWebCard { id: row.get(0)?, front: row.get(1)?, back: row.get(2)?, notes: row.get(3)?, image_path: row.get(4)?, position: row.get(5)?, is_starred: row.get::<_, i32>(6)? != 0 })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let cards = statement
+        .query_map([&id], |row| {
+            Ok(PortableStudyWebCard {
+                id: row.get(0)?,
+                front: row.get(1)?,
+                back: row.get(2)?,
+                notes: row.get(3)?,
+                image_path: row.get(4)?,
+                position: row.get(5)?,
+                is_starred: row.get::<_, i32>(6)? != 0,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     let export = PortableStudyWeb {
-        format: "soflo-study-web".into(), version: 1, name: detail.name,
+        format: "soflo-study-web".into(),
+        version: 1,
+        name: detail.name,
         cards,
-        nodes: detail.nodes.into_iter().map(|node| PortableStudyWebNode { card_id: node.card_id, x: node.x, y: node.y, manually_positioned: node.manually_positioned, pinned: node.pinned }).collect(),
-        groups: detail.groups.into_iter().map(|group| PortableStudyWebGroup { id: group.id, label: group.label, color: group.color, parent_group_id: group.parent_group_id, card_ids: group.card_ids }).collect(),
-        relationships: detail.relationships.into_iter().map(|edge| PortableStudyWebRelationship { source_card_id: edge.source_card_id, target_card_id: edge.target_card_id, relationship_type: edge.relationship_type, strength: edge.strength }).collect(),
+        nodes: detail
+            .nodes
+            .into_iter()
+            .map(|node| PortableStudyWebNode {
+                card_id: node.card_id,
+                x: node.x,
+                y: node.y,
+                manually_positioned: node.manually_positioned,
+                pinned: node.pinned,
+            })
+            .collect(),
+        groups: detail
+            .groups
+            .into_iter()
+            .map(|group| PortableStudyWebGroup {
+                id: group.id,
+                label: group.label,
+                color: group.color,
+                parent_group_id: group.parent_group_id,
+                card_ids: group.card_ids,
+            })
+            .collect(),
+        relationships: detail
+            .relationships
+            .into_iter()
+            .map(|edge| PortableStudyWebRelationship {
+                source_card_id: edge.source_card_id,
+                target_card_id: edge.target_card_id,
+                relationship_type: edge.relationship_type,
+                strength: edge.strength,
+            })
+            .collect(),
     };
-    let downloads = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?).join("Downloads");
+    let downloads = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?)
+        .join("Downloads");
     fs::create_dir_all(&downloads).map_err(|error| error.to_string())?;
     let destination = downloads.join(format!("{}.json", study_web_export_filename(&export.name)));
-    fs::write(&destination, serde_json::to_vec_pretty(&export).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    fs::write(
+        &destination,
+        serde_json::to_vec_pretty(&export).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(destination.to_string_lossy().to_string())
 }
 
@@ -6784,17 +8807,30 @@ pub fn import_study_web_json(
     source: String,
 ) -> CommandResult<StudyWebDetail> {
     let path = PathBuf::from(source);
-    if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
         return Err("Choose a SoFlo Study Web .json file.".into());
     }
-    let portable = serde_json::from_slice::<PortableStudyWeb>(&fs::read(&path).map_err(|_| "SoFlo could not read that Study Web file.".to_string())?).map_err(|_| "That file is not a valid SoFlo Study Web export.".to_string())?;
+    let portable = serde_json::from_slice::<PortableStudyWeb>(
+        &fs::read(&path).map_err(|_| "SoFlo could not read that Study Web file.".to_string())?,
+    )
+    .map_err(|_| "That file is not a valid SoFlo Study Web export.".to_string())?;
     if portable.format != "soflo-study-web" || portable.version != 1 || portable.cards.len() > 600 {
         return Err("That file is not a compatible SoFlo Study Web export.".into());
     }
     let mut connection = database.open()?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let title = portable.name.trim().chars().take(96).collect::<String>();
-    let title = if title.is_empty() { "Imported Study Web".to_string() } else { title };
+    let title = if title.is_empty() {
+        "Imported Study Web".to_string()
+    } else {
+        title
+    };
     let set_id = Uuid::new_v4().to_string();
     let web_id = Uuid::new_v4().to_string();
     transaction.execute("INSERT INTO flashcard_sets (id, class_id, title, description, is_study_web_private) VALUES (?1,?2,?3,?4,1)", params![&set_id, &class_id, format!("{} cards", title), "Cards imported with this Study Web."]).map_err(|error| error.to_string())?;
@@ -6802,38 +8838,81 @@ pub fn import_study_web_json(
     transaction.execute("INSERT INTO study_web_sources (study_web_id, flashcard_set_id, position) VALUES (?1,?2,0)", params![&web_id, &set_id]).map_err(|error| error.to_string())?;
     let mut card_ids = HashMap::new();
     for (index, card) in portable.cards.iter().enumerate() {
-        if card.id.trim().is_empty() || card_ids.contains_key(&card.id) { continue; }
+        if card.id.trim().is_empty() || card_ids.contains_key(&card.id) {
+            continue;
+        }
         let new_id = Uuid::new_v4().to_string();
         transaction.execute("INSERT INTO flashcards (id, set_id, front, back, notes, image_path, position, is_starred) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![&new_id, &set_id, card.front.trim(), card.back.trim(), card.notes, card.image_path, card.position.max(index as i32), card.is_starred as i32]).map_err(|error| error.to_string())?;
         card_ids.insert(card.id.clone(), new_id);
     }
     let mut node_cards = HashSet::new();
     for node in portable.nodes {
-        let Some(card_id) = card_ids.get(&node.card_id) else { continue; };
-        if !node.x.is_finite() || !node.y.is_finite() || !node_cards.insert(card_id.clone()) { continue; }
+        let Some(card_id) = card_ids.get(&node.card_id) else {
+            continue;
+        };
+        if !node.x.is_finite() || !node.y.is_finite() || !node_cards.insert(card_id.clone()) {
+            continue;
+        }
         transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,?5,?6)", params![&web_id, card_id, node.x, node.y, node.manually_positioned as i32, node.pinned as i32]).map_err(|error| error.to_string())?;
     }
     for (index, card_id) in card_ids.values().enumerate() {
-        if node_cards.insert(card_id.clone()) { transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,1,0)", params![&web_id, card_id, 280.0 + (index % 4) as f64 * 290.0, 240.0 + (index / 4) as f64 * 130.0]).map_err(|error| error.to_string())?; }
+        if node_cards.insert(card_id.clone()) {
+            transaction.execute("INSERT INTO study_web_nodes (study_web_id, flashcard_id, x, y, manually_positioned, pinned) VALUES (?1,?2,?3,?4,1,0)", params![&web_id, card_id, 280.0 + (index % 4) as f64 * 290.0, 240.0 + (index / 4) as f64 * 130.0]).map_err(|error| error.to_string())?;
+        }
     }
     let mut group_ids = HashMap::new();
     for group in &portable.groups {
-        if group.id.trim().is_empty() || group.label.trim().is_empty() || group_ids.contains_key(&group.id) { continue; }
+        if group.id.trim().is_empty()
+            || group.label.trim().is_empty()
+            || group_ids.contains_key(&group.id)
+        {
+            continue;
+        }
         let new_id = Uuid::new_v4().to_string();
         transaction.execute("INSERT INTO study_web_groups (id, study_web_id, label, color, parent_group_id) VALUES (?1,?2,?3,?4,NULL)", params![&new_id, &web_id, group.label.trim().chars().take(72).collect::<String>(), normalize_study_web_group_color(&group.color)]).map_err(|error| error.to_string())?;
         group_ids.insert(group.id.clone(), new_id);
     }
     for group in &portable.groups {
-        let Some(group_id) = group_ids.get(&group.id) else { continue; };
-        if let Some(parent) = group.parent_group_id.as_ref().and_then(|parent| group_ids.get(parent)) { transaction.execute("UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2", params![parent, group_id]).map_err(|error| error.to_string())?; }
-        for card_id in &group.card_ids { if let Some(card_id) = card_ids.get(card_id) { transaction.execute("INSERT OR IGNORE INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, group_id, card_id]).map_err(|error| error.to_string())?; } }
+        let Some(group_id) = group_ids.get(&group.id) else {
+            continue;
+        };
+        if let Some(parent) = group
+            .parent_group_id
+            .as_ref()
+            .and_then(|parent| group_ids.get(parent))
+        {
+            transaction
+                .execute(
+                    "UPDATE study_web_groups SET parent_group_id=?1 WHERE id=?2",
+                    params![parent, group_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for card_id in &group.card_ids {
+            if let Some(card_id) = card_ids.get(card_id) {
+                transaction.execute("INSERT OR IGNORE INTO study_web_group_members (study_web_id, group_id, flashcard_id) VALUES (?1,?2,?3)", params![&web_id, group_id, card_id]).map_err(|error| error.to_string())?;
+            }
+        }
     }
     let mut seen_edges = HashSet::new();
     for edge in portable.relationships {
-        let (Some(source), Some(target)) = (card_ids.get(&edge.source_card_id), card_ids.get(&edge.target_card_id)) else { continue; };
-        if source == target { continue; }
-        let key = if source < target { (source.clone(), target.clone()) } else { (target.clone(), source.clone()) };
-        if seen_edges.insert(key.clone()) { transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, key.0, key.1, edge.relationship_type.trim().chars().take(32).collect::<String>(), edge.strength.clamp(0.1, 1.0)]).map_err(|error| error.to_string())?; }
+        let (Some(source), Some(target)) = (
+            card_ids.get(&edge.source_card_id),
+            card_ids.get(&edge.target_card_id),
+        ) else {
+            continue;
+        };
+        if source == target {
+            continue;
+        }
+        let key = if source < target {
+            (source.clone(), target.clone())
+        } else {
+            (target.clone(), source.clone())
+        };
+        if seen_edges.insert(key.clone()) {
+            transaction.execute("INSERT INTO study_web_relationships (id, study_web_id, source_flashcard_id, target_flashcard_id, relationship_type, strength) VALUES (?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), &web_id, key.0, key.1, edge.relationship_type.trim().chars().take(32).collect::<String>(), edge.strength.clamp(0.1, 1.0)]).map_err(|error| error.to_string())?;
+        }
     }
     transaction.commit().map_err(|error| error.to_string())?;
     read_study_web_detail(&database.open()?, &web_id)
@@ -7421,7 +9500,10 @@ fn infer_study_web_leaf_relationships(
     else {
         return Vec::new();
     };
-    let valid_ids = cards.iter().map(|card| card.id.as_str()).collect::<HashSet<_>>();
+    let valid_ids = cards
+        .iter()
+        .map(|card| card.id.as_str())
+        .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
     plan.connections
         .into_iter()
@@ -7450,7 +9532,11 @@ fn infer_study_web_leaf_relationships(
             Some(StudyWebSemanticRelationship {
                 source,
                 target,
-                relationship_type: if relationship_type.is_empty() { "direct_relation".into() } else { relationship_type },
+                relationship_type: if relationship_type.is_empty() {
+                    "direct_relation".into()
+                } else {
+                    relationship_type
+                },
                 strength: 0.8,
             })
         })
@@ -7501,7 +9587,12 @@ fn infer_study_web_theme_bridges(
     };
     let members_by_parent = themes
         .iter()
-        .map(|(id, _, members)| (id.as_str(), members.iter().map(String::as_str).collect::<HashSet<_>>()))
+        .map(|(id, _, members)| {
+            (
+                id.as_str(),
+                members.iter().map(String::as_str).collect::<HashSet<_>>(),
+            )
+        })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
     plan.connections
@@ -7523,12 +9614,13 @@ fn infer_study_web_theme_bridges(
             } else {
                 (bridge.target, bridge.source)
             };
-            seen.insert((source.clone(), target.clone())).then_some(StudyWebSemanticRelationship {
-                source,
-                target,
-                relationship_type: "theme_bridge".into(),
-                strength: 0.68,
-            })
+            seen.insert((source.clone(), target.clone()))
+                .then_some(StudyWebSemanticRelationship {
+                    source,
+                    target,
+                    relationship_type: "theme_bridge".into(),
+                    strength: 0.68,
+                })
         })
         .take(themes.len().saturating_sub(1))
         .collect()
@@ -7745,11 +9837,10 @@ fn infer_study_web_relationships(
         }
         parent_roots.push((parent_id, root_card, total_members));
     }
-    if let Some((root_parent, root_card, _)) = parent_roots.iter().max_by(|left, right| {
-        left.2
-            .cmp(&right.2)
-            .then_with(|| left.0.cmp(&right.0))
-    }) {
+    if let Some((root_parent, root_card, _)) = parent_roots
+        .iter()
+        .max_by(|left, right| left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)))
+    {
         for (parent_id, card_id, _) in &parent_roots {
             if parent_id != root_parent {
                 add_edge(root_card, card_id, "theme_backbone", 0.82);
@@ -8307,7 +10398,10 @@ fn study_web_hierarchy_layout_edges(
             .as_ref()
             .filter(|parent| members.contains_key(*parent))
         {
-            children.entry(parent_id.clone()).or_default().push(id.clone());
+            children
+                .entry(parent_id.clone())
+                .or_default()
+                .push(id.clone());
         } else {
             roots.push(id.clone());
         }
@@ -8355,7 +10449,11 @@ fn study_web_hierarchy_layout_edges(
     for (group_id, _, _, cards) in groups {
         let own_anchor = cards.first().cloned();
         for card_id in cards.iter().skip(1) {
-            add(own_anchor.clone(), Some(card_id.clone()), "hierarchy_leaf".into());
+            add(
+                own_anchor.clone(),
+                Some(card_id.clone()),
+                "hierarchy_leaf".into(),
+            );
         }
         let child_anchors = children
             .get(group_id)
@@ -8365,7 +10463,11 @@ fn study_web_hierarchy_layout_edges(
             .collect::<Vec<_>>();
         let group_anchor = own_anchor.or_else(|| child_anchors.first().cloned());
         for child_anchor in child_anchors {
-            add(group_anchor.clone(), Some(child_anchor), "hierarchy_group".into());
+            add(
+                group_anchor.clone(),
+                Some(child_anchor),
+                "hierarchy_group".into(),
+            );
         }
     }
     let root_anchors = roots
@@ -8373,7 +10475,11 @@ fn study_web_hierarchy_layout_edges(
         .filter_map(|root_id| anchor(root_id, &members, &children, &mut HashSet::new()))
         .collect::<Vec<_>>();
     for pair in root_anchors.windows(2) {
-        add(Some(pair[0].clone()), Some(pair[1].clone()), "hierarchy_root".into());
+        add(
+            Some(pair[0].clone()),
+            Some(pair[1].clone()),
+            "hierarchy_root".into(),
+        );
     }
     edges
 }
@@ -8505,8 +10611,7 @@ fn layout_study_web_nodes(
                 let dx = a.0 - b.0;
                 let dy = a.1 - b.1;
                 let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-                let force = 24_000.0 / (distance * distance)
-                    + (278.0 - distance).max(0.0) * 0.17;
+                let force = 24_000.0 / (distance * distance) + (278.0 - distance).max(0.0) * 0.17;
                 let unit = (dx / distance * force, dy / distance * force);
                 if let Some(value) = delta.get_mut(&cards[left].id) {
                     value.0 += unit.0;
@@ -8952,17 +11057,18 @@ pub fn sync_encrypted_library(database: State<'_, Database>) -> CommandResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        available_loopback_port, fallback_study_web_plan, flashcard_expansion_requested, flashcard_generation_prompt, flashcard_system_instruction,
-        flashcard_cards_from_response, is_visual_line_echo, looks_like_math_material,
-        course_calendar_plan_uses_source_dates, course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates, has_fragmented_pdf_spacing, powerpoint_slide_text, repairs_fragmented_pdf_spacing,
-        json_array_from_response, json_object_from_response, semester_end_date,
-        lecture_analysis_source, lecture_markdown_to_editor_content, normalize_lecture_notes_part, quick_mechanics_prepass,
-        should_retry_flashcard_batch_on_cpu,
-        usable_lecture_notes, write_document_docx,
-        study_web_hierarchy_layout_edges,
-        study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
-        StudyWebSemanticPlan, StudyWebSourceCard, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
-        remote_ai_reference, remote_ai_target, REMOTE_AI_PREFIX,
+        available_loopback_port, course_calendar_plan_uses_source_dates,
+        course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates,
+        fallback_study_web_plan, flashcard_cards_from_response, flashcard_expansion_requested,
+        flashcard_generation_prompt, flashcard_system_instruction, has_fragmented_pdf_spacing,
+        is_visual_line_echo, json_array_from_response, json_object_from_response,
+        lecture_analysis_source, lecture_markdown_to_editor_content, looks_like_math_material,
+        normalize_lecture_notes_part, powerpoint_slide_text, quick_mechanics_prepass,
+        remote_ai_reference, remote_ai_target, repairs_fragmented_pdf_spacing, semester_end_date,
+        should_retry_flashcard_batch_on_cpu, study_web_hierarchy_layout_edges,
+        study_web_plan_has_hierarchy, thesaurus_json_from_response, usable_lecture_notes,
+        write_document_docx, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
+        StudyWebSemanticGroup, StudyWebSemanticPlan, StudyWebSourceCard, REMOTE_AI_PREFIX,
     };
     use crate::models::AppSettings;
 
@@ -8989,20 +11095,41 @@ mod tests {
 
     #[test]
     fn reads_explicit_course_dates_without_inventing_dates() {
-        let dates = explicit_course_dates("Exam 1: Due 09/20/2026. Final: 2026-12-09. Chapter 1 has no date.");
-        assert_eq!(dates, vec![("2026-09-20".into(), "09/20/2026".into()), ("2026-12-09".into(), "2026-12-09".into())]);
+        let dates = explicit_course_dates(
+            "Exam 1: Due 09/20/2026. Final: 2026-12-09. Chapter 1 has no date.",
+        );
+        assert_eq!(
+            dates,
+            vec![
+                ("2026-09-20".into(), "09/20/2026".into()),
+                ("2026-12-09".into(), "2026-12-09".into())
+            ]
+        );
     }
 
     #[test]
     fn reads_long_month_dates_using_the_source_term_year() {
-        let dates = explicit_course_dates("ENGL 101 Fall 2026. Final Exam: Tuesday, December 8th at 8:30.");
-        assert!(dates.iter().any(|(date, raw)| date == "2026-12-08" && raw == "December 8"));
+        let dates =
+            explicit_course_dates("ENGL 101 Fall 2026. Final Exam: Tuesday, December 8th at 8:30.");
+        assert!(dates
+            .iter()
+            .any(|(date, raw)| date == "2026-12-08" && raw == "December 8"));
     }
 
     #[test]
     fn compacts_calendar_sources_without_losing_dated_course_work() {
-        let filler = (0..800).map(|index| format!("General note {index} with no date.")).collect::<Vec<_>>().join("\n");
-        let source = CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: format!("Fall 2026\n{filler}\nFinal Exam: December 8th at 8:30."), source_path: None, created_at: String::new() };
+        let filler = (0..800)
+            .map(|index| format!("General note {index} with no date."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = CourseCalendarSource {
+            id: "source".into(),
+            class_id: "class".into(),
+            title: "Syllabus".into(),
+            content_plain: format!("Fall 2026\n{filler}\nFinal Exam: December 8th at 8:30."),
+            source_path: None,
+            created_at: String::new(),
+        };
         let excerpt = course_calendar_source_excerpt(&source);
         assert!(excerpt.len() <= 8_000);
         assert!(excerpt.contains("Final Exam: December 8th"));
@@ -9013,45 +11140,119 @@ mod tests {
         let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory database");
         connection.execute_batch("CREATE TABLE flashcard_sets (id TEXT PRIMARY KEY, class_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE flashcards (id TEXT PRIMARY KEY, set_id TEXT NOT NULL, front TEXT NOT NULL, back TEXT NOT NULL, notes TEXT, image_path TEXT, position INTEGER NOT NULL, is_starred INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").expect("flashcard schema");
         let input = crate::models::CreateFlashcardSetWithCardsInput {
-            class_id: "class".into(), title: "Algebra".into(), description: Some("Generated".into()),
+            class_id: "class".into(),
+            title: "Algebra".into(),
+            description: Some("Generated".into()),
             cards: vec![
-                crate::models::CreateFlashcardCardInput { front: "x^2".into(), back: "x squared".into(), notes: None, image_path: None, position: 0, is_starred: false },
-                crate::models::CreateFlashcardCardInput { front: "x^3".into(), back: "x cubed".into(), notes: None, image_path: None, position: 1, is_starred: false },
+                crate::models::CreateFlashcardCardInput {
+                    front: "x^2".into(),
+                    back: "x squared".into(),
+                    notes: None,
+                    image_path: None,
+                    position: 0,
+                    is_starred: false,
+                },
+                crate::models::CreateFlashcardCardInput {
+                    front: "x^3".into(),
+                    back: "x cubed".into(),
+                    notes: None,
+                    image_path: None,
+                    position: 1,
+                    is_starred: false,
+                },
             ],
         };
         let id = create_flashcard_set_with_cards_in(&mut connection, input).expect("complete set");
-        let count: i64 = connection.query_row("SELECT COUNT(*) FROM flashcards WHERE set_id=?1", [&id], |row| row.get(0)).expect("card count");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM flashcards WHERE set_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .expect("card count");
         assert_eq!(count, 2);
     }
 
     #[test]
     fn rejects_calendar_dates_the_source_does_not_contain() {
-        let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Exam 1: 09/20/2026".into(), source_path: None, created_at: String::new() }];
-        let valid = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-09-20".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
-        let fabricated = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Exam 1".into(), due_date: "2026-08-21".into(), description: String::new(), urgency: String::new(), source_excerpt: String::new() }], game_plan: vec![] };
+        let sources = vec![CourseCalendarSource {
+            id: "source".into(),
+            class_id: "class".into(),
+            title: "Syllabus".into(),
+            content_plain: "Exam 1: 09/20/2026".into(),
+            source_path: None,
+            created_at: String::new(),
+        }];
+        let valid = CourseCalendarAiPlan {
+            items: vec![CourseCalendarAiItem {
+                source_title: "Syllabus".into(),
+                title: "Exam 1".into(),
+                due_date: "2026-09-20".into(),
+                description: String::new(),
+                urgency: String::new(),
+                source_excerpt: String::new(),
+            }],
+            game_plan: vec![],
+        };
+        let fabricated = CourseCalendarAiPlan {
+            items: vec![CourseCalendarAiItem {
+                source_title: "Syllabus".into(),
+                title: "Exam 1".into(),
+                due_date: "2026-08-21".into(),
+                description: String::new(),
+                urgency: String::new(),
+                source_excerpt: String::new(),
+            }],
+            game_plan: vec![],
+        };
         assert!(course_calendar_plan_uses_source_dates(&valid, &sources));
-        assert!(!course_calendar_plan_uses_source_dates(&fabricated, &sources));
+        assert!(!course_calendar_plan_uses_source_dates(
+            &fabricated,
+            &sources
+        ));
     }
 
     #[test]
     fn accepts_source_backed_long_month_calendar_dates() {
-        let sources = vec![CourseCalendarSource { id: "source".into(), class_id: "class".into(), title: "Syllabus".into(), content_plain: "Fall 2026\nFinal Exam: Tuesday, December 8th at 8:30.".into(), source_path: None, created_at: String::new() }];
-        let plan = CourseCalendarAiPlan { items: vec![CourseCalendarAiItem { source_title: "Syllabus".into(), title: "Final Exam".into(), due_date: "2026-12-08".into(), description: String::new(), urgency: "upcoming".into(), source_excerpt: "Final Exam: Tuesday, December 8th at 8:30.".into() }], game_plan: vec![] };
+        let sources = vec![CourseCalendarSource {
+            id: "source".into(),
+            class_id: "class".into(),
+            title: "Syllabus".into(),
+            content_plain: "Fall 2026\nFinal Exam: Tuesday, December 8th at 8:30.".into(),
+            source_path: None,
+            created_at: String::new(),
+        }];
+        let plan = CourseCalendarAiPlan {
+            items: vec![CourseCalendarAiItem {
+                source_title: "Syllabus".into(),
+                title: "Final Exam".into(),
+                due_date: "2026-12-08".into(),
+                description: String::new(),
+                urgency: "upcoming".into(),
+                source_excerpt: "Final Exam: Tuesday, December 8th at 8:30.".into(),
+            }],
+            game_plan: vec![],
+        };
         assert!(course_calendar_plan_uses_source_dates(&plan, &sources));
     }
 
     #[test]
     fn combines_existing_lecture_paper_and_transcript_without_dropping_either() {
-        let source = lecture_analysis_source("The instructor said the answer needs units.", "The worked example uses 12 meters.");
+        let source = lecture_analysis_source(
+            "The instructor said the answer needs units.",
+            "The worked example uses 12 meters.",
+        );
         assert!(source.contains("answer needs units"));
         assert!(source.contains("12 meters"));
     }
 
-
     #[test]
     fn reads_powerpoint_slide_text_without_splitting_a_single_paragraph_run() {
         let slide = r#"<p:sld><a:p><a:r><a:t>Exam</a:t></a:r><a:r><a:t> Review</a:t></a:r></a:p><a:p><a:r><a:t>Bring notes &amp; calculator</a:t></a:r></a:p></p:sld>"#;
-        assert_eq!(powerpoint_slide_text(slide), "Exam Review\nBring notes & calculator");
+        assert_eq!(
+            powerpoint_slide_text(slide),
+            "Exam Review\nBring notes & calculator"
+        );
     }
 
     #[test]
@@ -9066,8 +11267,13 @@ mod tests {
         assert!(corrections.contains(&"a lot"));
         assert!(corrections.contains(&"definitely"));
         assert!(corrections.contains(&"separated"));
-        assert!(issues.iter().any(|issue| issue["original"] == "writers was" && issue["replacement"] == "writers were"));
-        assert!(issues.iter().any(|issue| issue["original"] == "more easier" && issue["replacement"] == "easier"));
+        assert!(issues
+            .iter()
+            .any(|issue| issue["original"] == "writers was"
+                && issue["replacement"] == "writers were"));
+        assert!(issues
+            .iter()
+            .any(|issue| issue["original"] == "more easier" && issue["replacement"] == "easier"));
     }
 
     #[test]
@@ -9097,8 +11303,12 @@ mod tests {
 
     #[test]
     fn expands_math_practice_only_when_requested_and_keeps_new_prompts_distinct() {
-        assert!(flashcard_expansion_requested("Make more questions with different numbers for extra practice."));
-        assert!(!flashcard_expansion_requested("Cover the review guide carefully."));
+        assert!(flashcard_expansion_requested(
+            "Make more questions with different numbers for extra practice."
+        ));
+        assert!(!flashcard_expansion_requested(
+            "Cover the review guide carefully."
+        ));
         let prompt = flashcard_generation_prompt(
             "Use the supplied material.",
             "Make more questions with different numbers.",
@@ -9115,14 +11325,19 @@ mod tests {
 
     #[test]
     fn writes_a_word_compatible_openxml_document() {
-        let path = std::env::temp_dir().join(format!("soflo-docx-test-{}.docx", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("soflo-docx-test-{}.docx", uuid::Uuid::new_v4()));
         let content = r#"{"type":"doc","content":[{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study & Review"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Important"},{"type":"text","text":" details"}]}]}"#;
         write_document_docx(&path, "Review", content, "").expect("write docx");
         let file = std::fs::File::open(&path).expect("open docx");
         let mut archive = zip::ZipArchive::new(file).expect("openxml zip");
         assert!(archive.by_name("[Content_Types].xml").is_ok());
         let mut document = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").expect("document xml"), &mut document).expect("read document xml");
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/document.xml").expect("document xml"),
+            &mut document,
+        )
+        .expect("read document xml");
         assert!(document.contains("Heading2"));
         assert!(document.contains("Study &amp; Review"));
         assert!(document.contains("<w:b/>"));
@@ -9147,9 +11362,13 @@ mod tests {
 
     #[test]
     fn identifies_math_material_and_uses_problem_first_instructions() {
-        assert!(looks_like_math_material("Solve 3x² - 12 = 0 and show the work."));
+        assert!(looks_like_math_material(
+            "Solve 3x² - 12 = 0 and show the work."
+        ));
         assert!(looks_like_math_material("f(x) = 2x + 7; evaluate f(4)."));
-        assert!(!looks_like_math_material("Explain the historical causes of the Boston Tea Party."));
+        assert!(!looks_like_math_material(
+            "Explain the historical causes of the Boston Tea Party."
+        ));
         let instruction = flashcard_system_instruction(true);
         assert!(instruction.contains("problem-first cards"));
         assert!(instruction.contains("do not invent work"));
@@ -9186,7 +11405,11 @@ mod tests {
     fn rejects_a_transcript_echo_as_lecture_notes() {
         let transcript = "00:00–00:20 · Professor · Today we will review strings.\n00:20–00:40 · Professor · Strings are immutable.\n00:40–01:00 · Professor · Use indexes to access characters.\n01:00–01:20 · Professor · Slicing creates substrings.";
         assert!(usable_lecture_notes(transcript, transcript).is_none());
-        assert!(usable_lecture_notes("## Strings\n- Strings are immutable.\n- Indexes access characters.", transcript).is_some());
+        assert!(usable_lecture_notes(
+            "## Strings\n- Strings are immutable.\n- Indexes access characters.",
+            transcript
+        )
+        .is_some());
         let timestamped_notes = "## Strings\n\n#### [00:00–00:20 · Professor]\nStrings are immutable.\n\n#### [00:20–00:40 · Professor]\nIndexes access characters.\n\n#### [00:40–01:00 · Professor]\nSlicing returns a substring.";
         assert!(usable_lecture_notes(timestamped_notes, "A brief transcript excerpt.").is_none());
     }
@@ -9354,14 +11577,19 @@ mod tests {
         let settings = AppSettings {
             online_ai_enabled: true,
             online_ai_endpoint: "https://ai.mikeymele.com/".into(),
-            online_ai_access_key: "a_very_long_device_pairing_key_that_is_not_a_tunnel_token".into(),
+            online_ai_access_key: "a_very_long_device_pairing_key_that_is_not_a_tunnel_token"
+                .into(),
             ..AppSettings::default()
         };
         let reference = remote_ai_reference(&settings).expect("remote reference");
         assert!(reference.starts_with(REMOTE_AI_PREFIX));
-        let target = remote_ai_target(&reference).expect("remote target").expect("valid target");
+        let target = remote_ai_target(&reference)
+            .expect("remote target")
+            .expect("valid target");
         assert_eq!(target.endpoint, "https://ai.mikeymele.com");
         assert_eq!(target.access_key, settings.online_ai_access_key);
-        assert!(remote_ai_target("soflo-remote://not-a-valid-reference").expect("remote marker").is_err());
+        assert!(remote_ai_target("soflo-remote://not-a-valid-reference")
+            .expect("remote marker")
+            .is_err());
     }
 }

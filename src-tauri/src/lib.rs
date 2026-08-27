@@ -13,7 +13,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let setup_mode = std::env::args().any(|argument| argument == "--installer" || argument == "--uninstaller");
+            let setup_mode = std::env::args()
+                .any(|argument| argument == "--installer" || argument == "--uninstaller");
             if !setup_mode {
                 let data_directory: PathBuf = app
                     .path()

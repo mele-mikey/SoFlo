@@ -489,10 +489,14 @@ fn start_model(state: &ServerState, config: &ServerConfig) -> Result<(), String>
         "127.0.0.1",
         "--port",
         &MODEL_PORT.to_string(),
+        // A 14B Q4 model plus a 16K context and two parallel slots can spill
+        // from a 16 GB GPU into system RAM. Keep one responsive GPU-resident
+        // request; document work is chunked by the client before it reaches
+        // this server, so this is not a document-size cap.
         "--ctx-size",
-        "16384",
+        "8192",
         "--parallel",
-        "2",
+        "1",
         "--gpu-layers",
         "auto",
         "--reasoning",

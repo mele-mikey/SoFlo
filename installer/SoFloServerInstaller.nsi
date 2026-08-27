@@ -4,8 +4,9 @@ Unicode true
 ManifestDPIAware true
 ManifestDPIAwareness PerMonitorV2
 RequestExecutionLevel user
-SetCompressor /SOLID lzma
-SetDatablockOptimize on
+; Keep the Server payload inspectable instead of using a solid-packed archive.
+SetCompressor /FINAL zlib
+SetDatablockOptimize off
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
 SilentInstall silent
