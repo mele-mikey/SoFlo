@@ -171,6 +171,12 @@ const WORD_AI_CONTEXT_SIZE: &str = "4096";
 const AI_GPU_LAYERS: &str = "all";
 const AI_PARALLEL_REQUESTS: &str = "1";
 const AI_SOURCE_CHUNK_CHARS: usize = 12_000;
+// The desktop model has a 16K window, but an Online AI server can be
+// deliberately configured with 8K to stay resident on a 16 GB GPU. Lecture
+// prompts include instructions and metadata as well as the source, so keep
+// their source pieces conservative enough for either runtime.
+const LECTURE_AI_SOURCE_CHUNK_CHARS: usize = 6_000;
+const LECTURE_AI_CONTEXT_NOTE_CHARS: usize = 1_200;
 const FLASHCARD_SOURCE_CHUNK_CHARS: usize = 6_000;
 const FLASHCARD_BATCH_CARD_LIMIT: usize = 10;
 const FLASHCARD_BATCH_MAX_TOKENS: u16 = 1_800;
@@ -5769,10 +5775,27 @@ fn lecture_analysis_context(connection: &Connection, lecture_id: &str) -> Comman
     connection.query_row(
         "SELECT course_code, course_name, lecture_date, title, COALESCE(professor_snapshot, ''), COALESCE(content_plain, '') FROM lectures WHERE id=?1",
         [lecture_id],
-        |row| Ok(format!(
+        |row| {
+            // The complete paper is supplied separately to the organizer.
+            // Repeating it in the metadata used to make a long lecture exceed
+            // an online server's context window before the first request ran.
+            let notes = row.get::<_, String>(5)?;
+            let note_preview = notes
+                .split_whitespace()
+                .scan(0usize, |length, word| {
+                    let next = length.saturating_add(word.len()).saturating_add(1);
+                    (next <= LECTURE_AI_CONTEXT_NOTE_CHARS).then(|| {
+                        *length = next;
+                        word
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(format!(
             "Course: {} {}\nLecture date: {}\nLecture title: {}\nProfessor: {}\nStudent notes already written: {}",
-            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?
-        )),
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, note_preview
+        ))
+        },
     ).map_err(|_| "That lecture could not be found.".to_string())
 }
 
@@ -6061,6 +6084,31 @@ fn usable_lecture_notes(value: &str, transcript_part: &str) -> Option<String> {
     (!likely_transcript_echo && timestamp_sections < 3).then_some(notes)
 }
 
+/// A model timeout must not strand a completed recording in `analysis_failed`.
+/// This deliberately conservative fallback keeps every captured fact visible
+/// as readable bullets; a later retry can still replace it with the richer AI
+/// organization. It is only used after both AI attempts fail.
+fn fallback_lecture_notes_part(source: &str) -> String {
+    let bullets = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.strip_prefix('[')
+                .and_then(|line| line.split_once(']').map(|(_, text)| text.trim()))
+                .unwrap_or(line)
+        })
+        .map(clean_lecture_markdown_line)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    if bullets.is_empty() {
+        "## Lecture notes\n\n- No readable lecture text was available.".into()
+    } else {
+        format!("## Lecture notes\n\n{}", bullets.join("\n"))
+    }
+}
+
 fn fallback_lecture_summary(detailed_notes: &str) -> serde_json::Value {
     let highlights = detailed_notes
         .lines()
@@ -6156,11 +6204,11 @@ fn create_lecture_note_suggestions(
     let prompt = format!(
         "LECTURE CONTEXT\n{}\n\nCURRENT STUDENT NOTES\n{}\n\nTIMESTAMPED NOTE MOMENTS\n{}\n\nLECTURE GUIDE\n{}",
         lecture_context,
-        student_notes.chars().take(28_000).collect::<String>(),
-        timeline.chars().take(30_000).collect::<String>(),
-        lecture_digest.chars().take(24_000).collect::<String>(),
+        student_notes.chars().take(1_500).collect::<String>(),
+        timeline.chars().take(2_000).collect::<String>(),
+        lecture_digest.chars().take(3_000).collect::<String>(),
     );
-    let output = local_chat_text(client, port, system, &prompt, 4_200)?;
+    let output = local_chat_text(client, port, system, &prompt, 1_200)?;
     let json = json_array_from_response(&output).ok_or_else(|| {
         "The local AI model returned unreadable lecture-note suggestions.".to_string()
     })?;
@@ -6243,7 +6291,7 @@ fn create_lecture_analysis(
         .timeout(Duration::from_secs(150))
         .build()
         .map_err(|_| "SoFlo could not connect to its local AI model.".to_string())?;
-    let chunks = split_source_for_ai(&source_notes, AI_SOURCE_CHUNK_CHARS);
+    let chunks = split_source_for_ai(&source_notes, LECTURE_AI_SOURCE_CHUNK_CHARS);
     let mut notes = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
         let progress_connection = database.open()?;
@@ -6272,7 +6320,7 @@ fn create_lecture_analysis(
                 usable_lecture_notes(&value, chunk)
             }
         };
-        let note = local_chat_text(&client, port, system, &prompt, 2_000)
+        let note = local_chat_text(&client, port, system, &prompt, 1_600)
             .ok()
             .and_then(usable);
         // A retry gives a temporarily busy local model a shorter, simpler
@@ -6287,11 +6335,14 @@ fn create_lecture_analysis(
             local_chat_text(&client, port, retry_system, &prompt, 1_400)
                 .ok()
                 .and_then(usable)
-        }).ok_or_else(|| format!("SoFlo could not turn lecture part {} into study notes. Your existing lecture paper was left unchanged.", index + 1))?;
+        })
+        // Keep the lecture usable even if the model has a transient timeout,
+        // returns an empty completion, or is still warming up remotely.
+        .unwrap_or_else(|| fallback_lecture_notes_part(chunk));
         notes.push(note);
     }
     let detailed_notes = notes.join("\n\n");
-    let digest_chunks = split_source_for_ai(&detailed_notes, AI_SOURCE_CHUNK_CHARS * 2);
+    let digest_chunks = split_source_for_ai(&detailed_notes, LECTURE_AI_SOURCE_CHUNK_CHARS);
     let mut digest_parts = Vec::with_capacity(digest_chunks.len());
     for (index, chunk) in digest_chunks.iter().enumerate() {
         let progress_connection = database.open()?;
@@ -6314,13 +6365,20 @@ fn create_lecture_analysis(
             digest_chunks.len(),
             chunk
         );
-        let digest = local_chat_text(&client, port, system, &prompt, 1_200)
+        let digest = local_chat_text(&client, port, system, &prompt, 900)
             .ok()
             .filter(|digest| !digest.trim().is_empty())
             .unwrap_or_else(|| chunk.to_string());
         digest_parts.push(digest);
     }
-    let synthesis = digest_parts.join("\n\n");
+    // The guide is supplemental; it must not be allowed to grow beyond the
+    // same safe prompt budget used for each source section. The full detailed
+    // paper remains in `detailed_notes` and drives the deterministic fallback.
+    let synthesis = digest_parts
+        .join("\n\n")
+        .chars()
+        .take(LECTURE_AI_SOURCE_CHUNK_CHARS)
+        .collect::<String>();
     let system = "You are SoFlo's lecture analyst. Using every supplied lecture digest, return exactly one valid JSON object with keys overview, keyPoints, concepts, questions, nextSteps. Make the overview a helpful multi-sentence explanation rather than a one-line summary. The other keys are arrays with as many useful entries as the lecture supports. Preserve all assignments, dates, names, examples, corrections, and uncertainty. Never invent sources or information not present in the lecture.";
     let output = local_chat_text(&client, port, system, &format!("LECTURE CONTEXT\n{}\n\nCreate a complete course-ready lecture guide from these chronological digests:\n\n{}", lecture_context, synthesis), 3_200).unwrap_or_default();
     let value: serde_json::Value = json_object_from_response(&output)
@@ -11059,16 +11117,17 @@ mod tests {
     use super::{
         available_loopback_port, course_calendar_plan_uses_source_dates,
         course_calendar_source_excerpt, create_flashcard_set_with_cards_in, explicit_course_dates,
-        fallback_study_web_plan, flashcard_cards_from_response, flashcard_expansion_requested,
-        flashcard_generation_prompt, flashcard_system_instruction, has_fragmented_pdf_spacing,
-        is_visual_line_echo, json_array_from_response, json_object_from_response,
-        lecture_analysis_source, lecture_markdown_to_editor_content, looks_like_math_material,
-        normalize_lecture_notes_part, powerpoint_slide_text, quick_mechanics_prepass,
-        remote_ai_reference, remote_ai_target, repairs_fragmented_pdf_spacing, semester_end_date,
-        should_retry_flashcard_batch_on_cpu, study_web_hierarchy_layout_edges,
-        study_web_plan_has_hierarchy, thesaurus_json_from_response, usable_lecture_notes,
-        write_document_docx, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
-        StudyWebSemanticGroup, StudyWebSemanticPlan, StudyWebSourceCard, REMOTE_AI_PREFIX,
+        fallback_lecture_notes_part, fallback_study_web_plan, flashcard_cards_from_response,
+        flashcard_expansion_requested, flashcard_generation_prompt, flashcard_system_instruction,
+        has_fragmented_pdf_spacing, is_visual_line_echo, json_array_from_response,
+        json_object_from_response, lecture_analysis_source, lecture_markdown_to_editor_content,
+        looks_like_math_material, normalize_lecture_notes_part, powerpoint_slide_text,
+        quick_mechanics_prepass, remote_ai_reference, remote_ai_target,
+        repairs_fragmented_pdf_spacing, semester_end_date, should_retry_flashcard_batch_on_cpu,
+        study_web_hierarchy_layout_edges, study_web_plan_has_hierarchy,
+        thesaurus_json_from_response, usable_lecture_notes, write_document_docx,
+        CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource, StudyWebSemanticGroup,
+        StudyWebSemanticPlan, StudyWebSourceCard, REMOTE_AI_PREFIX,
     };
     use crate::models::AppSettings;
 
@@ -11412,6 +11471,16 @@ mod tests {
         .is_some());
         let timestamped_notes = "## Strings\n\n#### [00:00–00:20 · Professor]\nStrings are immutable.\n\n#### [00:20–00:40 · Professor]\nIndexes access characters.\n\n#### [00:40–01:00 · Professor]\nSlicing returns a substring.";
         assert!(usable_lecture_notes(timestamped_notes, "A brief transcript excerpt.").is_none());
+    }
+
+    #[test]
+    fn keeps_a_lecture_readable_when_the_model_needs_to_be_retried() {
+        let source = "[00:00–00:20 · Professor] The Revolution began with a tax dispute.\n[00:20–00:40 · Professor] Compare the colonial and British perspectives.";
+        let fallback = fallback_lecture_notes_part(source);
+        assert!(fallback.starts_with("## Lecture notes"));
+        assert!(fallback.contains("The Revolution began with a tax dispute."));
+        assert!(fallback.contains("Compare the colonial and British perspectives."));
+        assert!(!fallback.contains("00:00–00:20"));
     }
 
     #[test]
