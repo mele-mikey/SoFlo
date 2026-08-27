@@ -324,7 +324,150 @@ static WORD_AI_SERVER: OnceLock<Mutex<Option<AiServer>>> = OnceLock::new();
 static AI_SERVER_SESSION_PINNED: AtomicBool = AtomicBool::new(false);
 static WORD_AI_SERVER_SESSION_PINNED: AtomicBool = AtomicBool::new(false);
 
+const REMOTE_AI_PREFIX: &str = "soflo-remote://";
+const REMOTE_RELAY_MAX_BODY_BYTES: usize = 6_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteAiTarget {
+    endpoint: String,
+    access_key: String,
+}
+
+struct RemoteAiRelay {
+    port: u16,
+    target: Mutex<RemoteAiTarget>,
+}
+
+static REMOTE_AI_RELAY: OnceLock<RemoteAiRelay> = OnceLock::new();
+
+fn remote_ai_target(reference: &str) -> Option<CommandResult<RemoteAiTarget>> {
+    let encoded = reference.trim().strip_prefix(REMOTE_AI_PREFIX)?;
+    Some((|| {
+        let (encoded_endpoint, encoded_key) = encoded
+            .split_once('.')
+            .ok_or_else(|| "The online AI connection is incomplete. Re-enter the endpoint and pairing key in Settings.".to_string())?;
+        let endpoint = String::from_utf8(BASE64.decode(encoded_endpoint).map_err(|_| "The online AI endpoint is invalid.".to_string())?)
+            .map_err(|_| "The online AI endpoint is invalid.".to_string())?;
+        let access_key = String::from_utf8(BASE64.decode(encoded_key).map_err(|_| "The online AI pairing key is invalid.".to_string())?)
+            .map_err(|_| "The online AI pairing key is invalid.".to_string())?;
+        let endpoint = endpoint.trim().trim_end_matches('/').to_string();
+        if !endpoint.starts_with("https://") || endpoint.len() > 2_000 || access_key.trim().len() < 32 {
+            return Err("Enter a valid HTTPS SoFlo Server endpoint and device pairing key in Settings.".into());
+        }
+        Ok(RemoteAiTarget { endpoint, access_key: access_key.trim().to_string() })
+    })())
+}
+
+fn remote_ai_reference(settings: &AppSettings) -> CommandResult<String> {
+    if !settings.online_ai_enabled {
+        return Ok(settings.ai_model_path.clone());
+    }
+    let endpoint = settings.online_ai_endpoint.trim().trim_end_matches('/');
+    let key = settings.online_ai_access_key.trim();
+    if !endpoint.starts_with("https://") || key.len() < 32 {
+        return Err("Enter your HTTPS SoFlo Server endpoint and its device pairing key in Settings.".into());
+    }
+    Ok(format!("{}{}.{}", REMOTE_AI_PREFIX, BASE64.encode(endpoint), BASE64.encode(key)))
+}
+
+fn relay_http_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
+    let header = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+fn relay_request_parts(stream: &mut TcpStream) -> CommandResult<(String, String, Vec<u8>)> {
+    stream.set_read_timeout(Some(Duration::from_secs(45))).map_err(|_| "The online AI relay could not read a request.".to_string())?;
+    let mut bytes = Vec::with_capacity(8_192);
+    let mut header_end = None;
+    let mut buffer = [0_u8; 8_192];
+    while header_end.is_none() {
+        let read = stream.read(&mut buffer).map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
+        if read == 0 { return Err("The online AI relay received an empty request.".into()); }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
+        header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|position| position + 4);
+    }
+    let header_end = header_end.unwrap_or_default();
+    let header = std::str::from_utf8(&bytes[..header_end]).map_err(|_| "The online AI relay received an invalid request.".to_string())?;
+    let mut lines = header.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_string();
+    let path = request_parts.next().unwrap_or_default().split('?').next().unwrap_or_default().to_string();
+    let content_length = lines
+        .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("content-length")).and_then(|(_, value)| value.trim().parse::<usize>().ok()))
+        .unwrap_or(0);
+    if content_length > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
+    let required = header_end.saturating_add(content_length);
+    while bytes.len() < required {
+        let read = stream.read(&mut buffer).map_err(|_| "The online AI relay received an incomplete request.".to_string())?;
+        if read == 0 { return Err("The online AI relay received an incomplete request.".into()); }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > REMOTE_RELAY_MAX_BODY_BYTES { return Err("The online AI request is too large.".into()); }
+    }
+    Ok((method, path, bytes[header_end..required].to_vec()))
+}
+
+fn relay_remote_ai_connection(mut stream: TcpStream) {
+    let request = relay_request_parts(&mut stream);
+    let Ok((method, path, body)) = request else {
+        relay_http_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", b"Invalid local relay request.");
+        return;
+    };
+    if !matches!((method.as_str(), path.as_str()), ("GET", "/v1/models") | ("POST", "/v1/chat/completions")) {
+        relay_http_response(&mut stream, "404 Not Found", "text/plain; charset=utf-8", b"Not found.");
+        return;
+    }
+    let Some(relay) = REMOTE_AI_RELAY.get() else {
+        relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is not configured.");
+        return;
+    };
+    let target = match relay.target.lock() { Ok(target) => target.clone(), Err(_) => { relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is unavailable."); return; } };
+    let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(240)).build() { Ok(client) => client, Err(_) => { relay_http_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"Online AI relay is unavailable."); return; } };
+    let request = match method.as_str() {
+        "GET" => client.get(format!("{}{}", target.endpoint, path)),
+        _ => client.post(format!("{}{}", target.endpoint, path)).header("Content-Type", "application/json").body(body),
+    }.header("Authorization", format!("Bearer {}", target.access_key)).header("Accept", "application/json");
+    match request.send() {
+        Ok(response) => {
+            let status = response.status();
+            let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("application/json").to_string();
+            match response.bytes() {
+                Ok(response_body) => relay_http_response(&mut stream, &format!("{} {}", status.as_u16(), status.canonical_reason().unwrap_or("Response")), &content_type, &response_body),
+                Err(_) => relay_http_response(&mut stream, "502 Bad Gateway", "text/plain; charset=utf-8", b"SoFlo Server returned an unreadable response."),
+            }
+        }
+        Err(_) => relay_http_response(&mut stream, "502 Bad Gateway", "text/plain; charset=utf-8", b"SoFlo Server could not be reached."),
+    }
+}
+
+fn ensure_remote_ai_relay(target: RemoteAiTarget) -> CommandResult<u16> {
+    if let Some(relay) = REMOTE_AI_RELAY.get() {
+        *relay.target.lock().map_err(|_| "SoFlo's online AI relay is unavailable.".to_string())? = target;
+        return Ok(relay.port);
+    }
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "SoFlo could not reserve its private online AI relay.".to_string())?;
+    let port = listener.local_addr().map_err(|_| "SoFlo could not read its private online AI relay port.".to_string())?.port();
+    let relay = RemoteAiRelay { port, target: Mutex::new(target) };
+    if REMOTE_AI_RELAY.set(relay).is_err() {
+        let relay = REMOTE_AI_RELAY.get().ok_or_else(|| "SoFlo's online AI relay is unavailable.".to_string())?;
+        return Ok(relay.port);
+    }
+    thread::Builder::new().name("soflo-online-ai-relay".into()).spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = thread::Builder::new().name("soflo-online-ai-request".into()).spawn(move || relay_remote_ai_connection(stream));
+        }
+    }).map_err(|_| "SoFlo could not start its private online AI relay.".to_string())?;
+    Ok(port)
+}
+
 fn resolve_ai_model_path(app: &tauri::AppHandle, requested_path: &str) -> CommandResult<String> {
+    if let Some(target) = remote_ai_target(requested_path) {
+        target?;
+        return Ok(requested_path.trim().to_string());
+    }
     let requested = Path::new(requested_path.trim());
     let default_path = app
         .path()
@@ -2358,6 +2501,9 @@ fn split_source_for_ai(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn ensure_ai_server(model_path: &str, app: &tauri::AppHandle) -> CommandResult<u16> {
+    if let Some(target) = remote_ai_target(model_path) {
+        return ensure_remote_ai_relay(target?);
+    }
     if let Some(port) = shared_model_server_port(&WORD_AI_SERVER, model_path) { return Ok(port); }
     // Qwen 3 can spend a completion entirely in its reasoning channel, which
     // leaves message.content empty for JSON- and text-based SoFlo features.
@@ -2508,6 +2654,9 @@ fn ensure_model_server_with_profiles(
     reasoning: &str,
     force_cpu: bool,
 ) -> CommandResult<u16> {
+    if let Some(target) = remote_ai_target(model_path) {
+        return ensure_remote_ai_relay(target?);
+    }
     let state = server_state.get_or_init(|| Mutex::new(None));
     let mut guard = state
         .lock()
@@ -4738,10 +4887,10 @@ fn create_lecture_note_suggestions(
 fn create_lecture_analysis(app: &tauri::AppHandle, database: &Database, lecture_id: &str) -> CommandResult<()> {
     let connection = database.open()?;
     let settings = get_settings(&connection, None)?;
-    if !settings.ai_enabled || settings.ai_model_path.trim().is_empty() {
+    if !settings.ai_enabled || (!settings.online_ai_enabled && settings.ai_model_path.trim().is_empty()) {
         return Err("Enable General AI to create the lecture analysis.".into());
     }
-    let model_path = resolve_ai_model_path(app, &settings.ai_model_path)?;
+    let model_path = resolve_ai_model_path(app, &remote_ai_reference(&settings)?)?;
     let (raw_transcript, cleaned_transcript) = stored_lecture_transcripts(&connection, lecture_id)?;
     let lecture_context = lecture_analysis_context(&connection, lecture_id)?;
     let organizing_written_notes = cleaned_transcript.trim().is_empty();
@@ -8810,7 +8959,9 @@ mod tests {
         study_web_hierarchy_layout_edges,
         study_web_plan_has_hierarchy, thesaurus_json_from_response, StudyWebSemanticGroup,
         StudyWebSemanticPlan, StudyWebSourceCard, CourseCalendarAiItem, CourseCalendarAiPlan, CourseCalendarSource,
+        remote_ai_reference, remote_ai_target, REMOTE_AI_PREFIX,
     };
+    use crate::models::AppSettings;
 
     #[test]
     fn reserves_a_fresh_loopback_port_for_each_model_server() {
@@ -9193,5 +9344,21 @@ mod tests {
         assert_eq!(parsed["close"].as_array().map(Vec::len), Some(2));
         assert_eq!(parsed["related"].as_array().map(Vec::len), Some(2));
         assert_eq!(parsed["broad"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn remote_ai_reference_round_trips_a_paired_https_server() {
+        let settings = AppSettings {
+            online_ai_enabled: true,
+            online_ai_endpoint: "https://ai.mikeymele.com/".into(),
+            online_ai_access_key: "a_very_long_device_pairing_key_that_is_not_a_tunnel_token".into(),
+            ..AppSettings::default()
+        };
+        let reference = remote_ai_reference(&settings).expect("remote reference");
+        assert!(reference.starts_with(REMOTE_AI_PREFIX));
+        let target = remote_ai_target(&reference).expect("remote target").expect("valid target");
+        assert_eq!(target.endpoint, "https://ai.mikeymele.com");
+        assert_eq!(target.access_key, settings.online_ai_access_key);
+        assert!(remote_ai_target("soflo-remote://not-a-valid-reference").expect("remote marker").is_err());
     }
 }

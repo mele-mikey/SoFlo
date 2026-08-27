@@ -408,6 +408,12 @@ pub struct AppSettings {
     #[serde(default = "default_ai_model_tier")]
     pub ai_voice_model_tier: String,
     #[serde(default)]
+    pub online_ai_enabled: bool,
+    #[serde(default)]
+    pub online_ai_endpoint: String,
+    #[serde(default)]
+    pub online_ai_access_key: String,
+    #[serde(default)]
     pub lecture_microphone_id: String,
     #[serde(default)]
     pub study_web_auto_pin: bool,
@@ -465,6 +471,9 @@ impl Default for AppSettings {
             ai_writing_model_tier: default_ai_model_tier(),
             ai_voice_model_path: String::new(),
             ai_voice_model_tier: default_ai_model_tier(),
+            online_ai_enabled: false,
+            online_ai_endpoint: String::new(),
+            online_ai_access_key: String::new(),
             lecture_microphone_id: String::new(),
             study_web_auto_pin: false,
             study_web_group_highlights: false,

@@ -323,6 +323,9 @@ export interface AppSettings {
   aiGeneralModelTier: 'low' | 'medium' | 'high'
   aiWritingModelTier: 'low' | 'medium' | 'high'
   aiVoiceModelTier: 'low' | 'medium' | 'high'
+  onlineAiEnabled: boolean
+  onlineAiEndpoint: string
+  onlineAiAccessKey: string
   lectureMicrophoneId: string
   studyWebAutoPin: boolean
   studyWebGroupHighlights: boolean
