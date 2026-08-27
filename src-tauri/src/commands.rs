@@ -1653,9 +1653,17 @@ pub async fn review_grammar_text(
     text: String,
     quick: bool,
     paper_context: String,
+    adjacent_context: String,
 ) -> CommandResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        review_grammar_text_blocking(app, model_path, text, quick, paper_context)
+        review_grammar_text_blocking(
+            app,
+            model_path,
+            text,
+            quick,
+            paper_context,
+            adjacent_context,
+        )
     })
     .await
     .map_err(|_| "SoFlo's local AI task stopped unexpectedly.".to_string())?
@@ -2013,6 +2021,7 @@ fn review_grammar_text_blocking(
     text: String,
     quick: bool,
     paper_context: String,
+    adjacent_context: String,
 ) -> CommandResult<String> {
     // The editor sends exactly the complete US-Letter page currently in view.
     // Do not trim it here: reviewing page three must never silently become a
@@ -2022,6 +2031,12 @@ fn review_grammar_text_blocking(
         return Ok("[]".into());
     }
     let paper_context = normalized_paper_context(&paper_context);
+    let adjacent_context = adjacent_context.chars().take(10_000).collect::<String>();
+    let page_boundary_context = if adjacent_context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nADJACENT PAGE CONTEXT — use this only to understand a sentence that crosses a page boundary. Never return a suggestion from this context; suggestions must be copied from TARGET PAGE only.\n{}", adjacent_context)
+    };
     emit_ai_progress(&app, 12, "Reading your writing");
     let general_model_path = resolve_ai_model_path(&app, &model_path)?;
     let server_port = ensure_ai_server(&general_model_path, &app)?;
@@ -2037,7 +2052,7 @@ fn review_grammar_text_blocking(
     let mut model_suggestion_count = 0usize;
     if quick {
         let system = "You are SoFlo's fast, context-aware English mechanics checker. The supplied text is one complete page currently visible to the writer. Proofread that entire page from its first sentence through its final sentence before responding. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Return up to 12 clear errors. Find misspellings, capitalization, apostrophes, duplicated spaces, repeated words, obvious punctuation, unambiguous wrong-word or homophone mistakes, and clear subject-verb agreement errors. Every object must have exactly these six keys: kind, original, replacement, reason, category, alternatives. kind must be mechanic. Copy original exactly from the input and make replacement the smallest correction. alternatives must be an empty JSON array. Use surrounding meaning and the document context to judge punctuation. Do not report style, proper names, or text that is already correct. Return [] only after checking the whole page and finding no clear mechanics errors.";
-        let request = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nProofread this complete visible page. Return JSON only.\n\n{}", paper_context, source);
+        let request = format!("DOCUMENT GOAL AND VOICE:\n{}{}\n\nTARGET PAGE — Proofread this complete visible page only. Return JSON only.\n\n{}", paper_context, page_boundary_context, source);
         let output = local_chat_text(&client, server_port, system, &request, 1_150)?;
         if let Some(array) = json_array_from_response(&output) {
             if let Ok(serde_json::Value::Array(items)) =
@@ -2049,7 +2064,7 @@ fn review_grammar_text_blocking(
     } else {
         emit_ai_progress(&app, 45, "Auditing grammar across this page");
         let mechanics_system = "You are SoFlo's rigorous copy editor. The supplied text is one complete page currently visible to the writer. Inspect every sentence, including the middle and end of the page. Return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 8 to 12 distinct, unambiguous mechanics improvements when the page has that many; return fewer only when the writing is genuinely clean. Check spelling, capitalization, apostrophes, agreement, tense consistency, homophones, word forms, hyphenation, repeated words, duplicated spaces, comma use, sentence boundaries, fragments, run-ons, and contextually correct punctuation. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be mechanic. original must be copied exactly from the input. replacement must be the smallest exact correction, usually 1 to 6 words. reason must explain the specific grammar rule or contextual error. alternatives must be an empty JSON array. Never invent facts, change citations, flag proper names merely for being unfamiliar, or report text that is already correct.";
-        let mechanics_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nAudit this complete visible page for mechanics. Return JSON only.\n\n{}", paper_context, source);
+        let mechanics_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}{}\n\nTARGET PAGE — Audit this complete visible page only for mechanics. Return JSON only.\n\n{}", paper_context, page_boundary_context, source);
         let mechanics_output = local_chat_text(
             &client,
             server_port,
@@ -2069,7 +2084,7 @@ fn review_grammar_text_blocking(
 
         emit_ai_progress(&app, 67, "Finding stronger writing choices");
         let style_system = "You are SoFlo's senior college-writing editor. The supplied text is one complete page currently visible to the writer. Read the entire page before responding, then return only one complete valid JSON array: no Markdown, code fences, or commentary. Find 6 to 10 concrete, meaningful writing improvements when the page has that many. Focus on vague or conversational language, weak verbs, repetitive sentence starters, imprecise claims, choppy transitions, redundant phrasing, weak topic or closing phrases, unclear logic, and opportunities for a more formal, precise voice that still matches the stated document goal. Every object must use ONLY these five keys: kind, original, replacement, reason, alternatives. kind must be style. original must be copied exactly from the input. replacement must preserve the writer's meaning. For each suggestion, target a focused 1 to 9 word phrase; never rewrite a whole sentence. reason must explain specifically why the replacement is clearer, more formal, more precise, or improves flow. alternatives must contain zero to two short optional replacements. Do not invent facts, alter quotations or citations, make empty thesaurus substitutions, or praise text instead of offering a real improvement.";
-        let style_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}\n\nReview this complete visible page for focused writing improvements. Return JSON only.\n\n{}", paper_context, source);
+        let style_prompt = format!("DOCUMENT GOAL AND VOICE:\n{}{}\n\nTARGET PAGE — Review this complete visible page only for focused writing improvements. Return JSON only.\n\n{}", paper_context, page_boundary_context, source);
         let style_output =
             local_chat_text(&client, server_port, style_system, &style_prompt, 1_700)?;
         if let Some(array) = json_array_from_response(&style_output) {
@@ -2087,8 +2102,8 @@ fn review_grammar_text_blocking(
     if !quick && model_suggestion_count < 8 {
         emit_ai_progress(&app, 78, "Double-checking grammar and punctuation");
         let audit_prompt = format!(
-            "DOCUMENT GOAL AND VOICE:\n{}\n\nReview this same paper again. Find 6 to 8 additional, distinct grammar or punctuation issues. Return JSON only.\n\n{}",
-            paper_context,
+            "DOCUMENT GOAL AND VOICE:\n{}{}\n\nReview this same TARGET PAGE again. Find 6 to 8 additional, distinct grammar or punctuation issues. Return JSON only.\n\n{}",
+            paper_context, page_boundary_context,
             source
         );
         let audit_system = "You are the second-pass grammar quality check for a college paper. Return only a valid JSON array with exactly these five keys per object: kind, original, replacement, reason, alternatives. kind must be mechanic. Find clear, specific grammar, spelling, agreement, capitalization, apostrophe, homophone, or punctuation problems that a first pass may have missed. Copy original exactly from the paper. Keep each correction focused on 1 to 6 words. Do not return style-only advice, commentary, Markdown, or an empty array when clear mechanics errors exist.";

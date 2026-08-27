@@ -475,11 +475,11 @@ function App() {
     setAiProgress({ progress: 3, message: 'Preparing your document' })
     try { return importAiFormattedNote(await api.refineDocumentText(aiModelPath, text, documentKind), source, text) } finally { setAiWorking(false); setAiProgress(null) }
   }
-  const reviewGrammar = async (text: string, quick: boolean, paperContext: string) => {
+  const reviewGrammar = async (text: string, quick: boolean, paperContext: string, adjacentContext = '') => {
     const aiModelPath = await ensureAiModel()
     if (aiModelPath === null) throw new Error('Turn on AI in Settings to review grammar.')
     setAiProgress({ progress: 3, message: 'Preparing your grammar review' })
-    try { return await api.reviewGrammarText(aiModelPath, text, quick, paperContext) } finally { setAiProgress(null) }
+    try { return await api.reviewGrammarText(aiModelPath, text, quick, paperContext, adjacentContext) } finally { setAiProgress(null) }
   }
   const researchAndGrade = async (text: string, paperContext: string) => {
     const aiModelPath = await ensureAiModel()

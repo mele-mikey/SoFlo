@@ -46,7 +46,7 @@ interface DocumentEditorProps {
   onSpellcheckChange: (value: boolean) => void
   onAiGrammarEnabledChange: (value: boolean) => void
   grammarProgress: { progress: number; message: string } | null
-  onGrammarReview: (text: string, quick: boolean, paperContext: string) => Promise<string>
+  onGrammarReview: (text: string, quick: boolean, paperContext: string, adjacentContext: string) => Promise<string>
   onResearchAndGrade: (text: string, paperContext: string) => Promise<string>
   onDefineWord: (word: string, paperContext: string) => Promise<string>
   onAiThesaurus: (word: string, paperContext: string) => Promise<string>
@@ -795,10 +795,11 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
   const paperZoomDismissRef = useRef<number | null>(null)
   aiEnabledRef.current = aiEnabled
   defineWordRef.current = onDefineWord
-  const grammarReviewRef = useRef<(quick: boolean) => Promise<boolean>>(async () => false)
+  const grammarReviewRef = useRef<(quick: boolean, pageIndex?: number, prefetched?: boolean) => Promise<boolean>>(async () => false)
   const grammarLastInputAt = useRef(0)
   const grammarLastAutomaticReviewAt = useRef(0)
   const visiblePageReviewRef = useRef({ key: '', visibleAt: 0 })
+  const reviewedGrammarPagesRef = useRef(new Set<string>())
   // When AI spelling is enabled, it owns the marks so the editor never mixes
   // its straight interactive underlines with the browser's red squiggles.
   const customAiSpellcheck = aiEnabled && aiGrammarEnabled
@@ -957,6 +958,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     onUpdate: ({ editor: nextEditor }) => {
       const now = Date.now()
       grammarLastInputAt.current = now
+      reviewedGrammarPagesRef.current.clear()
       const nextContent = JSON.stringify(nextEditor.getJSON())
       editorContentRef.current = nextContent
       onChange(nextContent, nextEditor.getText(), deriveTitle ? derivePaperTitle(nextEditor) : document.title)
@@ -1030,6 +1032,7 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     selectedWordReferenceRef.current = ''
     selectedWordRangeRef.current = null
     ignoredGrammarKeysRef.current.clear()
+    reviewedGrammarPagesRef.current.clear()
     grammarLastAutomaticReviewAt.current = 0
     wordReferenceRequestRef.current += 1
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, DecorationSet.empty))
@@ -1332,13 +1335,13 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     const decorations = DecorationSet.create(editor.state.doc, issues.map((issue, index) => Decoration.inline(issue.from, issue.to, { class: issue.kind === 'mechanic' ? 'ai-grammar-issue' : issue.kind === 'style' ? 'ai-writing-style' : issue.kind === 'lecture' ? 'ai-lecture-connection' : 'ai-writing-structure', 'data-grammar-issue': String(index) }, { key: `${issue.from}-${issue.to}-${issue.original}-${issue.kind}` })))
     editor.view.dispatch(editor.state.tr.setMeta(grammarReviewKey, decorations))
   }
-  const visiblePaperPage = () => {
+  const visiblePaperPage = (requestedPage?: number) => {
     const documentSize = editor.state.doc.content.size
     const breaks = (paperPaginationKey.getState(editor.state) ?? DecorationSet.empty).find()
       .filter((decoration) => String(decoration.spec.key ?? '').startsWith('paper-break-'))
       .map((decoration) => decoration.from)
       .sort((left, right) => left - right)
-    if (!breaks.length) return { text: editor.getText(), from: 0, to: documentSize }
+    if (!breaks.length) return { text: editor.getText(), from: 0, to: documentSize, index: 0, adjacentContext: '' }
 
     const scrollArea = editor.view.dom.closest<HTMLElement>('.editor-page-wrap')
     const visibleCenter = scrollArea
@@ -1349,13 +1352,29 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
     pageBreaks.forEach((element, index) => {
       if (element.getBoundingClientRect().bottom <= visibleCenter) visiblePage = index + 1
     })
+    if (requestedPage !== undefined) visiblePage = Math.max(0, Math.min(requestedPage, breaks.length))
 
     const pageStarts = [0, ...breaks]
     const start = pageStarts[Math.min(visiblePage, pageStarts.length - 1)]
     const end = pageStarts[visiblePage + 1] ?? documentSize
-    return { text: editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText(), from: start, to: end }
+    const previousStart = visiblePage > 0 ? pageStarts[visiblePage - 1] : 0
+    const nextEnd = pageStarts[visiblePage + 2] ?? documentSize
+    // These are boundary context only, never targets for suggestions. Keep the
+    // closest portion of an unusually dense neighboring page so a sentence
+    // split by pagination still reads naturally without sending the full paper.
+    const previous = visiblePage > 0
+      ? editor.state.doc.textBetween(previousStart, start, '\n').trim().slice(-5_000)
+      : ''
+    const next = end < documentSize
+      ? editor.state.doc.textBetween(end, nextEnd, '\n').trim().slice(0, 5_000)
+      : ''
+    const adjacentContext = [
+      previous && `PREVIOUS PAGE (context only)\n${previous}`,
+      next && `NEXT PAGE (context only)\n${next}`,
+    ].filter(Boolean).join('\n\n')
+    return { text: editor.state.doc.textBetween(start, end, '\n').trim() || editor.getText(), from: start, to: end, index: visiblePage, adjacentContext }
   }
-  const reviewGrammar = async (quick = false) => {
+  const reviewGrammar = async (quick = false, requestedPage?: number, prefetched = false) => {
     if (!aiEnabled || !aiGrammarEnabled || !aiModelReady) return false
     // A quiet check may already be using the local model. A full review is
     // intentional, so let it take priority and ignore the older quiet result.
@@ -1375,8 +1394,10 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       // The paper is visually paginated inside one ProseMirror document. Both
       // quiet checks and AI Review must examine the complete page the person is
       // viewing, rather than always beginning at page one of a longer paper.
-      const page = visiblePaperPage()
-      const issues = extractGrammarIssues(await onGrammarReview(page.text, quick, paperContext), editor, !quick, page).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
+      const page = visiblePaperPage(requestedPage)
+      const pageKey = `${page.from}:${page.to}:${page.text}`
+      if (quick && reviewedGrammarPagesRef.current.has(pageKey)) return true
+      const issues = extractGrammarIssues(await onGrammarReview(page.text, quick, paperContext, page.adjacentContext), editor, !quick, page).filter((issue) => !ignoredGrammarKeysRef.current.has(grammarIssueKey(issue)))
       // A manual review started after a passive pass should replace that pass,
       // never be overwritten by an older background response.
       if (generation !== grammarReviewGenerationRef.current) return false
@@ -1403,6 +1424,17 @@ export function DocumentEditor({ document, spellcheck, aiEnabled, aiGrammarEnabl
       if (!quick) {
         setGrammarOpen(false)
         setSelectedGrammarIssue(null)
+      }
+      if (quick) {
+        reviewedGrammarPagesRef.current.add(pageKey)
+        // After the page the student paused on is ready, quietly prepare the
+        // next page once. Scrolling forward therefore shows existing marks,
+        // while this never turns one pause into a whole-document AI run.
+        if (!prefetched && page.to < editor.state.doc.content.size) {
+          window.setTimeout(() => {
+            if (!grammarRequestRef.current) void grammarReviewRef.current(true, page.index + 1, true)
+          }, 120)
+        }
       }
       return issues.length > 0
     } catch (error) {

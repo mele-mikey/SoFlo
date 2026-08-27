@@ -133,7 +133,7 @@ export const api = {
   gradeTeachItBackAnswer: (modelPath: string, front: string, back: string, question: string, target: string, answer: string) => call<string>('grade_teach_it_back_answer', { modelPath, front, back, question, target, answer }),
   askStudyTutor: (modelPath: string, front: string, back: string, question: string, studentWork: string, message: string, history: string, cardsContext: string) => call<string>('ask_study_tutor', { modelPath, front, back, question, studentWork, message, history, cardsContext }),
   generateStudyTutorPractice: (modelPath: string, front: string, back: string, question: string, history: string, cardsContext: string, request: string) => call<string>('generate_study_tutor_practice', { modelPath, front, back, question, history, cardsContext, request }),
-  reviewGrammarText: (modelPath: string, text: string, quick: boolean, paperContext: string) => call<string>('review_grammar_text', { modelPath, text, quick, paperContext }),
+  reviewGrammarText: (modelPath: string, text: string, quick: boolean, paperContext: string, adjacentContext = '') => call<string>('review_grammar_text', { modelPath, text, quick, paperContext, adjacentContext }),
   researchAndGradeText: (modelPath: string, text: string, paperContext: string) => call<string>('research_and_grade_text', { modelPath, text, paperContext }),
   defineWord: (modelPath: string, word: string, paperContext: string) => call<string>('define_word', { modelPath, word, paperContext }),
   aiThesaurus: (modelPath: string, word: string, paperContext: string) => call<string>('ai_thesaurus', { modelPath, word, paperContext }),
