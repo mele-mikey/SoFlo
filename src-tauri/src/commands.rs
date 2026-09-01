@@ -183,7 +183,10 @@ const LECTURE_AI_CONTEXT_NOTE_CHARS: usize = 1_200;
 const FLASHCARD_SOURCE_CHUNK_CHARS: usize = 6_000;
 const FLASHCARD_BATCH_CARD_LIMIT: usize = 10;
 const FLASHCARD_BATCH_MAX_TOKENS: u16 = 1_800;
-const FLASHCARD_TOTAL_SOURCE_CHARS: usize = 100_000;
+// Keep enough room for a full long lecture paper and several supporting
+// sources. The model still receives this in compact 6k chunks, so this raises
+// coverage without asking the GPU to hold one enormous context window.
+const FLASHCARD_TOTAL_SOURCE_CHARS: usize = 250_000;
 const DEFAULT_AI_MODEL_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
 const DEFAULT_AI_MODEL_MINIMUM_BYTES: u64 = 2_000_000_000;
 const WORD_AI_MODEL_NAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
